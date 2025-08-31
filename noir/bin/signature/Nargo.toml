@@ -1,0 +1,8 @@
+[package]
+name = "signature"
+type = "bin"
+authors = [""]
+
+[dependencies]
+utils = { path = "../../lib/utils" }
+types = { path = "../../lib/types" }

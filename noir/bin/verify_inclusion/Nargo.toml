@@ -1,0 +1,8 @@
+[package]
+name = "verify_inclusion"
+type = "bin"
+authors = [""]
+
+[dependencies]
+types = { path = "../../lib/types" }
+utils = { path = "../../lib/utils" }

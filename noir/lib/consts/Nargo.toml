@@ -1,0 +1,6 @@
+[package]
+name = "consts"
+type = "lib"
+authors = [""]
+
+[dependencies]

@@ -1,0 +1,8 @@
+[package]
+name = "utils"
+type = "lib"
+authors = [""]
+
+[dependencies]
+types = { path = "../types" }
+consts = { path = "../consts" }
