@@ -1,5 +1,3 @@
-// import { UltraHonkBackend, Barretenberg, RawBuffer } from "@aztec/bb.js";
-// import { CompiledCircuit, Noir } from "@noir-lang/noir_js";
 import { Algebra, Factory } from "sparqlalgebrajs";
 import { createHash } from "crypto";
 import { iriToField } from "./FIELD_MODULUS.js";
@@ -35,14 +33,14 @@ export function pathToCircuit(path: Algebra.PropertyPathSymbol): Path {
         imports: new Map(imports)
       }
     case Algebra.types.ALT:
-      if (path.predicate.input.length < 2)
+      if (path.input.length < 2)
         throw new Error("Alternation paths must have more than 2 inputs");
 
       const altSubPaths = path.input.map((input) => pathToCircuit(input));
       const altImports: [string, Path][] = altSubPaths.map((sp) => [`f${hash(sp.path)}`, sp]);
 
       const altRes = altImports.map((sp, i) => {
-        return `${sp}(vk[${i}], proof[${i}], [s, o], 0x0, HONK_IDENTIFIER)`;
+        return `${sp[0]}(vk[${i}], proof[${i}], [s, o], 0x0, HONK_IDENTIFIER)`;
       });
 
       return {
