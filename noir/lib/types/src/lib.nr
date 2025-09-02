@@ -1,4 +1,4 @@
-use dep::consts::MERKLE_DEPTH;
+use dep::consts::{MERKLE_DEPTH, HONK_VK_SIZE, HONK_PROOF_SIZE};
 
 pub struct Triple {
   pub terms: [Field; 4],
