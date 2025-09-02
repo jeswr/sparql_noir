@@ -1,7 +1,0 @@
-[package]
-name = "path"
-type = "bin"
-authors = [""]
-
-[dependencies]
-consts = { path = "../../lib/consts" }
