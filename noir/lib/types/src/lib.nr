@@ -15,3 +15,9 @@ pub struct Root {
   pub value: Field,
   pub signature: [u8; 64],
 }
+
+pub struct Proof {
+  pub vk: [Field; HONK_VK_SIZE],
+  pub proof: [Field; HONK_PROOF_SIZE],
+  pub public_inputs: [Field; 2],
+}
