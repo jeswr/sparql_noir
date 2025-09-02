@@ -1,20 +1,26 @@
 {
-  "hash2": {
-    "poseidon2": "dep::poseidon2::bn254::hash_2",
-    "blake2s": "std::hash::hash_to_field",
-    "pedersen": "std::hash::pedersen_hash"
+  "noir": {
+    "hash2": {
+      "poseidon2": "dep::poseidon2::bn254::hash_2",
+      "blake2s": "std::hash::hash_to_field",
+      "pedersen": "std::hash::pedersen_hash"
+    },
+    "hash4": {
+      "poseidon2": "dep::poseidon2::bn254::hash_4",
+      "blake2s": "std::hash::hash_to_field",
+      "pedersen": "std::hash::pedersen_hash"
+    },
+    "stringHash": {
+      "blake2s": "std::hash::blake2s",
+      "blake3": "std::hash::blake3",
+      "sha256": "dep::sha256::sha256::sha256"
+    },
+    "signature": {
+      "secp256k1": "std::ecdsa_secp256k1::verify_signature"
+    }
   },
-  "hash4": {
-    "poseidon2": "dep::poseidon2::bn254::hash_4",
-    "blake2s": "std::hash::hash_to_field",
-    "pedersen": "std::hash::pedersen_hash"
-  },
-  "stringHash": {
-    "blake2s": "std::hash::blake2s",
-    "blake3": "std::hash::blake3",
-    "sha256": "dep::sha256::sha256::sha256"
-  },
-  "signature": {
-    "secp256k1": "std::ecdsa_secp256k1::verify_signature"
+  "rename": {
+    "hash2": "fieldHash",
+    "hash4": "fieldHash"
   }
 }
