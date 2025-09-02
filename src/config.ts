@@ -11,7 +11,7 @@ interface IConfig {
 }
 
 export const defaultConfig: IConfig = {
-  stringHash: 'blake3',
+  stringHash: 'sha256',
   fieldHash: 'pedersen',
   merkleDepth: 11,
   signature: 'secp256k1',
