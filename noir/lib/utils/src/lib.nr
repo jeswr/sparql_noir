@@ -45,7 +45,7 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M,
 
     for i in 1..M {
         let mut max: u32 = 1;
-        
+
         for _ in 0..(M - 1 - i) {
             max *= 2;
         }
@@ -78,4 +78,10 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M,
         paths,
         direction,
     }
+}
+
+#[test]
+fn test_merkle() {
+    let merkle_info = merkle::<11, 3>([[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]);
+    assert_eq(merkle_info.root, 0x18fcec159d1858cbf97fc2257c9e319c8039d28d37c29bfdadd2528a0953421b);
 }

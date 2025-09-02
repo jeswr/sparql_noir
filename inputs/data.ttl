@@ -1,0 +1,20 @@
+@prefix ex: <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:alice ex:knows ex:bob .
+ex:bob ex:knows ex:carol .
+ex:carol ex:knows ex:alice .
+
+# Datatype and language examples
+ex:alice ex:age "42"^^xsd:integer .
+ex:bob ex:age "0042"^^xsd:integer .
+ex:carol ex:age "42.0"^^xsd:decimal .
+ex:alice ex:name "Alice"@en .
+ex:bob ex:name "Bob"@fr .
+ex:carol ex:name "Carol" .
+
+# Date/time examples and a blank node
+ex:alice ex:dob "2021-05-01T00:00:00Z"^^xsd:dateTime .
+ex:bob ex:dob "2019-01-01T00:00:00Z"^^xsd:dateTime .
+ex:alice ex:friend _:b1 .
+_:b1 ex:name "Anon" .

@@ -1,0 +1,9 @@
+[package]
+name = "encode"
+type = "bin"
+authors = [""]
+
+[dependencies]
+types = { path = "../../lib/types" }
+utils = { path = "../../lib/utils" }
+consts = { path = "../../lib/consts" }

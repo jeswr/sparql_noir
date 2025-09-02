@@ -12,8 +12,9 @@ for (const file of fs.readdirSync(path.join(__dirname, '..', 'noir'), { recursiv
     let libTemplate = fs.readFileSync(path.join(__dirname, '..', 'noir', file), 'utf8');
 
     for (const [key, value] of Object.entries(noir))
-      libTemplate = libTemplate.replace(`{{${key}}}`, value[defaultConfig[rename[key] ?? key]]);
+      libTemplate = libTemplate.replaceAll(`{{${key}}}`, value[defaultConfig[rename[key] ?? key]]);
 
-    fs.writeFileSync(path.join(__dirname, '..', 'noir', file.replace('.nr.template', '.nr')), libTemplate);
+    if (!libTemplate.includes('{{'))
+      fs.writeFileSync(path.join(__dirname, '..', 'noir', file.replace('.nr.template', '.nr')), libTemplate);
   }
 }
