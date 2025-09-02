@@ -3,6 +3,7 @@ import { Noir, type CompiledCircuit } from "@noir-lang/noir_js";
 import { readFileSync, writeFileSync, existsSync, readdirSync } from "fs";
 import { join, resolve } from "path";
 import { Algebra } from "sparqlalgebrajs";
+import { generateTestWitness, type RealTriple } from "./witness_generator.js";
 // proof bundle interface
 interface SavedProof {
   vk: string[]; // fields as decimal strings
@@ -114,8 +115,31 @@ function buildWitness(
         const m = p.name!.match(/child_(vk|proof|public_inputs)(_\d*)?/);
         if (!m) throw new Error(`Unhandled param ${p.name}`);
         const suffix = m[2] || "";
-        const bundle = childBundles[`child${suffix}`];
-        if (!bundle) throw new Error(`Missing bundle for ${p.name}`);
+        // Find the actual child directory name
+        let childDir = "";
+        if (suffix === "") {
+          // Single child case - look for one_or_more_inner_* or similar
+          childDir = Object.keys(childBundles).find(key => 
+            key.includes("one_or_more_inner_") || key.includes("zero_or_more_inner_")
+          ) || "";
+        } else {
+          // Indexed child case - look for seq_segment_* or alt_option_*
+          const index = suffix.replace("_", "");
+          childDir = Object.keys(childBundles).find(key => 
+            key.includes(`_${index}`) || key.includes(`segment_${index}`) || key.includes(`option_${index}`)
+          ) || "";
+        }
+        
+        // If not found by pattern, try direct lookup
+        if (!childDir) {
+          childDir = Object.keys(childBundles)[0] || "";
+        }
+        
+        const bundle = childBundles[childDir];
+        if (!bundle) {
+          console.log(`Available bundles: ${Object.keys(childBundles).join(", ")}`);
+          throw new Error(`Missing bundle for ${p.name} (looked for child dir: ${childDir})`);
+        }
         if (m[1] === "vk") w[p.name!] = bundle.vk;
         else if (m[1] === "proof")
           w[p.name!] = Array.from(Buffer.from(bundle.proof, "hex"));
@@ -208,9 +232,8 @@ async function provePathDirectory(pathDir: string, triple: any, s: string, o: st
         const bundle = { vk: res.publicInputs, proof: Buffer.from(res.proof).toString("hex"), publicInputs: res.publicInputs };
         saveProofBundle(full, bundle);
         
-        // cache for parent circuits
-        const suffix = dir.includes("_") ? `_${dir.split("_").pop()}` : "";
-        childBundles[`child${suffix}`] = bundle;
+        // cache for parent circuits - store with actual directory name
+        childBundles[dir] = bundle;
         
         console.log(`✓ proof for ${dir}`);
         return { bundle, circuit: dir };
@@ -245,28 +268,32 @@ async function provePathDirectory(pathDir: string, triple: any, s: string, o: st
   return { bundle: rootBundle, errors };
 }
 
-// CLI usage: node dist/generate_proofs.js ../noir/generated/knows_plus
+// CLI usage: node dist/generate_proofs.js ../noir/generated/knows_plus [testCase]
 if (import.meta.url === `file://${process.argv[1]}`) {
   const pathDir = process.argv[2];
+  const testCase = process.argv[3] as keyof typeof import('./witness_generator.js').testData || 'knows';
+  
   if (!pathDir) {
-    console.error("Usage: node generate_proofs.js <pathDir>");
+    console.error("Usage: node generate_proofs.js <pathDir> [testCase]");
+    console.error("Available test cases: knows, worksAt, sequence");
     process.exit(1);
   }
-  const dummyTriple = { 
-    terms: Array(4).fill("0"), 
-    path: Array(11).fill("0"), 
-    directions: Array(10).fill(0) 
-  };
-  provePathDirectory(resolve(pathDir), dummyTriple, "0", "0")
+  
+  console.log(`🚀 Generating proofs with real data (test case: ${testCase})`);
+  
+  const witness = generateTestWitness(testCase);
+  provePathDirectory(resolve(pathDir), witness.triple, witness.s, witness.o)
     .then(({ bundle, errors }) => {
       if (errors.length > 0) {
-        console.error("Errors:", errors);
+        console.error("❌ Errors:", errors);
         process.exit(1);
       }
-      console.log("✅ done");
-      console.log(`Root proof: ${bundle.proof.length} bytes, VK: ${bundle.vk.length} fields`);
+      console.log("✅ Proof generation completed successfully!");
+      console.log(`📊 Root proof: ${bundle.proof.length} bytes`);
+      console.log(`🔑 VK fields: ${bundle.vk.length}`);
+      console.log(`📝 Public inputs: ${bundle.publicInputs.length}`);
     })
-    .catch(e => { console.error(e); process.exit(1); });
+    .catch(e => { console.error("💥 Fatal error:", e); process.exit(1); });
 }
 
 export { provePathDirectory };
