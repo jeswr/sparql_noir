@@ -37,7 +37,7 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) {
 
     for i in 1..M {
         let mut max: u32 = 1;
-        for _ in 0..(10 - i) {
+        for _ in 0..(M - 1 - i) {
             max *= 2;
         }
 
