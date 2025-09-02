@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest",
-    "build": "tsc"
+    "build": "tsc",
+    "generate-circuits": "node dist/generate_circuits.js",
+    "generate-proofs": "node dist/generate_proofs.js",
+    "workflow": "node dist/main.js",
+    "start": "npm run build && npm run workflow"
   },
   "keywords": [],
   "author": "",
