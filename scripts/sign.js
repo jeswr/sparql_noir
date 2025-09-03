@@ -1,15 +1,52 @@
 // A script to prepare an RDF Dataset for a Merkle tree proof
 import crypto from 'crypto';
 import fs from "fs";
+import path from "path";
 import N3 from "n3";
 import dereferenceToStore from "rdf-dereference-store";
 import { RDFC10 } from "rdfjs-c14n";
 import secp256k1 from 'secp256k1';
+import { Command } from 'commander';
 import { getTermEncodingString, runJson } from '../dist/encode.js';
 import { quadToStringQuad } from 'rdf-string-ttl';
 
+// Set up CLI with Commander
+const program = new Command();
+
+program
+  .name('sign')
+  .description('Prepare an RDF Dataset for a Merkle tree proof and generate a signature')
+  .version('1.0.0')
+  .requiredOption('-i, --input <path>', 'Input RDF document path (e.g., data.ttl)')
+  .requiredOption('-o, --output <path>', 'Output JSON file path')
+  .addHelpText('after', `
+Examples:
+  $ node scripts/sign.js -i inputs/data.ttl -o output/signed.json
+
+The script will:
+  1. Parse and canonicalize the input RDF document
+  2. Generate a Merkle tree from the RDF triples
+  3. Create a cryptographic signature of the Merkle root
+  4. Output a JSON file containing the signature, public key, and metadata
+  `)
+  .parse();
+
+const options = program.opts();
+
+// Validate input file exists
+if (!fs.existsSync(options.input)) {
+  console.error(`Error: Input file '${options.input}' does not exist.`);
+  process.exit(1);
+}
+
+// Ensure output directory exists
+const outputDir = path.dirname(options.output);
+if (!fs.existsSync(outputDir)) {
+  fs.mkdirSync(outputDir, { recursive: true });
+}
+
 // Dereference, parse and canonicalize the RDF dataset
-const { store } = await dereferenceToStore.default('./inputs/data.ttl', { localFiles: true });
+const { store } = await dereferenceToStore.default(options.input, { localFiles: true });
 const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
 
 const triples = quads.map(quad => '[' +
@@ -42,7 +79,11 @@ delete jsonRes.root_u8;
 jsonRes.pubKey = Buffer.from(pubKey).toString('hex');
 jsonRes.signaure = Buffer.from(sigObj.signature).toString('hex');
 
-if (!fs.existsSync('./temp'))
-  fs.mkdirSync('./temp', { recursive: true });
+// Write the output file
+fs.writeFileSync(options.output, JSON.stringify(jsonRes, null, 2));
 
-fs.writeFileSync('./temp/main.json', JSON.stringify(jsonRes, null, 2));
+console.log(`Successfully processed RDF dataset and generated signature.`);
+console.log(`Input: ${options.input}`);
+console.log(`Output: ${options.output}`);
+console.log(`Public Key: ${jsonRes.pubKey}`);
+console.log(`Signature: ${jsonRes.signaure}`);
