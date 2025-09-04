@@ -11,6 +11,11 @@ pub struct PubKey {
   pub y: [u8; 32],
 }
 
+pub struct BabyJubJubPubKey {
+  pub x: Field,
+  pub y: Field,
+}
+
 pub struct Root {
   pub value: Field,
   pub signature: [u8; 64],
