@@ -77,7 +77,7 @@ const sigObj = secp256k1.ecdsaSign(Buffer.from(jsonRes.root_u8), privKey)
 delete jsonRes.root_u8;
 
 jsonRes.pubKey = Buffer.from(pubKey).toString('hex');
-jsonRes.signaure = Buffer.from(sigObj.signature).toString('hex');
+jsonRes.signature = Buffer.from(sigObj.signature).toString('hex');
 
 // Write the output file
 fs.writeFileSync(options.output, JSON.stringify(jsonRes, null, 2));
@@ -86,4 +86,4 @@ console.log(`Successfully processed RDF dataset and generated signature.`);
 console.log(`Input: ${options.input}`);
 console.log(`Output: ${options.output}`);
 console.log(`Public Key: ${jsonRes.pubKey}`);
-console.log(`Signature: ${jsonRes.signaure}`);
+console.log(`Signature: ${jsonRes.signature}`);

@@ -40,11 +40,11 @@ export function stringToFieldFn(str: string) {
 }
 
 export function specialLiteralHandling(term: Literal) {
-  if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#boolean' && (term.value.toLowerCase() === 'true' || term.value === '1')) {
-    return '1';
-  }
-  if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#boolean' && (term.value.toLowerCase() === 'false' || term.value === '0')) {
-    return '0';
+  if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#boolean') {
+    if (term.value.toLowerCase() === 'true' || term.value === '1')
+      return '1';
+    if (term.value.toLowerCase() === 'false' || term.value === '0')
+      return '0';
   }
   if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#integer') {
     return parseInt(term.value, 10).toString();
