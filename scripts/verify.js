@@ -10,6 +10,39 @@ const { publicKeyConvert } = secp256k1;
 // Handle different signature types for verification
 let publicKeyForCircuit, signatureForCircuit;
 
+// Parse DER-encoded ECDSA signature into 64-byte r||s
+function derToRS(derHex) {
+  const der = Buffer.from(derHex, 'hex');
+  if (der[0] !== 0x30) {
+    throw new Error('Invalid DER: expected SEQUENCE (0x30)');
+  }
+  // Skip total length (assume short form)
+  let offset = 2;
+  if (der[offset] !== 0x02) throw new Error('Invalid DER: expected INTEGER for r');
+  offset += 1;
+  const rLen = der[offset];
+  offset += 1;
+  let r = der.slice(offset, offset + rLen);
+  offset += rLen;
+  if (der[offset] !== 0x02) throw new Error('Invalid DER: expected INTEGER for s');
+  offset += 1;
+  const sLen = der[offset];
+  offset += 1;
+  let s = der.slice(offset, offset + sLen);
+
+  // Remove potential leading 0x00 used to indicate positive integers
+  if (r.length > 32 && r[0] === 0x00) r = r.slice(1);
+  if (s.length > 32 && s[0] === 0x00) s = s.slice(1);
+
+  if (r.length > 32 || s.length > 32) {
+    throw new Error('Invalid DER: r or s longer than 32 bytes');
+  }
+
+  const rPadded = Buffer.concat([Buffer.alloc(32 - r.length, 0), r]);
+  const sPadded = Buffer.concat([Buffer.alloc(32 - s.length, 0), s]);
+  return Buffer.concat([rPadded, sPadded]);
+}
+
 if (defaultConfig.signature === 'secp256k1') {
   const pubKey = Buffer.from(json.pubKey, 'hex');
   const publicKey = publicKeyConvert(pubKey, false);
@@ -33,20 +66,11 @@ if (defaultConfig.signature === 'secp256k1') {
     y: Array.from(yCoord),
   };
   
-  // Convert DER signature to 64-byte format
-  // For proper verification, we'd need to parse the DER format and extract r,s values
-  // For now, use a simplified approach
-  const sigBytes = Buffer.from(json.signature, 'hex');
-  
-  // Create a 64-byte signature array - in a real implementation, 
-  // this would properly parse the DER format to extract r and s values
-  const sig64 = Buffer.alloc(64);
-  
-  // Simple approach: use the signature bytes directly, padding if needed
-  const copyLength = Math.min(sigBytes.length, 64);
-  sigBytes.copy(sig64, 0, 0, copyLength);
-  
-  signatureForCircuit = Array.from(sig64);
+  // Convert DER signature to 64-byte r||s format for the circuit
+  const sig64Buf = json.signatureRS
+    ? Buffer.from(json.signatureRS, 'hex')
+    : derToRS(json.signature);
+  signatureForCircuit = Array.from(sig64Buf);
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }
