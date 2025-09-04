@@ -93,9 +93,34 @@ if (defaultConfig.signature === 'secp256k1') {
   // Convert root to hex for babyjubjub signing
   const messageHex = Buffer.from(jsonRes.root_u8).toString('hex');
   signature = babyjubjub.sign(privKey, messageHex);
+  // Export r||s for circuit consumption
+  // If library returns DER, convert by parsing r and s
+  function derToRS(derHex) {
+    const der = Buffer.from(derHex, 'hex');
+    if (der[0] !== 0x30) return Buffer.from(derHex, 'hex');
+    let offset = 2;
+    if (der[offset] !== 0x02) return Buffer.from(derHex, 'hex');
+    offset += 1;
+    const rLen = der[offset];
+    offset += 1;
+    let r = der.slice(offset, offset + rLen);
+    offset += rLen;
+    if (der[offset] !== 0x02) return Buffer.from(derHex, 'hex');
+    offset += 1;
+    const sLen = der[offset];
+    offset += 1;
+    let s = der.slice(offset, offset + sLen);
+    if (r.length > 32 && r[0] === 0x00) r = r.slice(1);
+    if (s.length > 32 && s[0] === 0x00) s = s.slice(1);
+    const rPadded = Buffer.concat([Buffer.alloc(32 - r.length, 0), r]);
+    const sPadded = Buffer.concat([Buffer.alloc(32 - s.length, 0), s]);
+    return Buffer.concat([rPadded, sPadded]);
+  }
+  const sig64 = derToRS(signature);
   jsonRes.pubKey = pubKey;
   // Store the message that was signed for verification
   jsonRes.messageHex = messageHex;
+  jsonRes.signatureRS = sig64.toString('hex');
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }
