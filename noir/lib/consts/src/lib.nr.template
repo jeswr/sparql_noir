@@ -15,8 +15,8 @@ pub fn hash_string<let N: u32>(input: [u8; N]) -> [u8; 32] {
   {{stringHash}}(input)
 }
 
-pub fn verify_signature(public_key: [u8; 32], root: [u8; 32], signature: [u8; 64], message: [u8; 32]) -> bool {
-  {{signature}}(public_key, root, signature, message)
+pub fn verify_signature(public_key_x: [u8; 32], public_key_y: [u8; 32], signature: [u8; 64], message: [u8; 32]) -> bool {
+  {{signature}}(public_key_x, public_key_y, signature, message)
 }
 
 // BabyJubJub signature verification using the EC library  
