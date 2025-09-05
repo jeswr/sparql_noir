@@ -67,10 +67,9 @@ const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>(
 // Add quotes around anything that looks like a hex encoding and then parse to json
 jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
 
-// Generate key pair and sign based on the configured signature type
-let privKey, pubKey;
-
 if (defaultConfig.signature === 'secp256k1') {
+  let privKey, pubKey;
+
   // Generate secp256k1 private key
   do {
     privKey = crypto.randomBytes(32)
@@ -88,13 +87,17 @@ if (defaultConfig.signature === 'secp256k1') {
 } else if (defaultConfig.signature === 'babyjubjub') {
   // Generate BabyJubJub key pair
   const keyPair = babyjubjub.generateSignatureKeyPair();
-  privKey = keyPair.signingKey;
-  pubKey = keyPair.verifyingKey;
+  const privKey = keyPair.signingKey;
+  const pubKey = babyjubjub.privateKeyToPublicKey(privKey);
 
   // Convert root to hex for babyjubjub signing
   const messageHex = Buffer.from(jsonRes.root_u8).toString('hex');
   jsonRes.signature = babyjubjub.sign(privKey, messageHex);
-  jsonRes.pubKey = pubKey;
+  jsonRes.pubKey = {
+    // Hex encoded beginning with 0x
+    x: `0x${pubKey.x}`,
+    y: `0x${pubKey.y}`,
+  };
   // Store the message that was signed for verification
   jsonRes.messageHex = messageHex;
 
