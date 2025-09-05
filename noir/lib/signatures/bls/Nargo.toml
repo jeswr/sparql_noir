@@ -1,0 +1,7 @@
+[package]
+name = "bls"
+type = "bin"
+authors = [""]
+
+[dependencies]
+bls = { sha = "a3d19b69b4cd8698afd8f3ad8ca2a77495c58c0e", git = "https://github.com/onurinanc/noir-bls-signature" }

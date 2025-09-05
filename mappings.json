@@ -15,7 +15,8 @@
     },
     "signature": {
       "secp256k1": "std::ecdsa_secp256k1::verify_signature",
-      "babyjubjub": "verify_babyjubjub_signature"
+      "babyjubjub": "verify_babyjubjub_signature",
+      "bls": "verify_bls_signature"
     }
   },
   "rename": {

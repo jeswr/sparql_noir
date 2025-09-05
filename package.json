@@ -7,7 +7,8 @@
     "build:tsc": "tsc",
     "build:noir": "node scripts/setup.js",
     "build": "npm run build:tsc && npm run build:noir",
-    "example:sign": "node scripts/sign.js -i inputs/data.ttl -o temp/main.json"
+    "example:sign": "node scripts/sign.js -i inputs/data.ttl -o temp/main.json",
+    "example:verify": "node scripts/verify.js -i temp/main.json"
   },
   "keywords": [],
   "author": "",
@@ -19,6 +20,7 @@
     "@comunica/expression-evaluator": "^3.2.1",
     "@noir-lang/noir_js": "^1.0.0-beta.11",
     "babyjubjub-ecdsa": "^1.2.0",
+    "bls-signatures": "^2.0.3",
     "commander": "^14.0.0",
     "elliptic": "^6.6.1",
     "n3": "^1.26.0",
