@@ -48,100 +48,68 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-// Main async function to handle BLS operations
-async function main() {
-  // Dereference, parse and canonicalize the RDF dataset
-  const { store } = await dereferenceToStore.default(options.input, { localFiles: true });
-  const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
 
-  const triples = quads.map(quad => '[' +
-    [
-      getTermEncodingString(quad.subject),
-      getTermEncodingString(quad.predicate),
-      getTermEncodingString(quad.object),
-      getTermEncodingString(quad.graph)].join(',')
-    +
-    ']');
+// Dereference, parse and canonicalize the RDF dataset
+const { store } = await dereferenceToStore.default(options.input, { localFiles: true });
+const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
 
-  const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>([${triples.join(',')}])`);
+const triples = quads.map(quad => '[' +
+  [
+    getTermEncodingString(quad.subject),
+    getTermEncodingString(quad.predicate),
+    getTermEncodingString(quad.object),
+    getTermEncodingString(quad.graph)].join(',')
+  +
+  ']');
 
-  // Add quotes around anything that looks like a hex encoding and then parse to json
-  jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
+const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>([${triples.join(',')}])`);
 
-  // Generate key pair and sign based on the configured signature type
-  let privKey, pubKey, signature;
+// Add quotes around anything that looks like a hex encoding and then parse to json
+jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
 
-  if (defaultConfig.signature === 'secp256k1') {
-    // Generate secp256k1 private key
-    do {
-      privKey = crypto.randomBytes(32)
-    } while (!secp256k1.privateKeyVerify(privKey))
+// Generate key pair and sign based on the configured signature type
+let privKey, pubKey, signature;
 
-    // get the public key in a compressed format
-    pubKey = secp256k1.publicKeyCreate(privKey)
+if (defaultConfig.signature === 'secp256k1') {
+  // Generate secp256k1 private key
+  do {
+    privKey = crypto.randomBytes(32)
+  } while (!secp256k1.privateKeyVerify(privKey))
 
-    // sign the message 
-    const messageBytes = Buffer.from(jsonRes.root_u8);
-    const sigObj = secp256k1.ecdsaSign(messageBytes, privKey)
-    signature = Buffer.from(sigObj.signature).toString('hex');
-    jsonRes.pubKey = Buffer.from(pubKey).toString('hex');
-    // Store the message that was signed for verification
-    jsonRes.messageHex = messageBytes.toString('hex');
-  } else if (defaultConfig.signature === 'babyjubjub') {
-    // Generate BabyJubJub key pair
-    const keyPair = babyjubjub.generateSignatureKeyPair();
-    privKey = keyPair.signingKey;
-    pubKey = keyPair.verifyingKey;
-    
-    // Convert root to hex for babyjubjub signing
-    const messageHex = Buffer.from(jsonRes.root_u8).toString('hex');
-    signature = babyjubjub.sign(privKey, messageHex);
-    jsonRes.pubKey = pubKey;
-    // Store the message that was signed for verification
-    jsonRes.messageHex = messageHex;
-  } else if (defaultConfig.signature === 'bls') {
-    // Generate BLS key pair
-    const BLS = await bls();
-    
-    // Generate a random 32-byte seed for BLS key generation
-    const seed = crypto.randomBytes(32);
-    const sk = BLS.AugSchemeMPL.key_gen(seed);
-    
-    // Get the public key (G1 point)
-    const pk = sk.get_g1();
-    
-    // Convert root to Uint8Array for BLS signing
-    const messageBytes = new Uint8Array(jsonRes.root_u8);
-    
-    // Sign the message using BLS
-    const blsSignature = BLS.AugSchemeMPL.sign(sk, messageBytes);
-    
-    // Convert public key and signature to hex strings
-    // BLS public key is a G1 point (48 bytes compressed)
-    pubKey = Buffer.from(pk.serialize()).toString('hex');
-    
-    // BLS signature is a G2 point (96 bytes compressed)  
-    signature = Buffer.from(blsSignature.serialize()).toString('hex');
-    
-    jsonRes.pubKey = pubKey;
-    // Store the message that was signed for verification
-    jsonRes.messageHex = Buffer.from(messageBytes).toString('hex');
-  } else {
-    throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
-  }
+  // get the public key in a compressed format
+  pubKey = secp256k1.publicKeyCreate(privKey)
 
-  delete jsonRes.root_u8;
-  jsonRes.signature = signature;
+  // sign the message 
+  const messageBytes = Buffer.from(jsonRes.root_u8);
+  const sigObj = secp256k1.ecdsaSign(messageBytes, privKey)
+  signature = Buffer.from(sigObj.signature).toString('hex');
+  jsonRes.pubKey = Buffer.from(pubKey).toString('hex');
+  // Store the message that was signed for verification
+  jsonRes.messageHex = messageBytes.toString('hex');
+} else if (defaultConfig.signature === 'babyjubjub') {
+  // Generate BabyJubJub key pair
+  const keyPair = babyjubjub.generateSignatureKeyPair();
+  privKey = keyPair.signingKey;
+  pubKey = keyPair.verifyingKey;
 
-  // Write the output file
-  fs.writeFileSync(options.output, JSON.stringify(jsonRes, null, 2));
-
-  console.log(`Successfully processed RDF dataset and generated signature.`);
-  console.log(`Input: ${options.input}`);
-  console.log(`Output: ${options.output}`);
-  console.log(`Public Key: ${jsonRes.pubKey}`);
-  console.log(`Signature: ${jsonRes.signature}`);
+  // Convert root to hex for babyjubjub signing
+  const messageHex = Buffer.from(jsonRes.root_u8).toString('hex');
+  signature = babyjubjub.sign(privKey, messageHex);
+  jsonRes.pubKey = pubKey;
+  // Store the message that was signed for verification
+  jsonRes.messageHex = messageHex;
+} else {
+  throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }
 
-// Run the main function
-main().catch(console.error);
+delete jsonRes.root_u8;
+jsonRes.signature = signature;
+
+// Write the output file
+fs.writeFileSync(options.output, JSON.stringify(jsonRes, null, 2));
+
+console.log(`Successfully processed RDF dataset and generated signature.`);
+console.log(`Input: ${options.input}`);
+console.log(`Output: ${options.output}`);
+console.log(`Public Key: ${jsonRes.pubKey}`);
+console.log(`Signature: ${jsonRes.signature}`);

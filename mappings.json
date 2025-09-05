@@ -14,9 +14,8 @@
       "sha256": "dep::sha256::sha256::sha256"
     },
     "signature": {
-      "secp256k1": "std::ecdsa_secp256k1::verify_signature",
-      "babyjubjub": "verify_babyjubjub_signature",
-      "bls": "verify_bls_signature"
+      "secp256k1": "secp256k1",
+      "babyjubjub": "babyjubjub"
     }
   },
   "rename": {

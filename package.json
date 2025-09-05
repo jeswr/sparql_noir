@@ -8,7 +8,8 @@
     "build:noir": "node scripts/setup.js",
     "build": "npm run build:tsc && npm run build:noir",
     "example:sign": "node scripts/sign.js -i inputs/data.ttl -o temp/main.json",
-    "example:verify": "node scripts/verify.js -i temp/main.json"
+    "example:verify": "node scripts/verify.js -i temp/main.json",
+    "test": "npm run example:sign && npm run example:verify"
   },
   "keywords": [],
   "author": "",
