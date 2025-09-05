@@ -77,15 +77,14 @@ if (defaultConfig.signature === 'secp256k1') {
   } while (!secp256k1.privateKeyVerify(privKey))
 
   // get the public key in a compressed format
-  pubKey = secp256k1.publicKeyCreate(privKey)
+  pubKey = secp256k1.publicKeyCreate(privKey, false)
 
-  // sign the message 
-  const messageBytes = Buffer.from(jsonRes.root_u8);
-  const sigObj = secp256k1.ecdsaSign(messageBytes, privKey)
-  signature = Buffer.from(sigObj.signature).toString('hex');
-  jsonRes.pubKey = Buffer.from(pubKey).toString('hex');
-  // Store the message that was signed for verification
-  jsonRes.messageHex = messageBytes.toString('hex');
+  const sigObj = secp256k1.ecdsaSign(Buffer.from(jsonRes.root_u8), privKey)
+  jsonRes.signature = Array.from(sigObj.signature);
+  jsonRes.pubKey = {
+    x: Array.from(pubKey.slice(1, 33)),
+    y: Array.from(pubKey.slice(33, 65)),
+  };
 } else if (defaultConfig.signature === 'babyjubjub') {
   // Generate BabyJubJub key pair
   const keyPair = babyjubjub.generateSignatureKeyPair();
@@ -94,16 +93,44 @@ if (defaultConfig.signature === 'secp256k1') {
 
   // Convert root to hex for babyjubjub signing
   const messageHex = Buffer.from(jsonRes.root_u8).toString('hex');
-  signature = babyjubjub.sign(privKey, messageHex);
+  jsonRes.signature = babyjubjub.sign(privKey, messageHex);
   jsonRes.pubKey = pubKey;
   // Store the message that was signed for verification
   jsonRes.messageHex = messageHex;
+
+
+  // For BabyJubJub, we need to convert the hex public key to appropriate format
+  // The pubKey from babyjubjub is uncompressed (130 hex chars = 65 bytes)
+  // const pubKeyBytes = Buffer.from(json.pubKey, 'hex');
+
+  // // Extract both X and Y coordinates (32 bytes each) for the public key
+  // const xCoord = pubKeyBytes.slice(1, 33);  // Skip 0x04 prefix, take X coordinate  
+  // const yCoord = pubKeyBytes.slice(33, 65); // Take Y coordinate
+
+  // publicKeyForCircuit = {
+  //   x: Array.from(xCoord),
+  //   y: Array.from(yCoord),
+  // };
+
+  // // Convert DER signature to 64-byte format
+  // // For proper verification, we'd need to parse the DER format and extract r,s values
+  // // For now, use a simplified approach
+  // const sigBytes = Buffer.from(json.signature, 'hex');
+
+  // // Create a 64-byte signature array - in a real implementation, 
+  // // this would properly parse the DER format to extract r and s values
+  // const sig64 = Buffer.alloc(64);
+
+  // // Simple approach: use the signature bytes directly, padding if needed
+  // const copyLength = Math.min(sigBytes.length, 64);
+  // sigBytes.copy(sig64, 0, 0, copyLength);
+
+  // signatureForCircuit = Array.from(sig64);
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }
 
 delete jsonRes.root_u8;
-jsonRes.signature = signature;
 
 // Write the output file
 fs.writeFileSync(options.output, JSON.stringify(jsonRes, null, 2));
@@ -111,5 +138,3 @@ fs.writeFileSync(options.output, JSON.stringify(jsonRes, null, 2));
 console.log(`Successfully processed RDF dataset and generated signature.`);
 console.log(`Input: ${options.input}`);
 console.log(`Output: ${options.output}`);
-console.log(`Public Key: ${jsonRes.pubKey}`);
-console.log(`Signature: ${jsonRes.signature}`);
