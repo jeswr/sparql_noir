@@ -68,7 +68,7 @@ const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>(
 jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
 
 // Generate key pair and sign based on the configured signature type
-let privKey, pubKey, signature;
+let privKey, pubKey;
 
 if (defaultConfig.signature === 'secp256k1') {
   // Generate secp256k1 private key

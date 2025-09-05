@@ -5,9 +5,10 @@ import { UltraHonkBackend } from '@aztec/bb.js';
 
 // Proceed with circuit verification for all signature types
 const noir = new Noir(verifyCircuit);
-const backend = new UltraHonkBackend(verifyCircuit.bytecode);
+const backend = new UltraHonkBackend(verifyCircuit.bytecode, { threads: 12 });
 
 try {
+  console.time('Witness generation');
   const { witness } = await noir.execute({
     public_key: json.pubKey,
     root: {
@@ -15,11 +16,19 @@ try {
       signature: json.signature,
     },
   });
+  console.timeEnd('Witness generation');
 
   // Generate and verify the proof using UltraHonkBackend
+  console.time('Proof generation');
   const proof = await backend.generateProof(witness);
+  console.timeEnd('Proof generation');
+
+  console.time('Proof verification');
   const isValid = await backend.verifyProof(proof);
-  console.log('Circuit verification valid:', isValid);
+  console.timeEnd('Proof verification');
+
+  if (!isValid)
+    throw new Error('Circuit verification failed');
 } catch (error) {
   console.log('Circuit verification failed:', error.message);
 }
