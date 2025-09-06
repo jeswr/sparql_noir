@@ -4,12 +4,14 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "build:signature": "cd noir/bin/signature && nargo build",
     "build:tsc": "tsc",
     "build:noir": "node scripts/setup.js",
-    "build": "npm run build:tsc && npm run build:noir",
+    "build": "npm run build:tsc && npm run build:noir && npm run build:signature",
     "example:sign": "node scripts/sign.js -i inputs/data.ttl -o temp/main.json",
     "example:verify": "node scripts/verify.js -i temp/main.json",
-    "test": "npm run example:sign && npm run example:verify"
+    "test": "npm run example:sign && npm run example:verify",
+    "e2e": "npm run build && npm run test"  
   },
   "keywords": [],
   "author": "",
