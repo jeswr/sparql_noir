@@ -4,6 +4,22 @@ use std::default::Default;
 use std::hash::Hasher;
 
 use ec::{consts::te::baby_jubjub, tecurve::affine::Point as TEPoint};
+// use bignum::{derive_bignum, BigNum, BigNumTrait};
+// // use bignum::bignum::BigNum;
+
+// pub(crate) comptime fn derive_bignum(
+//     strukt: TypeDefinition,
+//     N: u32,
+//     MOD_BITS: u32,
+//     params: Quoted,
+// ) -> Quoted
+
+// #[derive_bignum(4, 377, quote {BLS12_377_Fq_PARAMS})]
+// pub struct MyBignum {
+//     pub limbs: [Field; 4],
+// }
+
+// type U256 = BigNum<3, 257, U256Params>;
 
 pub fn eddsa_verify<H>(
     pub_key_x: Field,
@@ -50,41 +66,61 @@ where
     left.eq(right)
 }
 
-// Returns the public key of the given secret key as (pub_key_x, pub_key_y)
-pub fn eddsa_to_pub(secret: Field) -> (Field, Field) {
-    let bjj = baby_jubjub();
-    let pub_key = bjj.curve.mul(secret, bjj.curve.gen);
-    (pub_key.x, pub_key.y)
-}
+// unconstrained pub fn field_mod(x: Field, m: Field) -> Field {
+//     // Convert Field values to big-endian byte arrays (as required by bignum)
+//     let x_bytes = x.to_be_bytes::<32>();
+//     let m_bytes = m.to_be_bytes::<32>();
+    
+//     // Convert byte arrays to U256 BigNum values
+//     let x_bignum = BigNum::fr(x_bytes);
+//     let m_bignum = U256::from_be_bytes(m_bytes);
+    
+//     // Perform modulo operation using bignum library
+//     let result_bignum = x_bignum.umod(m_bignum);
+    
+//     // Convert result back to Field via little-endian bytes
+//     let result_bytes = result_bignum.to_le_bytes::<32>();
+//     Field::from_le_bytes(result_bytes)
+// }
 
 mod tests {
     use poseidon::poseidon::PoseidonHasher;
     use poseidon::poseidon2::Poseidon2Hasher;
 
-    use ec::{consts::te::baby_jubjub, tecurve::affine::Point as TEPoint};
+    use ec::{consts::te::baby_jubjub};
 
-    use super::{eddsa_to_pub, eddsa_verify};
+    use super::{eddsa_verify};
 
     #[test]
     fn main() {
         let priv_key_a = 123;
-        let priv_key_b = 456;
         let msg = 789;
 
         let bjj = baby_jubjub();
 
         let pub_key_a = bjj.curve.mul(priv_key_a, bjj.curve.gen);
-        let pub_key_b = bjj.curve.mul(priv_key_b, bjj.curve.gen);
-        let (pub_key_a_x, pub_key_a_y) = eddsa_to_pub(priv_key_a);
-        let (pub_key_b_x, pub_key_b_y) = eddsa_to_pub(priv_key_b);
-        assert(TEPoint::new(pub_key_a_x, pub_key_a_y) == pub_key_a);
-        assert(TEPoint::new(pub_key_b_x, pub_key_b_y) == pub_key_b);
         // Manually computed as fields can't use modulo. Importantantly the commitment is within
         // the subgroup order. Note that choice of hash is flexible for this step.
-        // let r_a = hash::pedersen_commitment([_priv_key_a, msg])[0] % bjj.suborder; // modulus computed manually
+        // println(std::hash::pedersen_commitment([priv_key_a, msg]).x); // modulus computed manually
+        // println(bjj.suborder); // modulus computed manually
+
+        let x = std::hash::pedersen_commitment([priv_key_a, msg]).x;
+
+        // SAFETY: Using unconstrained functions for debugging/testing purposes only
+        // unsafe {
+        //     println("x");
+        //     println(1414770703199880747815475415092878800081323795074043628810774576767372531818);
+        //     println(field_mod(x, bjj.suborder));
+        // }
+
+
+        // println(std::hash::pedersen_commitment([priv_key_a, msg]).x as u128 % bjj.suborder as u128);
+
         let r_a = 1414770703199880747815475415092878800081323795074043628810774576767372531818;
         // let r_b = hash::pedersen_commitment([_priv_key_b, msg])[0] % bjj.suborder; // modulus computed manually
         let r_b = 571799555715456644614141527517766533395606396271089506978608487688924659618;
+
+        println(r_a);
 
         let r8_a = bjj.curve.mul(r_a, bjj.base8);
         let r8_b = bjj.curve.mul(r_b, bjj.base8);
@@ -107,6 +143,17 @@ mod tests {
         // let s_b = (r_b + _priv_key_b * h_b) % bjj.suborder; // modulus computed manually
         let s_b = 1646085314320208098241070054368798527940102577261034947654839408482102287019;
         // User A verifies their signature over the message
+
+        println(pub_key_a.x);
+        println(pub_key_a.y);
+        println(s_a);
+        println(r8_a.x);
+        println(r8_a.y);
+        println(msg);
+        println(bjj.curve.gen);
+        println(eddsa_verify::<PoseidonHasher>(pub_key_a.x, pub_key_a.y, s_a, r8_a.x, r8_a.y, msg));
+
+
         assert(eddsa_verify::<PoseidonHasher>(pub_key_a.x, pub_key_a.y, s_a, r8_a.x, r8_a.y, msg));
         // User B's signature over the message can't be used with user A's pub key
         assert(!eddsa_verify::<PoseidonHasher>(pub_key_a.x, pub_key_a.y, s_b, r8_b.x, r8_b.y, msg));
