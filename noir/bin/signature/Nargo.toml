@@ -6,3 +6,4 @@ authors = [""]
 [dependencies]
 utils = { path = "../../lib/utils" }
 types = { path = "../../lib/types" }
+consts = { path = "../../lib/consts" }
