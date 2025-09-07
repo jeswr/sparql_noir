@@ -1,7 +1,9 @@
 use ec::{consts::te::baby_jubjub, tecurve::affine::Point as TEPoint};
 use poseidon::poseidon::PoseidonHasher;
+use poseidon::poseidon2::Poseidon2Hasher;
 use std::default::Default;
 use std::hash::Hasher;
+// use std::hash::sha2::Sha2Hasher;
 
 pub struct PubKey {
     pub x: Field,
@@ -58,5 +60,5 @@ where
 
 pub fn verify_signature(public_key: PubKey, signature: Signature, message: Field) -> bool {
     // TODO: Work out if this is the correct hasher / make it configurable
-    eddsa_verify::<PoseidonHasher>(public_key, signature, message)
+    eddsa_verify::<Poseidon2Hasher>(public_key, signature, message)
 }

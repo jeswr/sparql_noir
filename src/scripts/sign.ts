@@ -13,6 +13,7 @@ import { getTermEncodingString, runJson } from '../encode.js';
 import { quadToStringQuad } from 'rdf-string-ttl';
 import { defaultConfig } from '../config.js';
 import { EdDSAPoseidon } from "@zk-kit/eddsa-poseidon";
+import { Base8, mulPointEscalar,  } from "@zk-kit/baby-jubjub";
 
 // Set up CLI with Commander
 const program = new Command();
@@ -95,6 +96,32 @@ if (defaultConfig.signature === 'secp256k1' || defaultConfig.signature === 'secp
   jsonRes.pubKey = {
     x: '0x' + ed.publicKey[0].toString(16),
     y: '0x' + ed.publicKey[1].toString(16),
+  }
+} else if (defaultConfig.signature === 'babyjubjubOpt') {
+  const ed = new EdDSAPoseidon(privKey)
+  const signature = ed.signMessage(jsonRes.root)
+  const left = mulPointEscalar(Base8, signature.S)
+  const k8 = mulPointEscalar(ed.publicKey, 8n)
+  jsonRes.signature = {
+    r: {
+      x: '0x' + signature.R8[0].toString(16),
+      y: '0x' + signature.R8[1].toString(16),
+    },
+    left: {
+      x: '0x' + left[0].toString(16),
+      y: '0x' + left[1].toString(16),
+    },
+    s: '0x' + signature.S.toString(16),
+  }
+  jsonRes.pubKey = {
+    value: {
+      x: '0x' + ed.publicKey[0].toString(16),
+      y: '0x' + ed.publicKey[1].toString(16),
+    },
+    k8: {
+      x: '0x' + k8[0].toString(16),
+      y: '0x' + k8[1].toString(16),
+    },
   }
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);

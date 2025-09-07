@@ -1,7 +1,7 @@
 export const stringHashes = ['blake2s', 'blake3', 'sha256'] as const;
 export const fieldHashes = ['pedersen', 'blake2s'] as const;
-export const merkleDepths = [11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31] as const;
-export const signatures = ['secp256k1', 'secp256r1', 'babyjubjub', 'bls'] as const;
+export const merkleDepths = [9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31] as const;
+export const signatures = ['secp256k1', 'secp256r1', 'babyjubjub', 'babyjubjubOpt', 'bls'] as const;
 
 interface IConfig {
   stringHash: (typeof stringHashes)[number];
@@ -14,7 +14,7 @@ export const defaultConfig: IConfig = {
   stringHash: 'sha256',
   fieldHash: 'pedersen',
   merkleDepth: 11,
-  signature: 'secp256r1',
+  signature: 'babyjubjubOpt',
 }
 
 export function *configGenerator(): Generator<IConfig> {

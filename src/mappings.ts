@@ -16,7 +16,8 @@ export default {
     signature: {
       secp256k1: "secp256k1",
       secp256r1: "secp256r1",
-      babyjubjub: "babyjubjub"
+      babyjubjub: "babyjubjub",
+      babyjubjubOpt: "babyjubjubOpt"
     }
   },
   rename: {
