@@ -6,6 +6,8 @@ use ec::{consts::te::baby_jubjub, tecurve::affine::Point as TEPoint};
 use poseidon::poseidon::PoseidonHasher;
 use std::default::Default;
 use std::hash::Hasher;
+// Testing which embedded curve is used - should be Baby Jubjub or Grumpkin
+use std::embedded_curve_ops::{EmbeddedCurvePoint, EmbeddedCurveScalar, multi_scalar_mul, embedded_curve_add};
 
 // Public key structure
 pub struct PubKey {
@@ -243,4 +245,27 @@ fn test_deterministic_signatures() {
     assert(sig1.r8.eq(sig2.r8));
     assert(sig1.s == sig2.s);
     assert(pub1.value.eq(pub2.value));
+}
+
+// Test which embedded curve is used
+#[test]
+fn test_which_embedded_curve() {
+    // Baby Jubjub failed, let's try Grumpkin
+    // Grumpkin generator: (1, 17631683881184975370165255887551781615748388533673675138860)
+    let grumpkin_gen_x = 1;
+    let grumpkin_gen_y = 17631683881184975370165255887551781615748388533673675138860;
+    
+    let grumpkin_generator = EmbeddedCurvePoint {
+        x: grumpkin_gen_x,
+        y: grumpkin_gen_y,
+        is_infinite: false
+    };
+    
+    let scalar = EmbeddedCurveScalar::from_field(2);
+    
+    // This will fail if embedded curve is not Grumpkin
+    let grumpkin_result = multi_scalar_mul([grumpkin_generator], [scalar]);
+    
+    // If we get here, the embedded curve IS Grumpkin
+    assert(!grumpkin_result.is_infinite);
 }

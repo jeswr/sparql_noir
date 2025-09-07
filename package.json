@@ -12,7 +12,16 @@
     "example:sign": "node dist/scripts/sign.js -i inputs/data.ttl -o temp/main.json",
     "example:verify": "node dist/scripts/verify.js -i temp/main.json",
     "example": "npm run example:sign && npm run example:verify",
-    "e2e": "npm run build && npm run example"
+    "e2e": "npm run build && npm run example",
+    "benchmark": "node scripts/benchmark.js",
+    "benchmark:signature": "npm run benchmark noir/bin/signature",
+    "benchmark:encode": "npm run benchmark noir/bin/encode",
+    "benchmark:verify": "npm run benchmark noir/bin/verify_inclusion",
+    "benchmark:all": "npm run benchmark:signature && npm run benchmark:encode && npm run benchmark:verify",
+    "benchmark:list": "npm run benchmark list-backends",
+    "benchmark:help": "npm run benchmark install-help",
+    "benchmark:simple": "npx tsx scripts/simple-benchmark.ts",
+    "benchmark:simple:signature": "npx tsx scripts/simple-benchmark.ts noir/bin/signature"
   },
   "keywords": [],
   "author": "",
@@ -46,6 +55,7 @@
     "jest": "^30.1.1",
     "ts-jest": "^29.4.1",
     "ts-node": "^10.9.2",
+    "tsx": "^4.6.0",
     "typescript": "^5.9.2"
   }
 }

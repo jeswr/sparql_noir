@@ -13,7 +13,7 @@ import { getTermEncodingString, runJson } from '../encode.js';
 import { quadToStringQuad } from 'rdf-string-ttl';
 import { defaultConfig } from '../config.js';
 import { EdDSAPoseidon } from "@zk-kit/eddsa-poseidon";
-import { Base8, mulPointEscalar,  } from "@zk-kit/baby-jubjub";
+import { Base8, mulPointEscalar } from "@zk-kit/baby-jubjub";
 
 // Set up CLI with Commander
 const program = new Command();
@@ -100,8 +100,12 @@ if (defaultConfig.signature === 'secp256k1' || defaultConfig.signature === 'secp
 } else if (defaultConfig.signature === 'babyjubjubOpt') {
   const ed = new EdDSAPoseidon(privKey)
   const signature = ed.signMessage(jsonRes.root)
+
   const left = mulPointEscalar(Base8, signature.S)
+
+  // In a production setting the verifier needs to check this is correct
   const k8 = mulPointEscalar(ed.publicKey, 8n)
+  
   jsonRes.signature = {
     r: {
       x: '0x' + signature.R8[0].toString(16),
