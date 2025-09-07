@@ -7,9 +7,9 @@ import dereferenceToStore from "rdf-dereference-store";
 import { RDFC10 } from "rdfjs-c14n";
 import secp256k1 from 'secp256k1';
 import { Command } from 'commander';
-import { getTermEncodingString, runJson } from '../dist/encode.js';
+import { getTermEncodingString, runJson } from '../encode.js';
 import { quadToStringQuad } from 'rdf-string-ttl';
-import { defaultConfig } from '../dist/config.js';
+import { defaultConfig } from '../config.js';
 
 // Set up CLI with Commander
 const program = new Command();
