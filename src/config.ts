@@ -14,7 +14,7 @@ export const defaultConfig: IConfig = {
   stringHash: 'blake2s',
   fieldHash: 'pedersen',
   merkleDepth: 11,
-  signature: 'babyjubjub',
+  signature: 'secp256k1',
 }
 
 export function *configGenerator(): Generator<IConfig> {

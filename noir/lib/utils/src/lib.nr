@@ -80,19 +80,6 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M,
     }
 }
 
-pub struct eddsaPub {
-    pub pub_key: Point,
-    pub r8: std::hash::EmbeddedCurvePoint,
-}
-
-pub fn eddsa_to_pub(private_key: Field, msg: Field) -> eddsaPub {
-    let bjj = baby_jubjub();
-    eddsaPub {
-        pub_key: bjj.curve.mul(private_key, bjj.curve.gen),
-        r8: std::hash::pedersen_commitment([private_key, msg]),
-    }
-}
-
 #[test]
 fn test_merkle() {
     let merkle_info = merkle::<11, 3>([[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]);
