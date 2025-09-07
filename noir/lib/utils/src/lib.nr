@@ -1,5 +1,7 @@
 use dep::types::{Root, Triple};
 use dep::consts;
+use ec::{consts::te::baby_jubjub, tecurve::affine::Point};
+use std::hash::Hasher;
 
 pub struct MerkleInfo<let M: u32, let N: u32> {
     pub triples: [[Field; 4]; N],
@@ -75,6 +77,19 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M,
         root_u8,
         paths,
         direction,
+    }
+}
+
+pub struct eddsaPub {
+    pub pub_key: Point,
+    pub r8: std::hash::EmbeddedCurvePoint,
+}
+
+pub fn eddsa_to_pub(private_key: Field, msg: Field) -> eddsaPub {
+    let bjj = baby_jubjub();
+    eddsaPub {
+        pub_key: bjj.curve.mul(private_key, bjj.curve.gen),
+        r8: std::hash::pedersen_commitment([private_key, msg]),
     }
 }
 

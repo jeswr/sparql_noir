@@ -1,5 +1,6 @@
 // Logic derived from tests in https://github.com/noir-lang/eddsa/blob/master/src/lib.nr
 pub mod eddsa;
+pub mod ed;
 // pub mod bn;
 use eddsa::eddsa_verify;
 use poseidon::poseidon::PoseidonHasher;

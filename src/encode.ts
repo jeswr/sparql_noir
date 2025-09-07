@@ -29,10 +29,12 @@ export function run(fn: string) {
 }
 
 export function runJson(fn: string) {
-  let res = run(fn);
-  // Put strings around keys of objects if they are not already in quotes
-  res = res.replace(/[a-zA-Z0-9_]+(?=:)/g, match => `"${match}"`);
-  return JSON.parse(res.slice(res.indexOf('{'), res.lastIndexOf('}') + 1));
+  let res = run(fn)
+    // Put strings around keys of objects if they are not already in quotes
+    .replace(/[a-zA-Z0-9_]+(?=:)/g, match => `"${match}"`)
+    // Remove the struct names to make it valid JSON
+    .replace(/[a-zA-Z]+ (?={)/g, '');
+  return JSON.parse(res);
 }
 
 export function stringToFieldFn(str: string) {
