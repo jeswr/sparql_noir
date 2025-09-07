@@ -1,7 +1,5 @@
 // Logic derived from tests in https://github.com/noir-lang/eddsa/blob/master/src/lib.nr
 pub mod eddsa;
-pub mod ed;
-// pub mod bn;
 use eddsa::eddsa_verify;
 use poseidon::poseidon::PoseidonHasher;
 
@@ -26,5 +24,5 @@ pub fn verify_signature(
     message: Field,
 ) -> bool {
     // TODO: Work out if this is the correct hasher / make it configurable
-    eddsa_verify::<PoseidonHasher>(public_key.x, public_key.y, signature.r.x, signature.r.y, signature.s, message)
+    eddsa_verify::<PoseidonHasher>(public_key.x, public_key.y, signature.s, signature.r.x, signature.r.y, message)
 }

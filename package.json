@@ -4,6 +4,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/postinstall.js",
     "build:signature": "cd noir/bin/signature && nargo build",
     "build:tsc": "tsc",
     "build:noir": "node dist/scripts/setup.js",

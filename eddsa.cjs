@@ -5,7 +5,7 @@
 
 const { EdDSAPoseidon, derivePublicKey, signMessage, verifySignature } = require("@zk-kit/eddsa-poseidon");
 const ed = new EdDSAPoseidon('0x' + BigInt(123).toString(16));
-
+const msg = 14271713263066645060561179139372875058535071287055680648183956122812668267828n;
 
 // const privateKey = Buffer.from([123]);
 // privateKey.writeUInt32BE(123, 28);
@@ -13,7 +13,7 @@ const ed = new EdDSAPoseidon('0x' + BigInt(123).toString(16));
 const publicKey = ed.publicKey;
 console.log(publicKey.map(p => '0x' + p.toString(16)));
 
-const signature = ed.signMessage(789n);
+const signature = ed.signMessage(msg);
 console.log({
   r: {
     x: '0x' + signature.R8[0].toString(16),
@@ -22,7 +22,7 @@ console.log({
   s: '0x' + signature.S.toString(16)
 });
 
-const isValid = verifySignature(789n, signature, publicKey);
+const isValid = verifySignature(msg, signature, publicKey);
 console.log(isValid);
 
 // 0x16b051f37589e0dcf4ad3c415c090798c10d3095bedeedabfcc709ad787f3507

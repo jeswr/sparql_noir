@@ -10,6 +10,7 @@ import { Command } from 'commander';
 import { getTermEncodingString, runJson } from '../encode.js';
 import { quadToStringQuad } from 'rdf-string-ttl';
 import { defaultConfig } from '../config.js';
+import { EdDSAPoseidon } from "@zk-kit/eddsa-poseidon";
 
 // Set up CLI with Commander
 const program = new Command();
@@ -65,17 +66,13 @@ const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>(
 // Add quotes around anything that looks like a hex encoding and then parse to json
 jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
 
+let privKey = crypto.randomBytes(32);
+
 if (defaultConfig.signature === 'secp256k1') {
-  let privKey, pubKey;
-
-  // Generate secp256k1 private key
-  do {
+  while (!secp256k1.privateKeyVerify(privKey))
     privKey = crypto.randomBytes(32)
-  } while (!secp256k1.privateKeyVerify(privKey))
 
-  // get the public key in a compressed format
-  pubKey = secp256k1.publicKeyCreate(privKey, false)
-
+  const pubKey = secp256k1.publicKeyCreate(privKey, false)
   const sigObj = secp256k1.ecdsaSign(Buffer.from(jsonRes.root_u8), privKey)
   jsonRes.signature = Array.from(sigObj.signature);
   jsonRes.pubKey = {
@@ -83,7 +80,20 @@ if (defaultConfig.signature === 'secp256k1') {
     y: Array.from(pubKey.slice(33, 65)),
   };
 } else if (defaultConfig.signature === 'babyjubjub') {
-  
+  // const ed = new EdDSAPoseidon(privKey)
+  const ed = new EdDSAPoseidon('0x' + BigInt(123).toString(16));
+  const signature = ed.signMessage(jsonRes.root)
+  jsonRes.signature = {
+    r: {
+      x: '0x' + signature.R8[0].toString(16),
+      y: '0x' + signature.R8[1].toString(16),
+    },
+    s: '0x' + signature.S.toString(16),
+  }
+  jsonRes.pubKey = {
+    x: '0x' + ed.publicKey[0].toString(16),
+    y: '0x' + ed.publicKey[1].toString(16),
+  }
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }
