@@ -5,7 +5,7 @@ import { UltraHonkBackend } from '@aztec/bb.js';
 
 // Proceed with circuit verification for all signature types
 const noir = new Noir(verifyCircuit as unknown as CompiledCircuit);
-const backend = new UltraHonkBackend(verifyCircuit.bytecode, { threads: 12 });
+const backend = new UltraHonkBackend(verifyCircuit.bytecode, { threads: 6 });
 
 try {
   console.time('Witness generation');

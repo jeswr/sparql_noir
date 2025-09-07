@@ -1,7 +1,5 @@
 use dep::types::{Root, Triple};
 use dep::consts;
-use ec::{consts::te::baby_jubjub, tecurve::affine::Point};
-use std::hash::Hasher;
 
 pub struct MerkleInfo<let M: u32, let N: u32> {
     pub triples: [[Field; 4]; N],

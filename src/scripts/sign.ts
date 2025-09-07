@@ -80,8 +80,7 @@ if (defaultConfig.signature === 'secp256k1') {
     y: Array.from(pubKey.slice(33, 65)),
   };
 } else if (defaultConfig.signature === 'babyjubjub') {
-  // const ed = new EdDSAPoseidon(privKey)
-  const ed = new EdDSAPoseidon('0x' + BigInt(123).toString(16));
+  const ed = new EdDSAPoseidon(privKey)
   const signature = ed.signMessage(jsonRes.root)
   jsonRes.signature = {
     r: {
