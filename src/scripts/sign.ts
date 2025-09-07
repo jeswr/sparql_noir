@@ -6,6 +6,8 @@ import N3 from "n3";
 import dereferenceToStore from "rdf-dereference-store";
 import { RDFC10 } from "rdfjs-c14n";
 import secp256k1 from 'secp256k1';
+// @ts-expect-error
+import secp256r1 from 'secp256r1';
 import { Command } from 'commander';
 import { getTermEncodingString, runJson } from '../encode.js';
 import { quadToStringQuad } from 'rdf-string-ttl';
@@ -68,12 +70,13 @@ jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
 
 let privKey = crypto.randomBytes(32);
 
-if (defaultConfig.signature === 'secp256k1') {
-  while (!secp256k1.privateKeyVerify(privKey))
+if (defaultConfig.signature === 'secp256k1' || defaultConfig.signature === 'secp256r1') {
+  const pkg = defaultConfig.signature === 'secp256k1' ? secp256k1 : secp256r1;
+  while (!pkg.privateKeyVerify(privKey))
     privKey = crypto.randomBytes(32)
 
-  const pubKey = secp256k1.publicKeyCreate(privKey, false)
-  const sigObj = secp256k1.ecdsaSign(Buffer.from(jsonRes.root_u8), privKey)
+  const pubKey = pkg.publicKeyCreate(privKey, false)
+  const sigObj = (pkg.ecdsaSign || pkg.sign)(Buffer.from(jsonRes.root_u8), privKey)
   jsonRes.signature = Array.from(sigObj.signature);
   jsonRes.pubKey = {
     x: Array.from(pubKey.slice(1, 33)),
