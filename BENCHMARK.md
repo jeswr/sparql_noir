@@ -1,6 +1,6 @@
 # Noir Backend Benchmarking Tool
 
-This tool allows you to benchmark different Noir proving backends against your circuits to compare their performance characteristics.
+This tool allows you to benchmark different Noir proving backends against your circuits to compare their performance characteristics. **Backends can be automatically installed** with a single command for easy setup.
 
 ## Overview
 
@@ -39,15 +39,54 @@ npm install -g ts-node
 
 ### Backend Installation
 
+You can install backends automatically using the built-in installation commands, or manually as described below.
+
+#### Automated Installation (Recommended)
+
+**Using npm scripts:**
+```bash
+# List all available backends and their installation status
+npm run benchmark:list
+
+# Install a specific backend
+npm run benchmark:install barretenberg-ultrahonk
+npm run benchmark:install sonobe
+npm run benchmark:install plonky2-blocksense
+
+# Install all available backends at once
+npm run benchmark:install-all
+
+# Get installation help and requirements
+npm run benchmark:help
+```
+
+**Using standalone installer:**
+```bash
+# List all available backends
+npx tsx scripts/install-backends.ts list
+
+# Install a specific backend
+npx tsx scripts/install-backends.ts install barretenberg-ultrahonk
+
+# Install all backends
+npx tsx scripts/install-backends.ts install-all
+
+# Get help
+npx tsx scripts/install-backends.ts help
+```
+
+#### Manual Installation
+
 #### Barretenberg (Default - Already Available)
 ```bash
-# Already included with @aztec/bb.js in package.json
-# No additional installation needed
+# Install Barretenberg CLI
+curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/bbup/install | bash
+bbup
 ```
 
 #### Plonky2 (Blocksense)
 ```bash
-git clone https://github.com/blocksense-network/noir-plonky2
+git clone https://github.com/blocksense-network/noir
 cd noir-plonky2
 cargo install --path .
 ```
@@ -56,7 +95,8 @@ cargo install --path .
 ```bash
 git clone https://github.com/privacy-scaling-explorations/sonobe
 cd sonobe
-cargo install --path .
+cargo build --release
+cargo install --path cli --bin solidity-verifiers-cli
 ```
 
 ## Usage

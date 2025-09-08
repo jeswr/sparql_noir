@@ -20,6 +20,8 @@ benchmark-*.json
 **/verification_key
 **/temp_data.ttl
 **/temp_output.json
+**/bb_proof/
+**/bb_vk/
 
 # Generated Prover.toml files for benchmarking
 noir/bin/*/Prover.toml

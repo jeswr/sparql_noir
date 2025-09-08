@@ -163,7 +163,7 @@ class SimpleNoirBenchmark {
           verificationTime,
           totalTime,
           success: true,
-          circuitSize
+          circuitSize: circuitSize || 0
         };
       } else {
         // For other circuits, we can only do compilation and witness generation
@@ -177,7 +177,7 @@ class SimpleNoirBenchmark {
           verificationTime: 0,
           totalTime,
           success: true,
-          circuitSize,
+          circuitSize: circuitSize || 0,
           error: 'Proving/verification only available for signature circuit'
         };
       }
@@ -217,16 +217,17 @@ class SimpleNoirBenchmark {
     const failed = this.results.filter(r => !r.success);
 
     let report = '\n📊 NOIR CIRCUIT BENCHMARK RESULTS\n';
-    report += '='.repeat(60) + '\n\n';
+    report += '='.repeat(80) + '\n\n';
 
     if (successful.length > 0) {
       report += '✅ Successful Benchmarks:\n\n';
-      report += '| Circuit | Compile (ms) | Witness (ms) | Prove (ms) | Verify (ms) | Total (ms) | Size |\n';
-      report += '|---------|--------------|--------------|------------|-------------|------------|------|\n';
+      report += '| Circuit     | Compile (ms) | Witness (ms) | Prove (ms) | Verify (ms) | Total (ms) | Size   |\n';
+      report += '|-------------|--------------|--------------|------------|-------------|------------|--------|\n';
       
       for (const result of successful) {
         const size = result.circuitSize ? result.circuitSize.toString() : 'N/A';
-        report += `| ${result.circuitName.padEnd(7)} | ${result.compilationTime.toFixed(2).padStart(10)} | ${result.witnessGenerationTime.toFixed(2).padStart(10)} | ${result.provingTime.toFixed(2).padStart(8)} | ${result.verificationTime.toFixed(2).padStart(9)} | ${result.totalTime.toFixed(2).padStart(8)} | ${size.padStart(4)} |\n`;
+        const circuit = result.circuitName.length > 11 ? result.circuitName.substring(0, 8) + '...' : result.circuitName;
+        report += `| ${circuit.padEnd(11)} | ${result.compilationTime.toFixed(2).padStart(12)} | ${result.witnessGenerationTime.toFixed(2).padStart(12)} | ${result.provingTime.toFixed(2).padStart(10)} | ${result.verificationTime.toFixed(2).padStart(11)} | ${result.totalTime.toFixed(2).padStart(10)} | ${size.padStart(6)} |\n`;
       }
       
       if (successful.length > 1) {
