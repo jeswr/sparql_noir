@@ -17,7 +17,6 @@
     "benchmark:signature": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark noir/bin/signature",
     "benchmark:encode": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark noir/bin/encode",
     "benchmark:verify": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark noir/bin/verify_inclusion",
-    "benchmark:all": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark",
     "benchmark:list": "npx tsx src/scripts/benchmarks/noir-benchmark.ts list-circuits",
     "benchmark:help": "npx tsx src/scripts/benchmarks/noir-benchmark.ts --help"
   },

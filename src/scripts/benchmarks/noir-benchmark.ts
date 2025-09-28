@@ -332,12 +332,10 @@ program
       process.exit(1);
     }
 
-    // Default to all circuits if none specified
+    // Default to signature circuit only if none specified
     if (circuitPaths.length === 0) {
       circuitPaths = [
-        'noir/bin/signature',
-        'noir/bin/encode', 
-        'noir/bin/verify_inclusion'
+        'noir/bin/signature'
       ];
     }
 

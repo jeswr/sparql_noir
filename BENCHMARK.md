@@ -37,7 +37,7 @@ noirup
 ### Quick Start
 
 ```bash
-# Benchmark all circuits
+# Benchmark signature circuit (default)
 npm run benchmark
 
 # Benchmark specific circuit
