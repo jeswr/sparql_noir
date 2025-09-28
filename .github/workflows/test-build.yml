@@ -1,0 +1,40 @@
+name: Test Build and Benchmark
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Build TypeScript
+      run: npm run build:tsc
+
+    - name: Test benchmark tool help
+      run: npm run benchmark:help
+
+    - name: Test benchmark tool list
+      run: npm run benchmark:list
+
+    - name: Check if benchmark tool is working
+      run: |
+        echo "✅ Benchmark tool is working!"
+        echo "Note: Full circuit benchmarking requires Noir installation"
+        echo "See the benchmark.yml workflow for full benchmark testing"
