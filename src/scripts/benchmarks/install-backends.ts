@@ -40,6 +40,10 @@ async function main() {
       }
       
       const backendName = args[1];
+      if (!backendName) {
+        console.error('❌ Backend name is required');
+        process.exit(1);
+      }
       console.log(`🚀 Installing backend: ${backendName}\n`);
       
       const success = await benchmark.installBackend(backendName);

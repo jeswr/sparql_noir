@@ -381,7 +381,7 @@ class NoirBackendBenchmark {
         }
         
         // Use serializeProve to create the Prover.toml
-        const { serializeProve } = await import('../src/serializeProve.js');
+        const { serializeProve } = await import('../../serializeProve.js');
         
         const inputs = {
           public_key: signedData.pubKey,

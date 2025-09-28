@@ -59,7 +59,7 @@ class SimpleNoirBenchmark {
           const signedData = JSON.parse(readFileSync(mainJsonPath, 'utf8'));
           
           // Import serializeProve to create proper TOML
-          const { serializeProve } = await import('../src/serializeProve.js');
+          const { serializeProve } = await import('../../serializeProve.js');
           
           const inputs = {
             public_key: signedData.pubKey,
