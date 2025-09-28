@@ -25,3 +25,5 @@ benchmark-*.json
 
 # Generated Prover.toml files for benchmarking
 noir/bin/*/Prover.toml
+ts/**/*.d.ts*
+ts/**/*.js*
