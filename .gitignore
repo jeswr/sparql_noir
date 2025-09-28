@@ -10,6 +10,7 @@ temp/
 
 # Benchmark results
 benchmark-results/
+benchmark-results-*.json
 simple-benchmark-*.json
 benchmark-*.json
 
@@ -25,3 +26,7 @@ benchmark-*.json
 
 # Generated Prover.toml files for benchmarking
 noir/bin/*/Prover.toml
+
+# Noir installation
+.noirup/
+.nargo/

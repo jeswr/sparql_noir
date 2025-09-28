@@ -1,7 +1,14 @@
-import json from '../../temp/main.json' with { type: 'json' };
-import verifyCircuit from '../../noir/bin/signature/target/signature.json' with { type: 'json' };
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { type CompiledCircuit, Noir } from '@noir-lang/noir_js';
-import { UltraHonkBackend, AztecClientBackend } from '@aztec/bb.js';
+import { UltraHonkBackend } from '@aztec/bb.js';
+
+// Load JSON files dynamically
+const jsonPath = join(process.cwd(), 'temp', 'main.json');
+const circuitPath = join(process.cwd(), 'noir', 'bin', 'signature', 'target', 'signature.json');
+
+const json = JSON.parse(readFileSync(jsonPath, 'utf8'));
+const verifyCircuit = JSON.parse(readFileSync(circuitPath, 'utf8'));
 
 // Proceed with circuit verification for all signature types
 const noir = new Noir(verifyCircuit as unknown as CompiledCircuit);
