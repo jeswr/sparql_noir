@@ -29,5 +29,6 @@
     "moduleDetection": "force",
     "skipLibCheck": true,
     "resolveJsonModule": true
-  }
+  },
+  "exclude": ["ts", "node_modules", "dist"]
 }
