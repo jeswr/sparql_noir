@@ -1,4 +1,6 @@
 pub use signature;
+// TODO: Only import this when using poseidon hashes
+pub use hashes;
 
 pub global MERKLE_DEPTH: u32 = 11;
 // pub global hash2: fn([Field; 2]) -> Field = {{hash2}};
