@@ -42,6 +42,7 @@ export function stringToFieldFn(str: string) {
 }
 
 export function specialLiteralHandling(term: Literal) {
+  // TODO: Add more special handling for different datatypes
   if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#boolean') {
     if (term.value.toLowerCase() === 'true' || term.value === '1')
       return '1';

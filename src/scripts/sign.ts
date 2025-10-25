@@ -83,21 +83,23 @@ if (defaultConfig.signature === 'secp256k1' || defaultConfig.signature === 'secp
     x: Array.from(pubKey.slice(1, 33)),
     y: Array.from(pubKey.slice(33, 65)),
   };
-} else if (defaultConfig.signature === 'babyjubjub') {
-  const ed = new EdDSAPoseidon(privKey)
-  const signature = ed.signMessage(jsonRes.root)
-  jsonRes.signature = {
-    r: {
-      x: '0x' + signature.R8[0].toString(16),
-      y: '0x' + signature.R8[1].toString(16),
-    },
-    s: '0x' + signature.S.toString(16),
-  }
-  jsonRes.pubKey = {
-    x: '0x' + ed.publicKey[0].toString(16),
-    y: '0x' + ed.publicKey[1].toString(16),
-  }
-} else if (defaultConfig.signature === 'babyjubjubOpt') {
+} 
+// else if (defaultConfig.signature === 'babyjubjub') {
+//   const ed = new EdDSAPoseidon(privKey)
+//   const signature = ed.signMessage(jsonRes.root)
+//   jsonRes.signature = {
+//     r: {
+//       x: '0x' + signature.R8[0].toString(16),
+//       y: '0x' + signature.R8[1].toString(16),
+//     },
+//     s: '0x' + signature.S.toString(16),
+//   }
+//   jsonRes.pubKey = {
+//     x: '0x' + ed.publicKey[0].toString(16),
+//     y: '0x' + ed.publicKey[1].toString(16),
+//   }
+// } 
+else if (defaultConfig.signature === 'babyjubjubOpt') {
   const ed = new EdDSAPoseidon(privKey)
   const signature = ed.signMessage(jsonRes.root)
 

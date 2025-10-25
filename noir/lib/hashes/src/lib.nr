@@ -15,3 +15,7 @@ pub fn phash2(input: [Field; 2]) -> Field {
 pub fn phash4(input: [Field; 4]) -> Field {
   hash_4(input)
 }
+
+pub fn keccak256<let N: u32>(input: [u8; N]) -> [u8; 32] {
+  dep::keccak256::keccak256(input, N)
+}

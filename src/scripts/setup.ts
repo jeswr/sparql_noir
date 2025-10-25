@@ -13,7 +13,7 @@ for (const file of fs.readdirSync(noirDir, { recursive: true })) {
 
     for (const [key, value] of Object.entries(noir)) {
       // @ts-expect-error
-      libTemplate = libTemplate.replaceAll(`{{${key}}}`, value[defaultConfig[rename[key] ?? key]]);
+      libTemplate = libTemplate.replaceAll(`{{${key}}}`, value[defaultConfig[rename[key] ?? key]] ?? defaultConfig[rename[key] ?? key]);
     }
 
     if (!libTemplate.includes('{{'))
