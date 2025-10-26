@@ -9,8 +9,10 @@ sha256 = { tag = "v0.2.1", git = "https://github.com/noir-lang/sha256" }
 ec = { tag = "v0.1.2", git = "https://github.com/noir-lang/ec" }
 # TODO: Only import this when using poseidon hashes
 hashes = { path = "../hashes" }
-# TODO: Only import this when using sha256 hashes
+# TODO: Only import this when using sha512 hashes
 # Warning: Temporary fix for sha512 dependency until published crate is available from
 # https://github.com/noir-lang/sha512 - this library is _not_ yet audited for security. Use at your own risk.
 sha512 = { tag = "0.1.0", git = "https://github.com/jeswr/sha512" }
 signature = { path = "../signatures/{{signature}}" }
+# TODO: Only import this when using mimc hashes
+mimc = { tag = "v0.1.0", git = "https://github.com/noir-lang/mimc" }

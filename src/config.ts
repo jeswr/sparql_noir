@@ -14,6 +14,7 @@ export const fieldHashes = [
   // 'blake2s',
   'poseidon',
   'poseidon2',
+  'mimc',
 ] as const;
 export const merkleDepths = [9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31] as const;
 export const signatures = [
@@ -37,7 +38,7 @@ interface IConfig extends IConfigInternal {
 
 const defaultConfigInternal: IConfigInternal = {
   stringHash: 'sha256',
-  fieldHash: 'poseidon2',
+  fieldHash: 'mimc',
   merkleDepth: 11,
   signature: 'babyjubjubOpt',
 }
