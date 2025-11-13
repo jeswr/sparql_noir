@@ -22,7 +22,8 @@ export const signatures = [
   'secp256r1',
   // TODO: Fix this
   // 'babyjubjub',
-  'babyjubjubOpt'
+  'babyjubjubOpt',
+  'schnorr',
 ] as const;
 
 interface IConfigInternal {
@@ -40,7 +41,7 @@ const defaultConfigInternal: IConfigInternal = {
   stringHash: 'sha256',
   fieldHash: 'mimc',
   merkleDepth: 11,
-  signature: 'babyjubjubOpt',
+  signature: 'schnorr',
 }
 
 export const defaultConfig: IConfig = {

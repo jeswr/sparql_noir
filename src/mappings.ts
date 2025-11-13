@@ -27,6 +27,7 @@ export default {
       secp256r1: "secp256r1",
       babyjubjub: "babyjubjub",
       babyjubjubOpt: "babyjubjubOpt",
+      schnorr: "schnorr",
     },
     stringHashOutputSize: {},
   },

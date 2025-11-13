@@ -14,6 +14,8 @@ import { quadToStringQuad } from 'rdf-string-ttl';
 import { defaultConfig } from '../config.js';
 import { EdDSAPoseidon } from "@zk-kit/eddsa-poseidon";
 import { Base8, mulPointEscalar } from "@zk-kit/baby-jubjub";
+// @ts-expect-error
+import * as bipSchnorr from 'bip-schnorr';
 
 // Set up CLI with Commander
 const program = new Command();
@@ -50,7 +52,6 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-
 // Dereference, parse and canonicalize the RDF dataset
 const { store } = await dereferenceToStore.default(options.input, { localFiles: true });
 const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
@@ -65,6 +66,7 @@ const triples = quads.map(quad => '[' +
   ']');
 
 const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>([${triples.join(',')}])`);
+const embeddedCurveGenerator = runJson(`std::embedded_curve_ops::EmbeddedCurvePoint::generator()`);
 
 // Add quotes around anything that looks like a hex encoding and then parse to json
 jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
@@ -129,6 +131,37 @@ else if (defaultConfig.signature === 'babyjubjubOpt') {
       y: '0x' + k8[1].toString(16),
     },
   }
+} else if (defaultConfig.signature === 'schnorr') {
+  // while (!secp256k1.privateKeyVerify(privKey))
+  //   privKey = crypto.randomBytes(32)
+  // Use secp256k1 to get public key
+  // const schnorrPubKey = secp256k1.publicKeyCreate(privKey, false); // uncompressed
+  // bip-schnorr expects privKey as hex string
+  // const schnorrPrivKeyHex = privKey.toString('hex');
+  const ed = new EdDSAPoseidon(privKey);
+  // ed.privateKey.valueOf();
+  // Message must be Buffer
+  const messageBuf = Buffer.from(jsonRes.root_u8);
+  // console.log('schnorrPrivKeyHex:', ed.secretScalar, schnorrPrivKeyHex);
+  const schnorrPrivKey = Buffer.from(ed.secretScalar.toString(16).padStart(64, '0'), 'hex').toString('hex');
+  console.log('schnorrPrivKey:', schnorrPrivKey);
+  
+  const schnorrSig = bipSchnorr.default.sign(schnorrPrivKey, messageBuf);
+  // bip-schnorr returns a Buffer (64 bytes: first 32 bytes = s, last 32 bytes = e)
+  // const s = schnorrSig.slice(0, 32);
+  // const e = schnorrSig.slice(32, 64);
+  jsonRes.signature = Array.from(schnorrSig);
+  console.log('schnorrSig:', schnorrSig, jsonRes.signature, jsonRes.signature.length);
+  // const FIELD_MODULUS = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+  // const pubKeyX = BigInt('0x' + Buffer.from(schnorrPubKey.slice(1, 33)).toString('hex')) % FIELD_MODULUS;
+  // const pubKeyY = BigInt('0x' + Buffer.from(schnorrPubKey.slice(33, 65)).toString('hex')) % FIELD_MODULUS;
+  console.log('[ED publicKey]', ed.publicKey, ed.publicKey[0].toString(16))
+  
+  jsonRes.pubKey = {
+    x: '0x' + ed.publicKey[0].toString(16),
+    y: '0x' + ed.publicKey[1].toString(16),
+    is_infinite: false,
+  };
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }

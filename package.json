@@ -33,6 +33,7 @@
     "@zk-kit/baby-jubjub": "^1.0.3",
     "@zk-kit/eddsa-poseidon": "^1.1.0",
     "babyjubjub-ecdsa": "^1.2.0",
+    "bip-schnorr": "^0.6.7",
     "bls-signatures": "^2.0.3",
     "chalk": "^4.1.2",
     "circomlibjs": "^0.1.7",
