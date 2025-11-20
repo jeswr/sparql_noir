@@ -1,3 +1,5 @@
+pub use signature;
+
 pub global MERKLE_DEPTH: u32 = 11;
 // pub global hash2: fn([Field; 2]) -> Field = {{hash2}};
 // pub global hash4: fn([Field; 4]) -> Field = {{hash4}};
@@ -11,12 +13,8 @@ pub fn hash4(input: [Field; 4]) -> Field {
   {{hash4}}(input)
 }
 
-pub fn hash_string<let N: u32>(input: [u8; N]) -> [u8; 32] {
+pub fn hash_string<let N: u32>(input: [u8; N]) -> [u8; {{stringHashOutputSize}}] {
   {{stringHash}}(input)
-}
-
-pub fn verify_signature(public_key: [u8; 32], root: [u8; 32], signature: [u8; 64], message: [u8; 32]) -> bool {
-  {{signature}}(public_key, root, signature, message)
 }
 
 // Recursion

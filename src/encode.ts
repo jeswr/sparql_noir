@@ -29,10 +29,12 @@ export function run(fn: string) {
 }
 
 export function runJson(fn: string) {
-  let res = run(fn);
-  // Put strings around keys of objects if they are not already in quotes
-  res = res.replace(/[a-zA-Z0-9_]+(?=:)/g, match => `"${match}"`);
-  return JSON.parse(res.slice(res.indexOf('{'), res.lastIndexOf('}') + 1));
+  let res = run(fn)
+    // Put strings around keys of objects if they are not already in quotes
+    .replace(/[a-zA-Z0-9_]+(?=:)/g, match => `"${match}"`)
+    // Remove the struct names to make it valid JSON
+    .replace(/[a-zA-Z]+ (?={)/g, '');
+  return JSON.parse(res);
 }
 
 export function stringToFieldFn(str: string) {
@@ -40,11 +42,12 @@ export function stringToFieldFn(str: string) {
 }
 
 export function specialLiteralHandling(term: Literal) {
-  if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#boolean' && (term.value.toLowerCase() === 'true' || term.value === '1')) {
-    return '1';
-  }
-  if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#boolean' && (term.value.toLowerCase() === 'false' || term.value === '0')) {
-    return '0';
+  // TODO: Add more special handling for different datatypes
+  if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#boolean') {
+    if (term.value.toLowerCase() === 'true' || term.value === '1')
+      return '1';
+    if (term.value.toLowerCase() === 'false' || term.value === '0')
+      return '0';
   }
   if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#integer') {
     return parseInt(term.value, 10).toString();

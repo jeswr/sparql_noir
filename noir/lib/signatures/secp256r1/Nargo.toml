@@ -1,0 +1,6 @@
+[package]
+name = "secp256r1"
+type = "lib"
+authors = [""]
+
+[dependencies]

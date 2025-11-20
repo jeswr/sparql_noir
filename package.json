@@ -4,7 +4,22 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "build": "tsc"
+    "postinstall": "node scripts/postinstall.js",
+    "build:signature": "cd noir/bin/signature && nargo build",
+    "build:tsc": "tsc",
+    "build:noir": "node dist/scripts/setup.js",
+    "build": "npm run build:tsc && npm run build:noir && npm run build:signature",
+    "example:sign": "node dist/scripts/sign.js -i inputs/data.ttl -o temp/main.json",
+    "example:verify": "node dist/scripts/verify.js -i temp/main.json",
+    "example": "npm run example:sign && npm run example:verify",
+    "e2e": "npm run build && npm run example",
+    "benchmark": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark",
+    "benchmark:signature": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark noir/bin/signature",
+    "benchmark:encode": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark noir/bin/encode",
+    "benchmark:verify": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark noir/bin/verify_inclusion",
+    "benchmark:all": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark",
+    "benchmark:list": "npx tsx src/scripts/benchmarks/noir-benchmark.ts list-circuits",
+    "benchmark:help": "npx tsx src/scripts/benchmarks/noir-benchmark.ts --help"
   },
   "keywords": [],
   "author": "",
@@ -12,21 +27,26 @@
   "description": "",
   "dependencies": {
     "@aztec/bb.js": "^1.2.1",
+    "@aztec/foundation": "^2.1.7",
     "@noir-lang/noir_js": "^1.0.0-beta.11",
+    "@noir-lang/noirc_abi": "^1.0.0-beta.15",
+    "@zk-kit/baby-jubjub": "^1.0.3",
+    "@zk-kit/eddsa-poseidon": "^1.1.0",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.2",
     "n3": "^1.26.0",
     "rdf-dereference-store": "^1.4.0",
     "rdf-string-ttl": "^2.0.1",
     "rdfjs-c14n": "^3.1.3",
     "secp256k1": "^5.0.1",
-    "sparqlalgebrajs": "^5.0.1"
+    "secp256r1": "^0.0.3"
   },
   "devDependencies": {
     "@rdfjs/types": "^2.0.1",
     "@types/jest": "^30.0.0",
-    "@types/node": "^24.3.0",
-    "jest": "^30.1.1",
-    "ts-jest": "^29.4.1",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.9.2"
+    "@types/node": "^24.10.1",
+    "@types/secp256k1": "^4.0.7",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
   }
 }

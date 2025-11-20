@@ -1,4 +1,4 @@
-use dep::consts::{MERKLE_DEPTH, HONK_VK_SIZE, HONK_PROOF_SIZE};
+use dep::consts::{MERKLE_DEPTH, HONK_VK_SIZE, HONK_PROOF_SIZE, signature::Signature};
 
 pub struct Triple {
   pub terms: [Field; 4],
@@ -6,14 +6,9 @@ pub struct Triple {
   pub directions: [u8; MERKLE_DEPTH - 1],
 }
 
-pub struct PubKey {
-  pub x: [u8; 32],
-  pub y: [u8; 32],
-}
-
 pub struct Root {
   pub value: Field,
-  pub signature: [u8; 64],
+  pub signature: Signature,
 }
 
 pub struct Proof {

@@ -1,4 +1,4 @@
-use dep::types::{PubKey, Root, Triple};
+use dep::types::{Root, Triple};
 use dep::consts;
 
 pub struct MerkleInfo<let M: u32, let N: u32> {
@@ -9,11 +9,9 @@ pub struct MerkleInfo<let M: u32, let N: u32> {
     pub direction: [[u8; M - 1]; N],
 }
 
-pub fn verify_signature(public_key: PubKey, root: Root) {
-    let message: [u8; 32] = root.value.to_le_bytes();
-    // Check that the signature on the merkle root is valid
+pub fn verify_signature(public_key: consts::signature::PubKey, root: Root) {
     assert(
-        consts::verify_signature(public_key.x, public_key.y, root.signature, message),
+        consts::signature::verify_signature(public_key, root.signature, root.value),
         "Signature verification failed",
     );
 }

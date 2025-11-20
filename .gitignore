@@ -5,4 +5,28 @@ generated
 recursion_examples
 Prover.toml
 noir/lib/consts/src/lib.nr
+noir/lib/consts/Nargo.toml
 temp/
+
+# Benchmark results
+benchmark-results/
+benchmark-results-*.json
+simple-benchmark-*.json
+benchmark-*.json
+
+# Temporary benchmark files
+**/proof
+**/vk
+**/vk.bin
+**/verification_key
+**/temp_data.ttl
+**/temp_output.json
+**/bb_proof/
+**/bb_vk/
+
+# Generated Prover.toml files for benchmarking
+noir/bin/*/Prover.toml
+
+# Noir installation
+.noirup/
+.nargo/
