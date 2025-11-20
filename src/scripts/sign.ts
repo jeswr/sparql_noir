@@ -14,8 +14,10 @@ import { quadToStringQuad } from 'rdf-string-ttl';
 import { defaultConfig } from '../config.js';
 import { EdDSAPoseidon } from "@zk-kit/eddsa-poseidon";
 import { Base8, mulPointEscalar } from "@zk-kit/baby-jubjub";
-// @ts-expect-error
-import * as bipSchnorr from 'bip-schnorr';
+import { BarretenbergWasm } from '@aztec/barretenberg/wasm';
+import { GrumpkinAddress } from '@aztec/barretenberg/address';
+import { Grumpkin } from '@aztec/barretenberg/ecc';
+import { Schnorr, SchnorrSignature } from '@aztec/barretenberg/crypto';
 
 // Set up CLI with Commander
 const program = new Command();
@@ -66,7 +68,10 @@ const triples = quads.map(quad => '[' +
   ']');
 
 const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>([${triples.join(',')}])`);
-const embeddedCurveGenerator = runJson(`std::embedded_curve_ops::EmbeddedCurvePoint::generator()`);
+
+const bufferToHex = (buf: Buffer) => `0x${buf.toString('hex')}`;
+
+const toBigEndianScalar = (buf: Buffer) => Buffer.from(buf).reverse();
 
 // Add quotes around anything that looks like a hex encoding and then parse to json
 jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
@@ -132,36 +137,30 @@ else if (defaultConfig.signature === 'babyjubjubOpt') {
     },
   }
 } else if (defaultConfig.signature === 'schnorr') {
-  // while (!secp256k1.privateKeyVerify(privKey))
-  //   privKey = crypto.randomBytes(32)
-  // Use secp256k1 to get public key
-  // const schnorrPubKey = secp256k1.publicKeyCreate(privKey, false); // uncompressed
-  // bip-schnorr expects privKey as hex string
-  // const schnorrPrivKeyHex = privKey.toString('hex');
-  const ed = new EdDSAPoseidon(privKey);
-  // ed.privateKey.valueOf();
-  // Message must be Buffer
+  const battenbergWasm = await BarretenbergWasm.new();
+  const schnorr = new Schnorr(battenbergWasm);
+  const grumpkin = new Grumpkin(battenbergWasm);
+
+  const schnorrPrivKey = grumpkin.getRandomFr();
   const messageBuf = Buffer.from(jsonRes.root_u8);
-  // console.log('schnorrPrivKeyHex:', ed.secretScalar, schnorrPrivKeyHex);
-  const schnorrPrivKey = Buffer.from(ed.secretScalar.toString(16).padStart(64, '0'), 'hex').toString('hex');
-  console.log('schnorrPrivKey:', schnorrPrivKey);
-  
-  const schnorrSig = bipSchnorr.default.sign(schnorrPrivKey, messageBuf);
-  // bip-schnorr returns a Buffer (64 bytes: first 32 bytes = s, last 32 bytes = e)
-  // const s = schnorrSig.slice(0, 32);
-  // const e = schnorrSig.slice(32, 64);
-  jsonRes.signature = Array.from(schnorrSig);
-  console.log('schnorrSig:', schnorrSig, jsonRes.signature, jsonRes.signature.length);
-  // const FIELD_MODULUS = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
-  // const pubKeyX = BigInt('0x' + Buffer.from(schnorrPubKey.slice(1, 33)).toString('hex')) % FIELD_MODULUS;
-  // const pubKeyY = BigInt('0x' + Buffer.from(schnorrPubKey.slice(33, 65)).toString('hex')) % FIELD_MODULUS;
-  console.log('[ED publicKey]', ed.publicKey, ed.publicKey[0].toString(16))
-  
+  const signature = schnorr.constructSignature(messageBuf, schnorrPrivKey);
+  const publicKey = schnorr.computePublicKey(schnorrPrivKey);
+
+  const signatureBuf = signature.toBuffer();
+  // const signatureBytes = Buffer.concat([
+  //   toBigEndianScalar(signatureBuf.subarray(0, 32)),
+  //   signatureBuf.subarray(32),
+  // ]);
+  jsonRes.signature = Array.from(signatureBuf);
   jsonRes.pubKey = {
-    x: '0x' + ed.publicKey[0].toString(16),
-    y: '0x' + ed.publicKey[1].toString(16),
+    x: bufferToHex(publicKey.subarray(0, 32)),
+    y: bufferToHex(publicKey.subarray(32, 64)),
     is_infinite: false,
   };
+  
+  console.log('Generated Barretenberg Schnorr signature');
+  console.log('Public key:', schnorrPrivKey, publicKey, jsonRes.pubKey);
+  console.log('Signature:', schnorr.verifySignature(messageBuf, signatureBuf, new SchnorrSignature(publicKey.subarray(0, 64))));
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }

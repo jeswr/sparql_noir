@@ -7,12 +7,12 @@ use poseidon::poseidon::PoseidonHasher;
 use std::default::Default;
 use std::hash::Hasher;
 // Testing which embedded curve is used - should be Baby Jubjub or Grumpkin
-use std::embedded_curve_ops::{EmbeddedCurvePoint, EmbeddedCurveScalar, multi_scalar_mul, embedded_curve_add};
+use std::embedded_curve_ops::{EmbeddedCurvePoint, EmbeddedCurveScalar, multi_scalar_mul};
 
 // Public key structure
 pub struct PubKey {
     pub value: TEPoint,  // Public key point A = s * Base8
-    pub k8: TEPoint,     // 8 * A for verification efficiency
+    pub k8: TEPoint,     // 8 * A for verification efficiency,
 }
 
 // Signature structure  

@@ -10,6 +10,7 @@ pub struct MerkleInfo<let M: u32, let N: u32> {
 }
 
 pub fn verify_signature(public_key: consts::signature::PubKey, root: Root) {
+    println("Running verify_signature");
     assert(
         consts::signature::verify_signature(public_key, root.signature, root.value),
         "Signature verification failed",
