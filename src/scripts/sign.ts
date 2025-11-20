@@ -153,7 +153,7 @@ else if (defaultConfig.signature === 'babyjubjubOpt') {
   };
   
   console.log('Generated Barretenberg Schnorr signature');
-  console.log('Public key:', schnorrPrivKey, publicKey, jsonRes.pubKey);
+  console.log('Public key:', jsonRes.signature, jsonRes.pubKey, jsonRes.root);
 
   // const battenbergWasm = await BarretenbergWasm.new();
   //   const schnorr = new Schnorr(battenbergWasm);
