@@ -39,7 +39,7 @@ interface IConfig extends IConfigInternal {
 
 const defaultConfigInternal: IConfigInternal = {
   stringHash: 'sha256',
-  fieldHash: 'mimc',
+  fieldHash: 'pedersen',
   merkleDepth: 11,
   signature: 'schnorr',
 }

@@ -14,11 +14,6 @@ import { quadToStringQuad } from 'rdf-string-ttl';
 import { defaultConfig } from '../config.js';
 import { EdDSAPoseidon } from "@zk-kit/eddsa-poseidon";
 import { Base8, mulPointEscalar } from "@zk-kit/baby-jubjub";
-// import { BarretenbergWasm } from '@aztec/barretenberg/wasm';
-import { GrumpkinAddress } from '@aztec/barretenberg/address';
-import { Grumpkin } from '@aztec/barretenberg/ecc';
-// import { Schnorr, SchnorrSignature } from '@aztec/barretenberg/crypto';
-import { UltraHonkBackend } from '@aztec/bb.js';
 import { Schnorr } from '@aztec/foundation/crypto';
 import { Fq } from '@aztec/foundation/fields';
 
@@ -71,8 +66,6 @@ const triples = quads.map(quad => '[' +
   ']');
 
 const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>([${triples.join(',')}])`);
-
-const bufferToHex = (buf: Buffer) => `0x${buf.toString('hex')}`;
 
 // Add quotes around anything that looks like a hex encoding and then parse to json
 jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
@@ -138,12 +131,9 @@ else if (defaultConfig.signature === 'babyjubjubOpt') {
     },
   }
 } else if (defaultConfig.signature === 'schnorr') {
-  // const battenbergWasm = await BarretenbergWasm.new();
   const schnorr = new Schnorr();
   const schnorrPrivKey = Fq.random();
-  // const grumpkin = new Grumpkin(battenbergWasm);
 
-  // const schnorrPrivKey = grumpkin.getRandomFr();
   const messageBuf = Buffer.from(jsonRes.root_u8);
   const signature = await schnorr.constructSignature(messageBuf, schnorrPrivKey);
   const publicKey = await schnorr.computePublicKey(schnorrPrivKey);
@@ -154,20 +144,6 @@ else if (defaultConfig.signature === 'babyjubjubOpt') {
     y: publicKey.y.toJSON(),
     is_infinite: false,
   };
-  
-  console.log('Generated Barretenberg Schnorr signature');
-  console.log('Public key:', jsonRes.signature, jsonRes.pubKey, jsonRes.root);
-
-  // const battenbergWasm = await BarretenbergWasm.new();
-  //   const schnorr = new Schnorr(battenbergWasm);
-  //   const grumpkin = new Grumpkin(battenbergWasm);
-  
-  //   const schnorrPrivKey = grumpkin.getRandomFr();
-  //   const messageBuf = Buffer.from([1, 2, 3]);
-  //   const signature = schnorr.constructSignature(messageBuf, schnorrPrivKey);
-  //   const publicKey = schnorr.computePublicKey(schnorrPrivKey);
-
-  console.log('isValid', await schnorr.verifySignature(messageBuf, publicKey, signature));  
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }
