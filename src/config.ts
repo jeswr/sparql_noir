@@ -41,7 +41,7 @@ const defaultConfigInternal: IConfigInternal = {
   stringHash: 'sha256',
   fieldHash: 'pedersen',
   merkleDepth: 11,
-  signature: 'schnorr',
+  signature: 'babyjubjubOpt',
 }
 
 export const defaultConfig: IConfig = {
