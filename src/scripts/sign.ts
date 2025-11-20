@@ -14,11 +14,13 @@ import { quadToStringQuad } from 'rdf-string-ttl';
 import { defaultConfig } from '../config.js';
 import { EdDSAPoseidon } from "@zk-kit/eddsa-poseidon";
 import { Base8, mulPointEscalar } from "@zk-kit/baby-jubjub";
-import { BarretenbergWasm } from '@aztec/barretenberg/wasm';
+// import { BarretenbergWasm } from '@aztec/barretenberg/wasm';
 import { GrumpkinAddress } from '@aztec/barretenberg/address';
 import { Grumpkin } from '@aztec/barretenberg/ecc';
-import { Schnorr, SchnorrSignature } from '@aztec/barretenberg/crypto';
+// import { Schnorr, SchnorrSignature } from '@aztec/barretenberg/crypto';
 import { UltraHonkBackend } from '@aztec/bb.js';
+import { Schnorr } from '@aztec/foundation/crypto';
+import { Fq } from '@aztec/foundation/fields';
 
 // Set up CLI with Commander
 const program = new Command();
@@ -136,19 +138,20 @@ else if (defaultConfig.signature === 'babyjubjubOpt') {
     },
   }
 } else if (defaultConfig.signature === 'schnorr') {
-  const battenbergWasm = await BarretenbergWasm.new();
-  const schnorr = new Schnorr(battenbergWasm);
-  const grumpkin = new Grumpkin(battenbergWasm);
+  // const battenbergWasm = await BarretenbergWasm.new();
+  const schnorr = new Schnorr();
+  const schnorrPrivKey = Fq.random();
+  // const grumpkin = new Grumpkin(battenbergWasm);
 
-  const schnorrPrivKey = grumpkin.getRandomFr();
+  // const schnorrPrivKey = grumpkin.getRandomFr();
   const messageBuf = Buffer.from(jsonRes.root_u8);
-  const signature = schnorr.constructSignature(messageBuf, schnorrPrivKey);
-  const publicKey = schnorr.computePublicKey(schnorrPrivKey);
+  const signature = await schnorr.constructSignature(messageBuf, schnorrPrivKey);
+  const publicKey = await schnorr.computePublicKey(schnorrPrivKey);
 
   jsonRes.signature = Array.from(signature.toBuffer());
   jsonRes.pubKey = {
-    x: bufferToHex(publicKey.subarray(0, 32)),
-    y: bufferToHex(publicKey.subarray(32, 64)),
+    x: publicKey.x.toJSON(),
+    y: publicKey.y.toJSON(),
     is_infinite: false,
   };
   
@@ -164,7 +167,7 @@ else if (defaultConfig.signature === 'babyjubjubOpt') {
   //   const signature = schnorr.constructSignature(messageBuf, schnorrPrivKey);
   //   const publicKey = schnorr.computePublicKey(schnorrPrivKey);
 
-  console.log('isValid', schnorr.verifySignature(messageBuf, publicKey, new SchnorrSignature(signature.toBuffer())));  
+  console.log('isValid', await schnorr.verifySignature(messageBuf, publicKey, signature));  
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }
