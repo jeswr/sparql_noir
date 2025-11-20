@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 
 import { Command } from 'commander';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { join, basename } from 'path';
 import { execSync } from 'child_process';
 import { performance } from 'perf_hooks';
@@ -41,7 +41,11 @@ class NoirBenchmarkRunner {
     let circuitSize = 0;
     let proofSize = 0;
 
+    let cleanup: (() => void) | undefined;
+
     try {
+      cleanup = await this.prepareCircuitSourceIfNeeded(circuitPath, circuitName);
+
       // 1. One-time compilation (not averaged across runs)
       console.log(chalk.yellow('📋 Compiling circuit...'));
       const compileStart = performance.now();
@@ -123,6 +127,14 @@ class NoirBenchmarkRunner {
         error: error instanceof Error ? error.message : String(error),
         runs
       };
+    } finally {
+      if (cleanup) {
+        try {
+          cleanup();
+        } catch (cleanupError) {
+          console.log(chalk.yellow(`⚠️  Failed to clean up temporary files for ${circuitName}: ${cleanupError}`));
+        }
+      }
     }
   }
 
@@ -131,17 +143,9 @@ class NoirBenchmarkRunner {
       const proverTomlPath = join(circuitPath, 'Prover.toml');
       if (!existsSync(proverTomlPath)) {
         console.log(chalk.yellow('📝 Preparing signature inputs...'));
-        
-        // Use existing temp/main.json if available, otherwise run example
-        const mainJsonPath = join(process.cwd(), 'temp', 'main.json');
-        if (!existsSync(mainJsonPath)) {
-          console.log(chalk.gray('  Running example to generate signature data...'));
-          execSync('npm run example:sign', { stdio: 'pipe' });
-        }
-
-        const signedData = JSON.parse(readFileSync(mainJsonPath, 'utf8'));
+        const signedData = this.ensureSignedData();
         const { serializeProve } = await import('../../serializeProve.js');
-        
+
         const inputs = {
           public_key: signedData.pubKey,
           root: {
@@ -149,12 +153,92 @@ class NoirBenchmarkRunner {
             signature: signedData.signature
           }
         };
-        
+
         const tomlContent = '# Generated for benchmarking\n\n' + serializeProve(inputs);
         writeFileSync(proverTomlPath, tomlContent);
         console.log(chalk.green('  ✓ Signature inputs prepared'));
       }
+      return;
     }
+
+    if (circuitName === 'verify_inclusion') {
+      const proverTomlPath = join(circuitPath, 'Prover.toml');
+      if (!existsSync(proverTomlPath)) {
+        console.log(chalk.yellow('📝 Preparing verify_inclusion inputs...'));
+        const signedData = this.ensureSignedData();
+        const tripleTerms = signedData.triples?.[0];
+        const triplePath = signedData.paths?.[0];
+        const tripleDirections = signedData.direction?.[0];
+
+        if (!tripleTerms || !triplePath || !tripleDirections || !signedData.root) {
+          throw new Error('Sample data missing Merkle components required for verify_inclusion');
+        }
+
+        const { serializeProve } = await import('../../serializeProve.js');
+        const inputs = {
+          root_value: signedData.root,
+          triple: {
+            terms: tripleTerms,
+            path: triplePath,
+            directions: tripleDirections.map((value: number) => Number(value)),
+          }
+        };
+
+        const tomlContent = '# Generated for benchmarking\n\n' + serializeProve(inputs);
+        writeFileSync(proverTomlPath, tomlContent);
+        console.log(chalk.green('  ✓ verify_inclusion inputs prepared'));
+      }
+    }
+  }
+
+  private ensureSignedData() {
+    const mainJsonPath = join(process.cwd(), 'temp', 'main.json');
+    if (!existsSync(mainJsonPath)) {
+      console.log(chalk.gray('  Running example to generate canonical dataset...'));
+      execSync('npm run example:sign', { stdio: 'pipe' });
+    }
+    return JSON.parse(readFileSync(mainJsonPath, 'utf8'));
+  }
+
+  private async prepareCircuitSourceIfNeeded(circuitPath: string, circuitName: string) {
+    if (circuitName !== 'encode')
+      return;
+
+    const mainPath = join(circuitPath, 'src', 'main.nr');
+    if (existsSync(mainPath))
+      return;
+
+    const templatePath = `${mainPath}.template`;
+    if (!existsSync(templatePath)) {
+      throw new Error(`Encode template not found at ${templatePath}`);
+    }
+
+    console.log(chalk.yellow('🛠️  Preparing encode circuit source...'));
+    const template = readFileSync(templatePath, 'utf8');
+    const populated = template.replace('{{fn}}', this.buildEncodeBenchmarkExpression());
+
+    if (populated.includes('{{')) {
+      throw new Error('Failed to populate encode benchmark template');
+    }
+
+    writeFileSync(mainPath, populated);
+    console.log(chalk.green('  ✓ Temporary encode main.nr created'));
+
+    return () => {
+      if (existsSync(mainPath)) {
+        rmSync(mainPath);
+      }
+    };
+  }
+
+  private buildEncodeBenchmarkExpression() {
+    const triples = [
+      '[1, 2, 3, 4]',
+      '[5, 6, 7, 8]',
+      '[9, 10, 11, 12]',
+      '[13, 14, 15, 16]'
+    ];
+    return `utils::merkle::<consts::MERKLE_DEPTH, ${triples.length}>([${triples.join(', ')}])`;
   }
 
   private async runProofBenchmark(circuitPath: string, circuitName: string): Promise<{
