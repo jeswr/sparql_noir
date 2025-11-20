@@ -28,6 +28,8 @@ pub fn verify_signature(
         println("Public key is on Grumpkin curve: false");
     }
 
+    println(f"sig_s.lo = {sig_s.lo}, sig_s.hi = {sig_s.hi}");
+
     if ((sig_s.lo != 0) | (sig_s.hi != 0)) & ((sig_e.lo != 0) | (sig_e.hi != 0)) {
         let (r_is_infinite, result) =
             calculate_signature_challenge(public_key, sig_s, sig_e, message.to_le_bytes::<32>());

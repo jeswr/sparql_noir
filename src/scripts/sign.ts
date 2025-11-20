@@ -18,6 +18,7 @@ import { BarretenbergWasm } from '@aztec/barretenberg/wasm';
 import { GrumpkinAddress } from '@aztec/barretenberg/address';
 import { Grumpkin } from '@aztec/barretenberg/ecc';
 import { Schnorr, SchnorrSignature } from '@aztec/barretenberg/crypto';
+import { UltraHonkBackend } from '@aztec/bb.js';
 
 // Set up CLI with Commander
 const program = new Command();
@@ -70,8 +71,6 @@ const triples = quads.map(quad => '[' +
 const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>([${triples.join(',')}])`);
 
 const bufferToHex = (buf: Buffer) => `0x${buf.toString('hex')}`;
-
-const toBigEndianScalar = (buf: Buffer) => Buffer.from(buf).reverse();
 
 // Add quotes around anything that looks like a hex encoding and then parse to json
 jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
@@ -146,12 +145,7 @@ else if (defaultConfig.signature === 'babyjubjubOpt') {
   const signature = schnorr.constructSignature(messageBuf, schnorrPrivKey);
   const publicKey = schnorr.computePublicKey(schnorrPrivKey);
 
-  const signatureBuf = signature.toBuffer();
-  // const signatureBytes = Buffer.concat([
-  //   toBigEndianScalar(signatureBuf.subarray(0, 32)),
-  //   signatureBuf.subarray(32),
-  // ]);
-  jsonRes.signature = Array.from(signatureBuf);
+  jsonRes.signature = Array.from(signature.toBuffer());
   jsonRes.pubKey = {
     x: bufferToHex(publicKey.subarray(0, 32)),
     y: bufferToHex(publicKey.subarray(32, 64)),
@@ -160,7 +154,17 @@ else if (defaultConfig.signature === 'babyjubjubOpt') {
   
   console.log('Generated Barretenberg Schnorr signature');
   console.log('Public key:', schnorrPrivKey, publicKey, jsonRes.pubKey);
-  console.log('Signature:', schnorr.verifySignature(messageBuf, signatureBuf, new SchnorrSignature(publicKey.subarray(0, 64))));
+
+  // const battenbergWasm = await BarretenbergWasm.new();
+  //   const schnorr = new Schnorr(battenbergWasm);
+  //   const grumpkin = new Grumpkin(battenbergWasm);
+  
+  //   const schnorrPrivKey = grumpkin.getRandomFr();
+  //   const messageBuf = Buffer.from([1, 2, 3]);
+  //   const signature = schnorr.constructSignature(messageBuf, schnorrPrivKey);
+  //   const publicKey = schnorr.computePublicKey(schnorrPrivKey);
+
+  console.log('isValid', schnorr.verifySignature(messageBuf, publicKey, new SchnorrSignature(signature.toBuffer())));  
 } else {
   throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
 }
