@@ -52,107 +52,130 @@ if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-// Dereference, parse and canonicalize the RDF dataset
-const { store } = await dereferenceToStore.default(options.input, { localFiles: true });
-const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
+const mappings: { input: string; output: string }[] = fs.lstatSync(options.input).isFile()
+  ? [{ input: options.input, output: options.output }]
+  : fs.readdirSync(options.input).map(file => ({
+    input: path.join(options.input, file),
+    output: path.join(options.output, `${path.parse(file).name}.json`)
+  }));
 
-const triples = quads.map(quad => '[' +
-  [
-    getTermEncodingString(quad.subject),
-    getTermEncodingString(quad.predicate),
-    getTermEncodingString(quad.object),
-    getTermEncodingString(quad.graph)].join(',')
-  +
-  ']');
-
-const jsonRes = runJson(`utils::merkle::<consts::MERKLE_DEPTH, ${quads.length}>([${triples.join(',')}])`);
-
-// Add quotes around anything that looks like a hex encoding and then parse to json
-jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
-
-let privKey = crypto.randomBytes(32);
-
-if (defaultConfig.signature === 'secp256k1' || defaultConfig.signature === 'secp256r1') {
-  const pkg = defaultConfig.signature === 'secp256k1' ? secp256k1 : secp256r1;
-  while (!pkg.privateKeyVerify(privKey))
-    privKey = crypto.randomBytes(32)
-
-  const pubKey = pkg.publicKeyCreate(privKey, false)
-  const sigObj = (pkg.ecdsaSign || pkg.sign)(Buffer.from(jsonRes.root_u8), privKey)
-  jsonRes.signature = Array.from(sigObj.signature);
-  jsonRes.pubKey = {
-    x: Array.from(pubKey.slice(1, 33)),
-    y: Array.from(pubKey.slice(33, 65)),
+const dereferencedMappings = await Promise.all(mappings.map(async ({ input, output }) => {
+  // Dereference, parse and canonicalize the RDF dataset
+  const { store } = await dereferenceToStore.default(input, { localFiles: true });
+  const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
+  const triples = quads.map(quad => '[' +
+    [
+      getTermEncodingString(quad.subject),
+      getTermEncodingString(quad.predicate),
+      getTermEncodingString(quad.object),
+      getTermEncodingString(quad.graph)
+    ].join(',')
+    +
+    ']');
+  return {
+    input,
+    quads,
+    output,
+    triples,
+    noirInput: `utils::merkle::<consts::MERKLE_DEPTH, ${triples.length}>([${triples.join(',')}])`,
   };
-} 
-// else if (defaultConfig.signature === 'babyjubjub') {
-//   const ed = new EdDSAPoseidon(privKey)
-//   const signature = ed.signMessage(jsonRes.root)
-//   jsonRes.signature = {
-//     r: {
-//       x: '0x' + signature.R8[0].toString(16),
-//       y: '0x' + signature.R8[1].toString(16),
-//     },
-//     s: '0x' + signature.S.toString(16),
-//   }
-//   jsonRes.pubKey = {
-//     x: '0x' + ed.publicKey[0].toString(16),
-//     y: '0x' + ed.publicKey[1].toString(16),
-//   }
-// } 
-else if (defaultConfig.signature === 'babyjubjubOpt') {
-  const ed = new EdDSAPoseidon(privKey)
-  const signature = ed.signMessage(jsonRes.root)
+}));
 
-  const left = mulPointEscalar(Base8, signature.S)
+const allTriples = dereferencedMappings.map(({ noirInput }) => noirInput);
 
-  // In a production setting the verifier needs to check this is correct
-  const k8 = mulPointEscalar(ed.publicKey, 8n)
-  
-  jsonRes.signature = {
-    r: {
-      x: '0x' + signature.R8[0].toString(16),
-      y: '0x' + signature.R8[1].toString(16),
-    },
-    left: {
-      x: '0x' + left[0].toString(16),
-      y: '0x' + left[1].toString(16),
-    },
-    s: '0x' + signature.S.toString(16),
+const jsonResList = runJson(`[${allTriples.join(', ')}]`);
+
+for (let i = 0; i < dereferencedMappings.length; i++) {
+  const { output, quads, input } = dereferencedMappings[i]!;
+  const jsonRes = jsonResList[i];
+
+  // Add quotes around anything that looks like a hex encoding and then parse to json
+  jsonRes.nquads = quads.map(quad => quadToStringQuad(quad));
+
+  let privKey = crypto.randomBytes(32);
+
+  if (defaultConfig.signature === 'secp256k1' || defaultConfig.signature === 'secp256r1') {
+    const pkg = defaultConfig.signature === 'secp256k1' ? secp256k1 : secp256r1;
+    while (!pkg.privateKeyVerify(privKey))
+      privKey = crypto.randomBytes(32)
+
+    const pubKey = pkg.publicKeyCreate(privKey, false)
+    const sigObj = (pkg.ecdsaSign || pkg.sign)(Buffer.from(jsonRes.root_u8), privKey)
+    jsonRes.signature = Array.from(sigObj.signature);
+    jsonRes.pubKey = {
+      x: Array.from(pubKey.slice(1, 33)),
+      y: Array.from(pubKey.slice(33, 65)),
+    };
   }
-  jsonRes.pubKey = {
-    value: {
-      x: '0x' + ed.publicKey[0].toString(16),
-      y: '0x' + ed.publicKey[1].toString(16),
-    },
-    k8: {
-      x: '0x' + k8[0].toString(16),
-      y: '0x' + k8[1].toString(16),
-    },
+  // else if (defaultConfig.signature === 'babyjubjub') {
+  //   const ed = new EdDSAPoseidon(privKey)
+  //   const signature = ed.signMessage(jsonRes.root)
+  //   jsonRes.signature = {
+  //     r: {
+  //       x: '0x' + signature.R8[0].toString(16),
+  //       y: '0x' + signature.R8[1].toString(16),
+  //     },
+  //     s: '0x' + signature.S.toString(16),
+  //   }
+  //   jsonRes.pubKey = {
+  //     x: '0x' + ed.publicKey[0].toString(16),
+  //     y: '0x' + ed.publicKey[1].toString(16),
+  //   }
+  // } 
+  else if (defaultConfig.signature === 'babyjubjubOpt') {
+    const ed = new EdDSAPoseidon(privKey)
+    const signature = ed.signMessage(jsonRes.root)
+
+    const left = mulPointEscalar(Base8, signature.S)
+
+    // In a production setting the verifier needs to check this is correct
+    const k8 = mulPointEscalar(ed.publicKey, 8n)
+
+    jsonRes.signature = {
+      r: {
+        x: '0x' + signature.R8[0].toString(16),
+        y: '0x' + signature.R8[1].toString(16),
+      },
+      left: {
+        x: '0x' + left[0].toString(16),
+        y: '0x' + left[1].toString(16),
+      },
+      s: '0x' + signature.S.toString(16),
+    }
+    jsonRes.pubKey = {
+      value: {
+        x: '0x' + ed.publicKey[0].toString(16),
+        y: '0x' + ed.publicKey[1].toString(16),
+      },
+      k8: {
+        x: '0x' + k8[0].toString(16),
+        y: '0x' + k8[1].toString(16),
+      },
+    }
+  } else if (defaultConfig.signature === 'schnorr') {
+    const schnorr = new Schnorr();
+    const schnorrPrivKey = Fq.random();
+
+    const messageBuf = Buffer.from(jsonRes.root_u8);
+    const signature = await schnorr.constructSignature(messageBuf, schnorrPrivKey);
+    const publicKey = await schnorr.computePublicKey(schnorrPrivKey);
+
+    jsonRes.signature = Array.from(signature.toBuffer());
+    jsonRes.pubKey = {
+      x: publicKey.x.toJSON(),
+      y: publicKey.y.toJSON(),
+      is_infinite: false,
+    };
+  } else {
+    throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
   }
-} else if (defaultConfig.signature === 'schnorr') {
-  const schnorr = new Schnorr();
-  const schnorrPrivKey = Fq.random();
 
-  const messageBuf = Buffer.from(jsonRes.root_u8);
-  const signature = await schnorr.constructSignature(messageBuf, schnorrPrivKey);
-  const publicKey = await schnorr.computePublicKey(schnorrPrivKey);
+  delete jsonRes.root_u8;
 
-  jsonRes.signature = Array.from(signature.toBuffer());
-  jsonRes.pubKey = {
-    x: publicKey.x.toJSON(),
-    y: publicKey.y.toJSON(),
-    is_infinite: false,
-  };
-} else {
-  throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
+  // Write the output file
+  fs.writeFileSync(output, JSON.stringify(jsonRes, null, 2));
+
+  console.log(`Successfully processed RDF dataset and generated signature.`);
+  console.log(`Input: ${input}`);
+  console.log(`Output: ${output}`);
 }
-
-delete jsonRes.root_u8;
-
-// Write the output file
-fs.writeFileSync(options.output, JSON.stringify(jsonRes, null, 2));
-
-console.log(`Successfully processed RDF dataset and generated signature.`);
-console.log(`Input: ${options.input}`);
-console.log(`Output: ${options.output}`);
