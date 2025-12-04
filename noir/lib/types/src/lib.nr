@@ -11,6 +11,11 @@ pub struct Root {
   pub signature: Signature,
 }
 
+pub struct IndexedRoot {
+  pub index: u32,
+  pub root: Root,
+}
+
 pub struct Proof {
   pub vk: [Field; HONK_VK_SIZE],
   pub proof: [Field; HONK_PROOF_SIZE],

@@ -1,4 +1,4 @@
-use dep::types::{Root, Triple};
+use dep::types::{IndexedRoot, Root, Triple};
 use dep::consts;
 
 pub struct MerkleInfo<let M: u32, let N: u32> {
@@ -7,6 +7,12 @@ pub struct MerkleInfo<let M: u32, let N: u32> {
     pub root_u8: [u8; 32],
     pub paths: [[Field; M]; N],
     pub direction: [[u8; M - 1]; N],
+}
+
+pub fn verify_signatures<let N: u32, let M: u32>(public_key: [consts::signature::PubKey; N], root: [IndexedRoot; M]) {
+    for i in 0..M {
+        verify_signature(public_key[root[i].index], root[i].root)
+    }
 }
 
 pub fn verify_signature(public_key: consts::signature::PubKey, root: Root) {

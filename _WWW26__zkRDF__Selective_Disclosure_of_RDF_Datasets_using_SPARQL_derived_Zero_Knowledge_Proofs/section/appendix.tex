@@ -1,0 +1,292 @@
+ \newpage
+\section{Common Formalisation of RDF Graphs and Datasets}
+\label{appendix:rdf}
+
+We re-use the common formalisation as in~\cite{DBLP:conf/esws/BraunK25}:
+Let $\mathcal{U}$ denote the set of all HTTP URIs~\cite{uri,http}, $\mathcal{B}$ the set of all blank nodes, and $\mathcal{L}$ the set of all literals.
+Let $\mathcal{G}$ denote the set of all RDF graphs.
+An RDF graph $G \in \mathcal{G}$ is defined as a set of triples.
+A triple $t$ is defined as $t \in ( \mathcal{U} \cup \mathcal{B}) \times \mathcal{U} \times (\mathcal{U} \cup \mathcal{B} \cup \mathcal{L})$.
+%
+Let $\mathcal{D}$ denote the set of all RDF datasets.
+An RDF dataset ${D} \in \mathcal{D}$ is a set of named graphs and an unnamed \textit{default graph}.
+A named graph~\cite{DBLP:conf/www/CarrollBHS05} is a pair $(n, G_n)$ where $n \in (\mathcal{U} \cup \mathcal{B})$ and $G_n \in \mathcal{G}$.
+% \todo{JW: Note that this diverges from the definition in \url{https://www.w3.org/TR/rdf11-datasets/#the-graph-name-denotes-the-named-graph-or-the-graph} which mandates named graphs have IRI names. CB: Your reference refers to their interpretation - different story. See the definition in the syntax: https://www.w3.org/TR/rdf11-concepts/\#section-dataset }
+The default graph does not have a graph name, $(\_, G)$ with $G \in \mathcal{G}$.
+%
+A triple belonging to a graph $G_n$ within an RDF dataset is also referred to as a quad $q$ with $q \in ( \mathcal{U} \cup \mathcal{B}) \times \mathcal{U} \times (\mathcal{U} \cup \mathcal{B} \cup \mathcal{L}) \times \{n\}$, where $n$ is the graph name.
+
+\section{SPARQL Formalisation Foundations}
+\label{appendix:sparql}
+
+Let $\mathcal{V}$ denote the set of all variables, disjoint from $\mathcal{U}$, $\mathcal{B}$, and $\mathcal{L}$.
+A Basic Graph Pattern (BGP) is a set of triple patterns.
+A {triple pattern} $\textit{tp}$ is defined as $\textit{tp} \in ( \mathcal{U} \cup \mathcal{B} \cup \mathcal{V}) \times (\mathcal{U} \cup \mathcal{V}) \times (\mathcal{U} \cup \mathcal{B} \cup \mathcal{L} \cup \mathcal{V})$.
+
+The evaluation of a graph pattern against an RDF graph yields a multiset $\Omega$ of solution mappings.
+A solution mapping $\mu \in \Omega$ is a partial function $\mu: \mathcal{V} \to (\mathcal{U} \cup \mathcal{B} \cup \mathcal{L})$.
+The semantics of this evaluation are formally defined by the SPARQL algebra~\cite{SPARQL}.
+
+A key operator for datasets is the \texttt{GRAPH} clause, which restricts the evaluation of a pattern $P$ to a specific graph. If the graph identifier $n$ is a URI, $P$ is evaluated against that named graph; if $n$ is a variable, $P$ is evaluated against every named graph in the dataset, and each resulting solution mapping is extended with a binding of $n$ to the name of the graph that produced the solution.
+
+An expression $E$ in SPARQL is a formula that can be evaluated on a solution mapping $\mu$ to yield an RDF term or an error. 
+$\mathcal{E}$ includes \eg relational expressions which can be used to express numeric bounds.
+The algebra then defines operators on solution multisets, such as \texttt{FILTER}. 
+The \texttt{FILTER} operator evaluates an expression $E \in \mathcal{E}$ for each solution mapping $\mu \in \Omega$ and retains a mapping if and only if the effective boolean value is \texttt{true}. 
+Formally, if $\texttt{eval}(E, \mu)$ is the evaluation of $E$ for a mapping $\mu$, then:
+$$ \texttt{FILTER}(\Omega, E) = \{ \mu \mid \mu \in \Omega \land \texttt{eval}(E, \mu) \}$$ % \todo{JW: remove "= true"}
+
+The projection of $\Omega$ onto a set of variables $V_{\textit{proj} \subseteq \mathcal{V}}$ is a second multiset $\Omega'$ of mappings $\mu' \in \Omega'$ defined as:
+\begin{multline*}
+\Omega' = \texttt{PROJECT}(V_{\textit{proj}}, \Omega) = \{ \mu' \mid   \exists \, \mu \in \Omega \text{ s.t. } \\ \hspace{15pt} (\text{dom}(\mu') = \text{dom}(\mu) \cap V_{\textit{proj}}) \land (\forall ?v \in \text{dom}(\mu'), \mu'(?v) = \mu(?v)) \} 
+\end{multline*}
+
+
+
+\section{A Formalisation of zkRDF}
+\label{appendix:zkrdf}
+
+While the main body of this paper explains our approach in prose for broader accessibility (Section~\ref{sec:framework}), this section provides an initial description of the formal underpinnings of zkRDF. 
+
+\paragraph{Canonicalised RDF Graphs and Datasets.}
+If not canonicalised, digital signatures on RDF graphs are dependant on the particular bitstring signed, \ie serialisation and the order of triples matter.
+RDF graphs need to be canonicalised~\cite{RDFcanon} prior to signature creation or verification such that the resulting Linked Data Signatures cover the RDF graph itself, independent of its serialisation.
+%\todo{JW: It is how we do it, not required, you can always just tell the verifier an ordering. CB: How do you do that?}
+For our purpose, canonicalisation provides an ordering to a graph's triples.
+More formally, we define a canonicalised RDF graph $G^+ \in \mathcal{G}$ as a list of triples such that each triple is assigned an index $i$, \ie $t_i = G^+[i]$.
+As a triple is also an ordered sequence of RDF terms, we can then assign an index tuple to specific occurrences of RDF terms within their triple. % \todo{Since tou already reference the RDFC14n spec (\url{https://www.w3.org/TR/rdf-canon/}) I would cut back the re-definition here to say "canonicalisation provides a deterministic ordering of triples in a dataset, and identifiers for blank nodes".}
+For example, the subject $s$ of a triple $t_0$ is $s = t_0[0] = G^+[0][0]$ and the subject's index tuple is thus denoted by $(0,0)$, \ie $(\textit{triple\_index},\textit{position\_index})$.
+The same idea applies to RDF datasets with their quads as well.
+
+We note that there exists a hybrid version of an RDF dataset where all its graphs are canonicalised \enquote{on their own} and the dataset only contains these canonicalised versions without being canonicalised itself.
+As pointed out in Sections~\ref{sec:prelim} and~\ref{sec:eval_performance}, we choose to operate on named graphs, \ie, minting a new graph name for each VC's default graph, instead of merging the VC's default graph into the query engines default graph.
+We found this approach to be convenient for tracking which term occurred in which particular Verifiable Credential, \ie a canonicalised RDF graph, resulting in an index triple of $(\texttt{graph\_name},\texttt{triple\_index},\texttt{position\_index})$ per occurrence of a term.
+More formally, let $I \in ((\mathcal{U} \cup \mathcal{B} )\times \mathbb{N} \times \mathbb{N})$ denote an \textit{index tuple}.
+% The first element is the graph name $n \in (\mathcal{U} \cup \mathcal{B} )$\todo{the second is the index of the triple in the canonicalised dataset, and the position index of the term in the triple}.
+
+\paragraph{Extending SPARQL Query Evaluation with Occurrence Tracing.}
+In order to selectively disclose RDF terms from an RDF graph, we need to be able to identify the particular occurrences of that term which should be revealed.
+In Section~\ref{sec:framework_instantiation}, we described the particluar approach of query-retracing, \ie, finding occurrences of an RDF term based on the query and its solution.
+
+More formally, we extend the evaluation of a SPARQL query to directly obtain the index tuple of a variable-mapped RDF term.
+Let $\texttt{eval}^+$
+be the indexed evaluation function which evaluates a SPARQL algebraic expression against a canonicalised, \ie indexable, RDF graph.
+
+The result of this evaluation is a multiset $\Omega^+$ of {indexed solution mappings}.
+An \textit{indexed solution mapping} $\mu^+$ is a partial function that extends the standard mapping to include a set of index tuples for each variable binding, representing its provenance:
+$$ \mu^+: \mathcal{V} \to (\mathcal{U} \cup \mathcal{B} \cup \mathcal{L}) \times \mathcal{P}((\mathcal{U} \cup \mathcal{B} )\times \mathbb{N} \times \mathbb{N}) $$
+Each binding in $\mu^+$ for a variable $?v$ is a pair $(T, I)$, where $T \in (\mathcal{U} \cup \mathcal{B} \cup \mathcal{L})$ is an RDF term and $I \in \mathcal{P}((\mathcal{U} \cup \mathcal{B} )\times \mathbb{N} \times \mathbb{N})$ is a set of index tuples where the binding occurred.
+For a solution mapping $\mu^+(?v) = (T, I)$, we use the dot-notation to access its members, \ie, $\mu^+(?v).T$ to refer to the mapped term and $\mu^+(?v).I$ to refer to the set of index tuples, \ie $\mu^+(?v) = (\,\mu^+(?v).T \,,\, \mu^+(?v).I\,)$.
+
+\medskip
+
+The semantics of $\texttt{eval}^+$ are realized by a corresponding set of indexed algebraic operators (\eg, $\texttt{JOIN}^+$, $\texttt{FILTER}^+$), which are defined to propagate and merge these sets of index tuples throughout the evaluation process.
+
+Compatibility of two indexed solution mappings is not affected by the addition of the index tuple sets.
+Two indexed solution mappings, $\mu_1^+$ and $\mu_2^+$, are compatible if, for every variable $?v$ in the intersection of their domains, they map it to the same RDF term. 
+% \todo{I don't understand when they would have different domains - surely this is only applicable when we are talking about the same query; and thus the same domain of variables is in play?}
+\begin{multline*}
+    \texttt{compat}^+(\mu_1^+, \mu_2^+) \iff \\
+    \forall ?v \in (\text{dom}(\mu_1^+) \cap \text{dom}(\mu_2^+)) \,,\, \mu_1^+(?v).T = \mu_2^+(?v).T
+\end{multline*}
+%\todo{I would use $:=$ as define-equals rather than $\iff$}
+
+The $\text{merge}^+(\mu_1^+, \mu_2^+)$ function produces a new mapping $\mu'^+$ where for any variable $?v$:
+$$\mu'^+(?v) =
+\begin{cases}
+    (\mu_1^+(?v).T \,,\, \mu_1^+(?v).I \cup \mu_2^+(?v).I) \\ \hspace{45pt} \text{if } ?v \in \text{dom}(\mu_1^+) \cap \text{dom}(\mu_2^+) \\
+    \mu_1^+(?v) \hspace{20pt}  \text{if } ?v \in \text{dom}(\mu_1^+) \setminus \text{dom}(\mu_2^+) \\
+    \mu_2^+(?v) \hspace{20pt}  \text{if } ?v \in \text{dom}(\mu_2^+) \setminus \text{dom}(\mu_1^+)
+\end{cases}
+$$
+
+The indexed join of two solution sets, $\Omega_1^+$ and $\Omega_2^+$, is the multiset of all merged mappings from compatible pairs. The merge operation unions the index tuple sets for shared variables.
+\begin{multline*}
+    \texttt{JOIN}^+(\Omega_1^+, \Omega_2^+) = \\\hspace{20pt}
+    \{ \text{merge}^+(\mu_1^+, \mu_2^+) \mid \mu_1^+ \in \Omega_1^+ \land \, \mu_2^+ \in \Omega_2^+ \land \, \texttt{compat}^+(\mu_1^+, \mu_2^+) \} 
+\end{multline*}
+All other graph pattern operations are defined in the same vein.
+
+The rest of the SPARQL semantics remain the same, for example, the indexed filter is the same as the regular filter:
+It applies an expression $E$ to a solution set $\Omega^+$. The expression is evaluated using only the term component ($T$) of each binding. Mappings for which the expression's effective boolean value is \texttt{true} are retained with their index sets ($I$) unmodified.
+$$ \texttt{FILTER}^+(\Omega^+, E) = \{ \mu^+ \mid \mu^+ \in \Omega^+ \land \texttt{eval}(E, \mu^+) \} $$
+
+
+\medskip
+Extending SPARQL query evaluation in this way provides the necessary information to trace the origins of RDF terms that are mapped by any variable in-scope; from the variables to be projected, \ie $V_{\textit{proj}}$, and from those variables and blank nodes which are not to be projected.
+The combination of occurrence information and projection information is required in order to determine, not only
+which RDF terms to reveal or to hide.
+More importantly -- it is used to determine which occurrences of hidden RDF terms need to be proven to be the same such that the graph pattern specified by the query is proven to be satisfied; even when specific nodes in the pattern remain hidden.
+
+
+
+\paragraph{Deriving Relations, Statements, and Witnesses.}
+SPARQL query components, \ie graph pattern $P$, expressions $E$ and projected variables $V_\textit{proj}$, and pre-projection solution set $\Omega^+$ provide all information to specify corresponding proofs about the underlying RDF dataset.
+Let $r$ denote a relation that a proof system is able to prove.
+Let $s$ denote a corresponding statement, the set of public inputs.
+Let $w$ denote a corresponding witness, the set of secret inputs.
+A proof specification is the tuple $(r,s,w) \in P_{\textit{spec}}$.
+
+In the scope of this paper, we consider proofs of knowledge of signature (PoKS) and proofs of numeric bounds (PoNB), \ie $r \in \{\text{PoKS},\text{PoNB}\}$.
+Of course, other proof systems that support proving other relations would require formalising their supported proofs as well.
+We provide our formalisation as a sample to critique, improve and apply such formalisation to other relations as well.
+
+\medskip
+
+The {PoKS} relation proves knowledge of a valid signature for each graph that contributed to a solution. For each solution mapping, we identify all unique graph names present in its index tuples.
+Formally, for each $\mu^+ \in \Omega^+$, let $N_{\mu^+} = \{ n \mid \exists \, (n, \_, \_) \in I \text{ for some } (T, I) \in \text{range}(\mu^+) \}$ denote the set of graphs that contain an occurrence of an RDF term mapped in $\mu^+$.
+
+For each graph name $n \in N_{\mu^+}$, a corresponding proof specification $(\text{PoKS}, s, w)$ is derived.
+Witness $w$ includes all variable-mapped occurrences of an RDF-term that belongs to the graph ($n$) and is not projected.
+In addition, the signature $\sigma_w$ is part of the witness. 
+Formally, the witness $w$ for a PoKS on graph $n$ is defined as:
+$$ w = \{ \sigma_w,  I_w \} $$
+where $I_w = \{ (j, k) \mid \exists \, ?v \notin V_{proj} \text{ s.t. } (n, j, k) \in \mu^+(?v).I \}$\todo{JW: There is inconsitency in the use of $?$ with variables. I would suggest consistently NOT using $?$ with variables.
+CB: which ones did I miss? there is only ?v in use as a variable...}.
+The statement includes all projected all variable-mapped occurrences of an RDF-term alongside other parameters $\rho_\sigma$ like the public verification key of the issuer.
+Conversely, the public statement $s$ is defined as:
+$$ s = \{ \rho_\sigma, I_s \} $$
+where $I_s = \{ (j, k) \mid \exists \, ?v \in V_{proj} \text{ s.t. } (n, j, k) \in \mu^+(?v).I \}$.
+The particular composition of witness and statement are dependent on the particular signature scheme used; we used BBS+~\cite{DBLP:journals/iacr/CamenischDL16}.
+
+\medskip
+
+The \text{PoNB} relation proves that a hidden numeric value satisfies a relational constraint specified in a \texttt{FILTER} clause. These proofs are derived for each solution mapping and for each applicable relational expression found in the query's set of expressions $E$.
+
+Formally, let $E_{\textit{bounds}} \subseteq E$ be the subset of expressions of the form $(?v \text{ \texttt{op} } C)$, where $\texttt{op}$ is a relational operator (\eg, \texttt{>}, \texttt{<}) and $C$ is a constant numeric literal.
+For each solution mapping $\mu^+ \in \Omega^+$ and for each expression $(?v \text{ op } C) \in E_{\textit{bounds}}$ where the variable $?v \notin V_{proj}$, a corresponding proof specification $(\text{PoNB}, s, w)$ is derived.
+
+The public statement $s$ contains the public parameters of the numeric constraint:
+% $$ s = \{ \texttt{op}, C \} $$
+$$
+s = \{(\text{min}, \text{max})\} =
+\begin{cases}
+  \{(C, +\infty)\} & \text{if } \texttt{op} \in \{ \texttt{>}\} \\
+  \{(-\infty, C)\} & \text{if } \texttt{op} \in \{ \texttt{<} \}
+\end{cases}
+$$
+Let the maximal and minimal value supported in a system be denoted by $+\infty$ and $-\infty$ respectively.
+When there are multiple numeric bounds expressed for the same witness, relations may be aggregated resulting in fewer proofs to be created.
+
+The witness $w$ contains the secret numeric value that satisfies the constraint:
+$$ w = \{ \mu^+(?v).T \} $$
+
+\medskip
+
+To prove equality of hidden RDF terms, either within a graph pattern or between a node in a graph pattern and its numeric bounds, \ie between a PoKS and a PoNB, so-called equality constraints are specified.
+In a particular solution mapping, each occurrence of a non-projected variable-mapped RDF term -- indicated by the set of index tuples -- needs to be proven equal.
+This means that, within a solution mapping, two occurrences of the same hidden term are proven to be equal.
+This does not mean that, across solution mappings, two occurrences of the same term are proven to be equal; this fact remains hidden.
+Formally, let $C_{set}$ be the set of equality constraints derived from a single solution mapping $\mu^+$; defined as:
+$$ C_{set} = \{ \mu^+(?v).I \mid ?v \in \text{dom}(\mu^+) \land ?v \notin V_{proj} \land |\mu^+(?v).I| > 1 \} $$
+
+\medskip
+
+\paragraph{Proof Creation and Presentation.}
+The set of proof specifications $P_\textit{spec}$ and the set of equality constraints $C_\textit{set}$ are provided to the proof systems as input to create a corresponding proof $\pi$.
+In our approach, this proof is a composite proof comprised of the single specified proofs.
+Other proof systems may produce a single succinct proof.
+To present the proof to a verifier, we construct a selectively disclosing dataset~\cite{DBLP:conf/esws/BraunK25}.
+Other systems may choose a different way of presentation.
+
+\begin{comment}
+
+\section{Illustrating Example}
+\label{appendix:example}
+
+Example~\footnote{\url{https://github.com/uvdsl/rdf-zkp-sparql\#example}}
+
+(assume prefixes to be set)
+
+Assume there is a digitally signed dataset, e.g., a Verifiable Credential like
+\lstset{style=turtle}
+\begin{lstlisting}[
+    language=Turtle, 
+    caption={example A} ,
+    label={listing:run-example-A}, 
+    basicstyle=\scriptsize\ttfamily
+]
+# e.g. for an internship
+[] a org:Membership;
+  org:member <http://example.org/users#user123>;
+  org:organization <http://example.org/organisations#aCompany> ;
+  time:hasBeginning "2024-01-01T00:00:00Z"^^xsd:dateTimeStamp ;
+  time:hasEnd "2025-12-31T23:59:59Z"^^xsd:dateTimeStamp .
+# BBS+ signature by the issuer  and additional VC terms are omitted for brevity.
+\end{lstlisting}
+and another one like
+\begin{lstlisting}[
+    language=Turtle, 
+    caption={example B} ,
+    label={listing:run-example-B}, 
+    basicstyle=\scriptsize\ttfamily
+]
+# to show range proof on integers work
+<http://example.org/users#user123> foaf:age 25.
+# BBS+ signature by the issuer and additional VC terms are omitted for brevity.
+\end{lstlisting}
+Now assume a SPARQL query (for the sake of the example) 
+\begin{lstlisting}[
+    language=Turtle, 
+    caption={query Q} ,
+    label={listing:run-example-Q}, 
+    basicstyle=\scriptsize\ttfamily
+]
+SELECT ?org WHERE {
+  ?user foaf:age ?age .
+  ?membership org:member ?user.
+  ?membership org:organization ?org .
+  ?membership time:hasEnd ?endDate .
+  FILTER(?endDate > xsd:dateTime("2025-10-01T00:00:00Z") )
+  FILTER(?age <= 25 )
+}
+\end{lstlisting}
+The full result can be found here\footnote{\url{https://github.com/uvdsl/rdf-zkp-sparql/blob/main/data/presentations/prover.trig}}, here an excerpt:
+\begin{lstlisting}[
+    language=Turtle, 
+    caption={result P} ,
+    label={listing:run-example-P}, 
+    basicstyle=\scriptsize\ttfamily
+]
+GRAPH _:0_4 {
+	_:0_0 _:0_1 _:0_2 .
+	_:0_5 _:0_6 _:0_7 .
+	_:0_10 time:hasEnd _:0_12 .
+	_:0_10 org:member _:0_17 .
+	_:0_10 org:organization <http://example.org/organisations#aCompany> .
+}
+GRAPH _:2_4 {
+	_:0_17 foaf:age _:2_2 .
+}
+GRAPH _:presentationProofGraph {
+	_:cproof rdf:type zkp:CompositeProof .
+	_:cproof zkp:hasComponent _:p0 .
+	_:cproof zkp:hasComponent _:p1 .
+	_:cproof zkp:hasComponent _:p2 .
+	_:cproof zkp:hasComponent _:p3 .
+	_:p0 rdf:type bbsp16:PoKS16 .# proof of knowledge of signature
+    _:p0 bbsp16:isProofOfKnowledgeOfSignatureOverGraph _:0_4 .
+    # more proof details omitted for brevity
+	_:p1 rdf:type lg16:LegoGroth16ProofOfRangeMembership . # numeric bounds proof
+    _:p1 lg16:hasWitness _:0_12 .
+	_:p1 lg16:hasLowerBound "1759276800"^^xsd:nonNegativeInteger .
+	_:p1 lg16:hasUpperBound "18446744073709551615"^^xsd:nonNegativeInteger .
+    # more proof details omitted for brevity
+	_:p2 rdf:type bbsp16:PoKS16 .
+	_:p3 rdf:type lg16:LegoGroth16ProofOfRangeMembership .
+	# more proof details omitted for brevity
+}
+\end{lstlisting}
+Note that \texttt{\_:0\_17} is re-used across graphs. The proof includes the fact that all occurrences of \texttt{\_:0\_17} refers to the same underlying secret value, the identifier of the user. To this end, two proofs of knowledge of signature are needed; one for each respective original graph of \texttt{\_:0\_4} and \texttt{\_:2\_4}. The two additional proofs are the proofs of numeric bounds of \texttt{\_:0\_12}, the end time of the membership, and of \texttt{\_:2\_2}, the age of the user.
+Note that the company's identifier is revealed, as requested in the SELECT statement of the query.
+
+All other information are only proven to be true:
+
+    the signatures of the graphs are proven to be valid,
+    the graphs' triples are proven to be known, without needing to reveale terms.
+    the numeric bounds as per the FILTER statements are proven to be fulfilled without revealing the literal.
+    the relations between user and organisation are proven to exist without revealing the membership identifier
+
+Only information explicitly requested (or previously known as the IRIs) in the query are revealed, while still being proven to have been signed. For example, note that in the first two triples of graph \texttt{\_:0\_4}, we do not reveal that their subjects are actually the same value that also underlies \texttt{\_:0\_10}.
+
+\end{comment}

@@ -1,0 +1,305 @@
+        % This is samplepaper.tex, a sample chapter demonstrating the
+% LLNCS macro package for Springer Computer Science proceedings;
+% Version 2.20 of 2017/10/04
+%
+%\documentclass[runningheads]{llncs}
+%\documentclass[sigconf]{acmart} % anonymous,review % screen (for blue hyperlinks)
+\documentclass[sigconf]{acmart} 
+%\documentclass[sigconf,anonymous,review ]{acmart} 
+%% NOTE that a single column version may required for 
+%% submission and peer review. This can be done by changing
+%% the \doucmentclass[...]{acmart} in this template to 
+%% \documentclass[manuscript,screen]{acmart}
+%% 
+%% To ensure 100% compatibility, please check the white list of
+%% approved LaTeX packages to be used with the Master Article Template at
+%% https://www.acm.org/publications/taps/whitelist-of-latex-packages 
+%% before creating your document. The white list page provides 
+%% information on how to submit additional LaTeX packages for 
+%% review and adoption.
+%% Fonts used in the template cannot be substituted; margin 
+%% adjustments are not allowed.
+
+%%
+%% \BibTeX command to typeset BibTeX logo in the docs
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+  %  \normalfont B\kern-0.5em{\scshape i\kern-0.25em b}\kern-0.8em\TeX}}}
+    Bib\TeX}}}
+    
+%% Rights management information.  This information is sent to you
+%% when you complete the rights form.  These commands have SAMPLE
+%% values in them; it is your responsibility as an author to replace
+%% the commands and values with those provided to you when you
+%% complete the rights form.
+
+
+\copyrightyear{2026}
+\acmYear{2026}
+\setcopyright{rightsretained}
+\acmConference[WWW '26]{Proceedings of the ACM Web Conference 2026}{April 13--17, 2026}{Dubai, UAE}
+\acmBooktitle{Proceedings of the ACM Web Conference 2026 (WWW '26), April 13--17, 2026, Dubai, UAE}
+\acmDOI{XX.XXX/XXXX.XXXX}
+\acmISBN{XXX-X-XXXX-XXXX-X/XX/XX}
+
+
+% The following includes the CC license icon appropriate for your paper.
+% Download the image from www.scomminc.com/pp/acmsig/4ACM-CC-by-nc-sa-88x31.eps
+% and place within your figs or figures folder
+
+\makeatletter
+\gdef\@copyrightpermission{
+  \begin{minipage}{0.3\columnwidth}
+   \href{https://creativecommons.org/licenses/by-nc-sa/4.0/} {\includegraphics[width=0.90\textwidth]{img/4ACM-CC-by-nc-sa-88x31.eps}}
+  \end{minipage}\hfill
+  \begin{minipage}{0.7\columnwidth}
+   \href{https://creativecommons.org/licenses/by-nc-sa/4.0/}{This work is licensed under a Creative Commons Attribution-NonCommercial-ShareAlike International 4.0 License.}
+  \end{minipage}
+  \vspace{5pt}
+}
+\makeatother
+
+
+%
+\usepackage{graphicx} % ok
+
+
+\widowpenalty 10000 
+\clubpenalty 10000
+% are packages ok or not ok for ACM?
+\usepackage{xspace} % ok
+\usepackage{enumitem} % ok
+\usepackage{multirow} % ok
+%\usepackage{paralist} % not ok
+
+\usepackage{csquotes}
+\usepackage{booktabs}
+
+
+%\pagenumbering{gobble}
+\newcommand{\ie}{i.\,e.\@\xspace} % not sure if ACM allows newcommands this year...
+\newcommand{\eg}{e.\,g.\@\xspace} % not sure if ACM allows newcommands this year...
+\newcommand{\wrt}{w.\,r.\,t.\@\xspace} % not sure if ACM allows newcommands this year...
+\setlength {\marginparwidth }{1.5cm}
+\usepackage[colorinlistoftodos,textsize=tiny]{todonotes} 
+
+\newtheorem{assumption}{Assumption}
+
+% For the Pie Charts:
+% \usepackage{pgf-pie} % not ok
+\usepackage{subcaption} % ok
+% \usepackage{changepage} % not ok
+%\usepackage{tikz,pgfplots,pgfplotstable} % not ok
+%\pgfplotsset{compat=1.9}
+
+
+% For Turtle Listings:
+% Turtle Listings
+
+\usepackage{listings} % ok
+\usepackage{xcolor} % ok
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+\lstdefinestyle{turtle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+\lstdefinelanguage{Turtle}
+{
+    columns=fullflexible,
+    morekeywords={@prefix,@base,@forSome,@forAll,@keywords},
+    morecomment=[l]{\#},
+    tabsize=4,
+    alsoletter={-?}, % allowed in names
+    morecomment=[s][\color{blue}]{<}{>},
+    %numberstyle=\color{black},
+    morestring=[b][\color{codepurple}]\",
+}
+% --- SPARQL Style Definition ---
+\lstdefinestyle{sparql}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                   
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+% --- SPARQL Language Definition ---
+\lstdefinelanguage{SPARQL}{
+    columns=fullflexible,
+    morekeywords={
+        PREFIX, BASE, SELECT, DISTINCT, CONSTRUCT, DESCRIBE, ASK, WHERE, 
+        FROM, NAMED, GRAPH, OPTIONAL, UNION, FILTER, 
+        ORDER, BY, ASC, DESC, LIMIT, OFFSET, 
+        GROUP, HAVING,
+        BIND, VALUES,
+        COUNT, SUM, MIN, MAX, AVG, SAMPLE, 
+        STR, LANG, DATATYPE, BOUND, REGEX, EXISTS, NOT
+    },
+    morecomment=[l]{\#},
+    morestring=[b]",
+    morestring=[b]',
+    moredelim=**[s][\color{darkgray}]{?}{\ }, % Variables starting with ?
+    moredelim=**[s][\color{darkgray}]{\$}{\ }, % Variables starting with $
+    moredelim=[s][\color{blue}]{<}{>},    % URIs
+    alsoletter={?} % Allow ? in identifiers for variables
+}
+
+
+
+\begin{document}
+%
+% \title{zkRDF: Selective Disclosure of RDF Datasets using SPARQL-derived Zero-Knowledge Proofs}
+\title{zkRDF: Proving the Validity of SPARQL Query Results using Selective Disclosure of RDF Datasets and Zero-Knowledge Proofs}
+%
+%\titlerunning{Abbreviated paper title}
+% If the paper title is too long for the running head, you can set
+% an abbreviated paper title here
+%
+\author{Christoph H.-J. Braun}
+\email{braun@kit.edu}
+\orcid{0000-0002-5843-0316}
+\affiliation{%
+  \department{Institute AIFB}
+  \institution{Karlsruhe Institute of Technology}
+  \city{Karlsruhe}
+  \country{Germany}
+}
+\author{Jesse Wright}
+\email{jesse.wright@cs.ox.ac.uk}
+\orcid{0000-0002-5771-988X}
+\affiliation{%
+    \department{Department of Computer Science}
+  \institution{University of Oxford}
+  \city{Oxford}
+  \country{United Kingdom}
+}
+\author{Tobias Käfer}
+\email{tobias.kaefer@kit.edu}
+\orcid{0000-0003-0576-7457}
+\affiliation{%
+\department{Institute AIFB}
+  \institution{Karlsruhe Institute of Technology}
+  \city{Karlsruhe}
+  \country{Germany}
+}
+
+
+%
+\begin{abstract}
+We introduce {zkRDF}, a data-centric approach to selectively disclose SPARQL query results in RDF datasets using Zero-Knowledge Proofs (ZKPs).\todo{JW: soundness of SPARQL query results without disclosing the underlying dataset}
+Instead of proving the correct execution of a query, query results are indirectly proven to be correct by proving properties about the underlying RDF dataset: 
+The queried RDF dataset is selectively disclosed based on the patterns and expressions specified by the SPARQL query.
+A data consumer\todo{JW: I would suggest consistently using issuer/holder/verifier terminology to be consistent with VC ladn}, who verifies the proofs about the properties of the received dataset is then able to obtain the desired query results by executing the query (or a re-written version of it) on the received selectively disclosing dataset.
+We present zkRDF's abstract methodology and detail a conceptual instantiation thereof -- how a SPARQL query is to be interpreted to selectively disclose the corresponding query results in the underlying dataset.
+We show that zkRDF supports commonly-used SPARQL features and that our proof-of-concept implementation outperforms an alternative approach, which generates ZKPs of SPARQL query computations on their own benchmark significantly.
+We also highlight security and privacy considerations for solution architects.
+\end{abstract}
+
+
+
+
+
+%%
+%% The code below is generated by the tool at http://dl.acm.org/ccs.cfm.
+%% Please copy and paste the code instead of the example below.
+%%
+\begin{CCSXML}
+<ccs2012>
+   <concept>
+       <concept_id>10002951.10003260</concept_id>
+       <concept_desc>Information systems~World Wide Web</concept_desc>
+       <concept_significance>500</concept_significance>
+       </concept>
+ <ccs2012>
+<concept>
+<concept_id>10002951.10002952.10002953.10010146</concept_id>
+<concept_desc>Information systems~Graph-based database models</concept_desc>
+<concept_significance>500</concept_significance>
+</concept>
+<concept>
+<concept_id>10002951.10002952.10003197.10010825</concept_id>
+<concept_desc>Information systems~Query languages for non-relational engines</concept_desc>
+<concept_significance>500</concept_significance>
+</concept>
+<concept>
+<concept_id>10002978.10003029.10011150</concept_id>
+<concept_desc>Security and privacy~Privacy protections</concept_desc>
+<concept_significance>500</concept_significance>
+</concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Information systems~World Wide Web}
+\ccsdesc[500]{Security and privacy~Privacy protections}
+\ccsdesc[300]{Information systems~Graph-based database models}
+\ccsdesc[300]{Information systems~Query languages for non-relational engines}
+
+
+%%
+%% Keywords. The author(s) should pick words that accurately describe
+%% the work being presented. Separate the keywords with commas.
+\keywords{RDF, Verifiable Credentials, SPARQL, Zero-Knowledge Proofs}
+
+
+
+\maketitle              % typeset the header of the contribution
+%
+%
+%
+\input{section/01_Introduction}
+\input{section/02_Preliminaries}
+\input{section/04_Example}
+\input{section/03_Framework}
+\input{section/05_Eval-Discussion}
+\input{section/06_Conclusion}
+
+%%
+%% The acknowledgments section is defined using the "acks" environment
+%% (and NOT an unnumbered section). This ensures the proper
+%% identification of the section in the article metadata, and the
+%% consistent spelling of the heading.
+% \begin{acks}
+% This research was partially funded by the Deutsche Forschungsgemeinschaft (DFG, German Research Foundation) – Project number 459291153 – Research Unit 5339.
+% \end{acks}
+%
+% ---- Bibliography ----
+%
+% BibTeX users should specify bibliography style 'splncs04'.
+% References will then be sorted and formatted in the correct style.
+%
+\bibliographystyle{splncs04}
+\bibliography{literature}
+%
+
+\appendix
+
+\input{section/appendix}
+
+\end{document}
