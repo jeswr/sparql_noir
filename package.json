@@ -13,6 +13,7 @@
     "example:verify": "node dist/scripts/verify.js -i temp/data.json",
     "example": "npm run example:sign && npm run example:verify",
     "e2e": "npm run build && npm run example",
+    "build:noir:gen": "cd transform && cargo run -p transform -- --input ../inputs/data/data.ttl --output ../temp/data.json --query ../inputs/sparql.rq",
     "benchmark": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark",
     "benchmark:signature": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark noir/bin/signature",
     "benchmark:encode": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark noir/bin/encode",

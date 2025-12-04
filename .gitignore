@@ -30,3 +30,5 @@ noir/bin/*/Prover.toml
 # Noir installation
 .noirup/
 .nargo/
+
+legacy/

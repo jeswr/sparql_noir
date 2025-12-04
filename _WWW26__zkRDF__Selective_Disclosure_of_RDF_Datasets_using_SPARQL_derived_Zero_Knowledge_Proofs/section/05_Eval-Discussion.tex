@@ -1,0 +1,326 @@
+\section{Evaluation}
+\label{sec:eval}
+
+We evaluate our zkRDF approach by assessing its competence in terms of which SPARQL features~\cite{SPARQL} are or could be supported.
+In addition, we compare performance between our proof-of-concept implementation\footnote{\url{https://anonymous.4open.science/r/rdf-zkp-sparql}} with the SPARQL-in-zkVM project\footnote{\url{https://github.com/jeswr/risc0-ed25519-zk-sparql}}, the implementation of the related work on queryable credentials\footnote{\url{https://github.com/jeswr/queryable-credentials}}.
+Finally, we discuss security and privacy implications in this approach.
+We see the evaluation along the three dimensions of competence, performance (or efficiency), and security \& privacy as a potential framework to aid evaluating alternative, comparable approaches.
+
+\subsection{Competence: SPARQL Feature Support}
+\label{sec:eval_competence}
+
+\paragraph{Query Forms.} 
+In zkRDF, the query expresses to a data holder (prover) what information the data consumer (verifier) desires to be proven.
+For this purpose, SPARQL's different query forms are interpreted different from their specified behavior for query evaluation.
+Instead of providing regular SPARQL query results, the approach selectively discloses and proves properties of the underlying  dataset. 
+
+For a \texttt{SELECT} query, the approach does not yield a set of solution mappings but instead provides a selectively disclosing dataset from which the solution mapping can be retrieved.
+Variables specified for projection are considered explicitly included to be revealed, while all other variables are implicitly excluded from disclosure and thus remain hidden.
+
+For an \texttt{ASK} query, the approach does not yield a boolean value but instead provides a selectively disclosing dataset. The ASK query is interpreted as a SELECT query without any variables to project.
+This means, if the ASK query results in \texttt{true}, then the selectively disclosing dataset proves that result to indeed exist.
+A query result of \texttt{false} cannot be proven in the zkRDF approach:
+A selectively disclosing dataset cannot prove non-existence of query results.
+The underlying original dataset may contain quads matching the query's graph patterns and expressions but this fact may remain hidden in the final selectively disclosing dataset, \eg when the number of results is restricted using \texttt{LIMIT}.
+In this case, such excluded query results remain hidden -- proving that they do not exist is not possible in this approach.
+
+For a \texttt{CONSTRUCT} query, the approach behaves the same as for a SELECT query where all variables from construct clause are to be projected.
+The result is a selectively disclosing dataset from which the query-defined graph can be constructed by the data consumer.
+
+The \texttt{DESCRIBE} query form is not supported, as it ambiguous what data to selectively disclose as a result.
+
+
+\paragraph{Graph Patterns.} 
+The zkRDF approach supports almost all operators on graph patterns trivially.
+The approach simply does not prove the application of these operators on a solution set, which would be a computation-centric proof, but rather proves that a match satisfies the constraints imposed by the operators and their graph patterns, which is a data-centric proof. 
+Therefore, \texttt{JOIN}, \texttt{UNION}, \texttt{LATERAL}, 
+%\todo{JW: Lateral is not an operator - do you mean OPTIONAL?}
+\texttt{LEFTJOIN}, 
+%\todo{JW: MINUS breaks the Open World Assumption; I assume that you are using a non-membership proof to handle this. In the security section I would discuss that operators violating the OWA assumption should be avoided in multi-credential use-cases, as dropping a credential from the input can be a way of working around the MINUS}
+and \texttt{GRAPH} are all supported.
+
+\texttt{LEFTJOIN} could additionally be treated by requiring a decision on whether or not to include the optionally queried data. 
+This decision could be automated or delegated to a supervising user.
+As the approach presented in~\cite{DBLP:conf/esws/BraunK25} operates on RDF datasets, the \texttt{GRAPH} clause is also directly supported.
+
+Only \texttt{MINUS} is not supported: 
+Although the application of the operator works as expected -- it reduces the set of solution mappings that are to be proven to exist --, the remaining results cannot be proven to satisfy the restriction, \ie, to not satisfy the graph pattern from the \texttt{MINUS} clause.
+Similar to the \texttt{ASK} query form, proving non-existence of information is not possible here.
+%\todo{JW: To my previous comment - if a MINUS exists in the query, do you prove that all results in the results set should not have been MINUS'd by performing a set non-membership check?}.
+
+
+
+\paragraph{Expressions.}
+In the scope of this work, the zkRDF approach focuses on relational expressions in \texttt{FILTER} statements to express numeric bounds.
+Integers are natively supported while dates and time need special consideration (cf. Appendix C of~\cite{DBLP:conf/esws/BraunK25}).\todo{Be more explicit about what is and is not supported. Specifically: What datatypes are supported? Is coercion between different numeric types supported? Is numeric equality supported correctly - can you prove that 2:int = 2.0:double? Note that filter equality is not a SAMETERM check - this fooled me for quite a while! The best way to do this may be to enumerate the operations supported in the SPARQL binary operators table at \url{https://www.w3.org/TR/sparql11-query/}}
+In terms of logical expressions, AND (\texttt{\&\&}) and OR (\texttt{||}) are supported for the supported numeric relational expressions.
+
+The way that zkRDF, based on the transformation approaches presented in~\cite{DBLP:conf/esws/BraunK25}, currently encodes RDF terms does not support all string expressions in zero-knowledge, \ie, manipulating strings or inspecting single characters of a string\todo{JW: I suggest omitting discussion of what features are NOT supported and why (incliding for strings, conditional expressions and aggregates). The \textit{what} is implicit (everything that you've not explicitly stated supporting), the why in case of strings is not informative. CB: I dare to disagree. The \textit{what} provides grounds to talk about the \textit{why}, which in turn let's us draw conclusions and give guidance. Here, it provides the basis to state that encoding terms is an important consideration for this type of work.}.
+If such features were to be supported, a different way of transforming RDF terms into field elements is required.
+Some features, however, are indirectly supported:
+For example, proving that a literal is of a certain datatype is possible by only revealing the datatype of the literal while hiding the actual value.
+This shows that the issue of encoding RDF terms to be used in ZKPs is not just an implementation detail but rather a fundamental consideration when designing a proof system.
+
+Conditional expressions (\texttt{if}, \texttt{bound}, \texttt{coalesce}, ...) are currently considered out-of-scope to be proven in zero-knowledge. 
+If corresponding variables are projected, then the corresponding properties can be shown to be correct.
+Again, proving non-existence of information is not possible.
+
+\begin{comment}
+One exception in special cases is \texttt{IN}.
+In a FILTER expression, {IN} may be proven using a proof of set membership and NOT IN may be proven using a proof of set non-membership\todo{JW: My comments related to MINUS + OWA also apply here}.
+Such proofs may require a particular setup by an issuer of a signed dataset, which is the case for a Universal Accumulator~\cite{DBLP:journals/iacr/VittoB20}.
+\end{comment}
+
+Aggregates specify computations typically used for analytical queries. 
+In the scope of this work, we consider proving \texttt{COUNT}, \texttt{SUM}, \texttt{AVG}, \texttt{MIN}, or \texttt{MAX} out-of-scope.
+However, in general, we do see a potential approach to support aggregates using arithmetic circuits, a general-purpose cryptographic construct to specify and prove custom relations. 
+% In designing these circuits compatible with the current approach of zkRDF, the number of input values to the aggregates would need to be disclosed.
+% To prove such analytical queries, a computation-centric approach might be a better fit than the data-centric zkRDF approach.
+We therefore consider this as future research.
+
+If variables in aggregates are projected, then the underlying data is revealed and a verifier is able to compute the aggregates themselves, which then enables using aggregates in \texttt{HAVING} clauses to filter results of grouped solutions.
+
+\paragraph{Property Paths.}
+In scope of this work, we consider property paths to be out-of-scope.
+However, in general, property paths are supported in zkRDF.
+There does not exist a generic way to obtain the intermediate nodes of a path; so we outline a naive approach:
+Beginning with the query's solution mappings, \ie the end of the path, iteratively retrace the query-defined path in the queried dataset until the start of the path is reached.
+While we did not implement this in our proof-of-concept, proving the existence of a property path in a data-centric manner is possible.
+The selectively disclosing dataset would reveal the property path while hiding intermediary nodes. 
+Negated property sets are not supported as non-existence cannot be proven.
+
+\paragraph{Solution Modifiers.} 
+In zkRDF's data-centric approach, the application of solution modifiers is not proven, rather only the resulting solution mappings are disclosed.
+For example, \texttt{GROUP BY} % Partitions the solution set into groups, which is a prerequisite for using aggregate functions.
+is supported even when the variable to group by remains hidden. 
+Matching RDF terms will be substituted with the corresponding blank nodes across a term's occurrences, which then allows to still group the solution mappings based on that variable which is now simply mapped to the stand-in blank node.
+
+The result of \texttt{DISTINCT} (or \texttt{REDUCED}) is simply a selectively disclosing dataset that only proves the reduced set of solution mappings.
+The fact that solution mappings are distinct is not proven; the data consumer verifies the property by inspection.
+
+For \texttt{LIMIT}, the desired number of solution mappings is proven to exist; discarded solution mappings are simply omitted and not proven to exist. 
+The desired cardinality of the solution is verified by inspection.
+
+In the scope of this work, the result of \texttt{OFFSET} cannot be proven in zero-knowledge by zkRDF.
+Without pre-scribing an ordering using \texttt{ORDER BY}, the solution is a set of solution mappings.
+It is thus ambiguous which solution mapping would be considered by \texttt{OFFSET}.
+If the set of solution mappings proven to exist is sufficiently large, then the data consumer can apply the offset themselves.
+Such oversharing may reveal unnecessary information.
+
+Similarly for \texttt{ORDER BY}: % Sorts the solutions based on one or more variables.
+If the variable to order by is not projected, then the matching RDF terms will be replaced by blank nodes.
+Proving an ordering in zero-knowledge is not possible by zkRDF in the scope of this work.
+Similar to aggregates, there may be again some potential by using arithmetic circuits -- potential future research.
+If the variable to order by is projected, then the matching RDF terms and the resulting ordering are revealed.
+The data consumer verifies it by inspection.
+
+
+
+\subsection{Performance: PoC Implementation}
+\label{sec:eval_performance}
+
+The related work mentioned on proving the execution of a SPARQL query in a zkVM (SPARQL-in-zkVM) provides a small testing benchmark\footnote{\url{https://github.com/jeswr/risc0-ed25519-zk-sparql\#running-the-benchmark}}, which we refer to as \texttt{risc0-bench}.
+We emphasize that this testing benchmark is not a contribution of this paper.
+%\todo{JW: IIRC you also benchmarked against \url{https://github.com/jeswr/zkSPARQL-bench} - I suggest including those results here.
+%CB: but you did not... what is the point of including numbers with nothing to compare it to?}
+
+
+The \texttt{risc0-bench} testing benchmark includes a dataset of four VCs with varying yet overlapping contents from different issuers.
+The employed signature scheme is a \texttt{Ed25519} Linked Data Signature.
+The VCs are provided in JSON-LD serialisation.
+The \texttt{risc0-bench} testing benchmark offers three queries\footnote{\url{https://github.com/jeswr/risc0-ed25519-zk-sparql/blob/main/queries}}:
+\begin{itemize}[noitemsep,topsep=0pt,parsep=0pt,partopsep=0pt,wide,labelwidth=!,labelindent=0pt,leftmargin=14pt]
+    \item \texttt{can-drive}: a query with \texttt{FILTER} statements expressing numeric bounds.
+    \item \texttt{employment-status}: a simple graph pattern query.
+    \item\texttt{show-all}: a generic \enquote{select all} \texttt{spo} graph pattern query.
+\end{itemize}
+These queries do not include any aggregation functions but are instead rather geared towards querying credentials for selective disclosure of personal information.
+This allows for a comparison of the computation-centric approach  with our data-centric zkRDF.
+
+\paragraph{Performance Comparison.} We summarize our benchmarking results in Table~\ref{tab:framework_comparison}. 
+We ran \texttt{risc0-bench} for the SPARQL in zkVM approach on our hardware, a consumer laptop with an AMD Ryzen 7 PRO 5850U, to generate a performance baseline:
+\begin{comment}
+SPARQL zkVM         prove           verify
+can-drive           1571816.15 ms   7792.54 ms
+employment-status   1463066.24 ms   6782.48 ms
+show-all            1736362.18 ms   8878.46 ms
+\end{comment}
+\begin{comment}
+\begin{table}[htbp]
+    \centering
+    \caption{Performance of the SPARQL-zkVM approach (in milliseconds)}
+    \label{tab:sparql_zkvm_performance}
+    \begin{tabular}{l|r|r}
+        \toprule
+        \textbf{Task} & \textbf{Prove Time} & \textbf{Verify Time} \\
+        \midrule
+        can-drive         & 1571816.15 & 7792.54 \\
+        employment-status & 1463066.24 & 6782.48 \\
+        show-all          & 1736362.18 & 8878.46 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+\end{comment}
+Proving the execution of the respective queries using a zkVM thus takes approximately 26 minutes (\texttt{can-drive}), 24 minutes (\texttt{employment-status}), and 29 minutes (\texttt{show-all}).
+
+\begin{table}[tb]
+    \centering
+    \caption{Performance comparison in milliseconds (ms).}
+    \label{tab:framework_comparison}
+    \small 
+    \setlength{\tabcolsep}{3pt} 
+
+    \begin{tabular}{|l|rr|rr|}
+        \toprule
+        & \multicolumn{2}{c|}{%
+            \shortstack{SPARQL-in-zkVM (theirs)}
+          } 
+        & \multicolumn{2}{c|}{%
+            \shortstack{zkRDF (ours)}
+          } \\
+        \textbf{Task} & \textbf{Prove} & \textbf{Verify} & \textbf{Prove} & \textbf{Verify} \\
+        \midrule
+        can-drive       & 1571816.15 & 7792.54~~ & \hspace{10pt}141.61 & \hspace{10pt} 27.63   \\
+        employment-status & 1463066.24 & 6782.48~~ & 5.51   & 5.38    \\
+        show-all        & 1736362.18 & 8878.46~~ & 437.02 & 1650.80 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+Our implementation, based on the work provided in~\cite{DBLP:conf/esws/BraunK25}, uses the \texttt{BBS+} signature scheme instead of \texttt{Ed25519}.
+We therefore created \texttt{BBS+} signatures for the credential data provided by \texttt{risc0-bench}.
+Moreover, we ran into a practical issue during implementation:
+How do we handle multiple VCs in our knowledge base?
+More specifically, do we merge the default graphs or do we mint new named graphs for each VC's default graph.
+As mentioned in Section~\ref{sec:prelim}, we went with the latter approach which required amending the queries accordingly to work on named graphs.
+The modified version of \texttt{risc0-bench}\footnote{Contained in: \url{https://anonymous.4open.science/r/rdf-zkp-sparql/tree/main/benches}} results in the following performance numbers on our hardware (using \texttt{criterion.rs}).
+\begin{comment}
+zkRDF                prove           verify
+can-drive                141.61 ms    27.63 ms
+employment-status          5.51 ms     5.38 ms
+show-all                 437.02 ms  1650.80 ms 
+\end{comment}
+\begin{comment}
+\begin{table}[htbp]
+    \centering
+    \caption{Performance of the zkRDF approach (in milliseconds)}
+    \label{tab:zkrdf_performance}
+    \begin{tabular}{l|r|r}
+        \toprule
+        \textbf{Task} & \textbf{Prove Time} & \textbf{Verify Time} \\
+        \midrule
+        can-drive         & 141.61 & 27.63   \\
+        employment-status & 5.51   & 5.38    \\
+        show-all          & 437.02 & 1650.80 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+\end{comment}
+For this exemplary benchmark, the data-centric approach of zkRDF is at least three orders of magnitude faster in creating a proof than the computation-centric approach of executing SPARQL within a zkVM.
+
+A note on the (relatively) long verification time of the \texttt{show-all} query: 
+Verifying the cryptographic proof only takes around 350ms; the rest is taken up by loading and handling the received dataset -- probably not efficiently implemented. %\todo{I would have expected the only thing needed here is the proof of knowledge of signature for the dataset, since everything in the dataset is disclosed - why is this still significantly longer than the verification time for emplyoment-status (5ms)}
+Still, 350ms may seem long compared to the 5ms verification time of the \texttt{employment-status} query.
+For comparison: The \texttt{employment-status} query entails proving the existence of one binding using a corresponding proof of knowledge of signature of one VC.
+The \texttt{show-all} query entails proving the existence of 85 proving existence of 85 bindings using corresponding proofs of knowledge of signature of their respective VCs (\ie 85 proofs).
+Although only four VC \enquote{produce} the 85 bindings, it must not be revealed which bindings are produced by a particular graph -- it should only be disclosed that they exist in \textit{some} graph. 
+Whether that is the same or a different graph as for another binding must not be revealed.
+
+Note that this behaviour is the same for BGPs consisting of multiple triple patterns as well:
+Specifying such a BGP will result in a binding and corresponding proof that there exist RDF terms matching the BGP within the same graph.
+If there exist another binding, there will be a corresponding proof but it will not be revealed if the second binding was produced by the same graph or a different graph as the first binding.
+
+\paragraph{Performance Breakdown per Procedures.}
+To further break down performance of the respective internal procedures from the abstract methodology presented in Section~\ref{sec:framework_abstract}, we tracked execution times within our code in addition to the \texttt{criterion.rs} benchmarking, presented in Table~\ref{tab:query_performance}. The total proving time may thus vary slightly compared to Table~\ref{tab:framework_comparison}.
+The \texttt{Understand*} task is comprised of the {Query Execution} and parts of  the {Solution and Query Analysis} procedures. 
+The remaining parts of the {Analysis} procedures are captured by \texttt{Specify Proof}, which is the \enquote{glue} between the analysis procedures and the proof system.
+Finally, \texttt{Create Proof} refers to the generation of the cryptographic proof and \texttt{Present Proof} refers to the serialisation of the selectively disclosing dataset which together correspond to the Proof Creation procedure 
+\begin{comment}
+(ms)        understand* query, specify proof, create proof, present proof, total
+can-drive   1.59,  1.36, 137.74,  0.90, 141.80
+employ-stat 0.57,  0.38,   4.22,  0.23,   5.45
+show-all    9.96, 30.88, 375.78, 18.60, 435.30
+\end{comment}
+\begin{table}[tb]
+    \centering
+    \caption{Query Performance Metrics in milliseconds (ms).}
+    \label{tab:query_performance}
+
+    \small % Use a smaller font
+    \setlength{\tabcolsep}{3pt} % Reduce space between columns
+
+    \begin{tabular}{|l||r|r|r|r||r|}
+        \toprule
+        \textbf{Query} & \shortstack{Under-\\stand*} & \shortstack{Specify\\Proof} & \shortstack{Create\\Proof} & \shortstack{Present\\Proof} & \textbf{Total} \\
+        \midrule
+        can-drive   & 1.59  & 1.36  & 137.74 & 0.90  & 141.80 \\
+        employ-stat & 0.57  & 0.38  & 4.22   & 0.23  & 5.45   \\
+        show-all    & 9.96  & 30.88 & 375.78 & 18.60 & 435.30 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+We thus see that cryptographic proof creation takes most of the overall execution time.
+Executing the query, deriving which proofs to create and presenting the result in the end offer less optimization potential compared to choosing an efficient proof system. 
+
+\subsection{Privacy \& Security: Discussion}
+\label{sec:eval_security}
+\paragraph{Information Leakage.}
+The zkRDF approach offers significant enhancement of data privacy by reducing the amount of information being revealed.
+Albeit named zero-knowledge (zk) RDF, the approach itself is not completely zero-knowledge.
+For example, the number of proofs of knowledge of signatures indicate how many graphs from the underlying private dataset were used to create a solution mapping.
+Moreover by these proofs of knowledge of signature, the size of the respective RDF graphs is being revealed.
+This means that certain information may be revealed, even though ZKPs, which are indeed zero-knowledge, are being applied.
+
+Such information leaks are due to a discrepancy between the intention of a proof and the actual relation being proven by an employed ZKP:
+For example, consider the following intention: \textit{\enquote{I want to prove that a triple attesting my correct birthdate was signed by the government.}}
+One way to instantiate the intended proof is by employing a proof of knowledge of signature on the RDF graph which contains such triple.
+However, for multi-message signatures like BBS+~\cite{DBLP:journals/iacr/CamenischDL16}, the corresponding relation is: \textit{\enquote{I know a valid signature on a list of (secret) values; I reveal some values from that list to you.
+Also, I prove that I know the remaining hidden values.}} %\todo{JW: is there a simpler way of saying this? CB: like so?} 
+It is required to prove knowledge of hidden values in this case because the signature algorithm already exposes the length of the list of values.
+Minimizing the information exposed might require more complex and  potential slower proof systems like the SPARQL-in-zkVM approach. 
+
+For system architects, it is therefore crucial to consider the discrepancy between the theoretical intention of a proof and the choice of its practical implementation.
+For some use cases, the outlined leaking of graph size might pose an acceptable trade-off.
+For other use cases, optimizing for data minimization might be paramount.
+
+\paragraph{Malicious Query.}
+Being able to prove properties about an RDF dataset in zero-knowledge does not imply immunity against information over-exposure.
+Consider the \texttt{show-all} query from the performance evaluation.
+All data from the underlying dataset is being exposed, and in addition it is proven to be signed by the corresponding issuers.
+An attacker thus not only gains all the information but also receives assurance of that information for free.
+To protect against such malicious queries, 
+system architects may choose to restrict the set of acceptable queries.
+This can be done by directly defining a set of permissible queries in a general query language or choosing a query language with restricted expressivity, a domain-specific language (DSL) like the Digital Credentials Query Language (DCQL)~\cite{openID4VP} (cf. Section~\ref{sec:prelim}).
+
+Nonetheless, system architects must be aware of this threat when considering their system's trust model.
+For some use cases, a human's check on the data to be presented may be sufficient.
+For other use cases, possible information over-exposure must be ruled out; a non-trivial task and potential future research.
+In any case, we strongly recommend formally verifying the system's security~\cite{DBLP:conf/www/BraunHKM24}.
+% \todo{JW: I suggest doing a more formal security analysis of the zkRDF system which describes precisely what information is disclosed beyond the query results.}
+
+
+% \todo{JW: Suggest making a statement about the following properties - ideally with formal proof. There may also be other properties discussed in the W3C VC security considerations section that you may wish to account for \url{https://www.w3.org/TR/vc-data-model-2.0/\#replay-attack} and \url{https://www.w3.org/TR/vc-di-bbs/\#privacy-considerations}}
+
+\begin{comment}
+These I would consider most important from a formal alaysis standpoint
+\begin{enumerate}
+    \item \textbf{Unlink-ability (pre and post quantum)}
+    \item \textbf{Disclosure of sources/credentials used in a result}
+    \item \textbf{post-quantum forgery: is it possible forge credentials and hence query results in a post quantum world}
+    \item \textbf{post-quantum snooping: is it possible to reveal facts from the ZKP in a post-quantum world, is it possible to e.g. find the hash of the credential and work out the contents in a post quantum world}
+\end{enumerate}
+
+These I would consider useful discussion from a deployment / spec standpoint
+\begin{enumerate}
+    \item \textbf{Validity period}: Can/do you include validity periods in your result (derived from the validity period of the credentials from which the data was queried). Note this in turn could result in information leakage as to which credential the data was derived from
+\end{enumerate}
+\end{comment}
+
+% \section{Discussion}
+
+% \subsection{Data Model}
+
+% \subsection{Standardization?}
