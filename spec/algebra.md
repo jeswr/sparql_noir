@@ -1,450 +1,415 @@
-# SPARQL Algebra Specification
+# SPARQL to Noir Mapping
 
-This document specifies the extended SPARQL algebra semantics for zero-knowledge proof generation. It defines how SPARQL query evaluation is augmented to track term occurrences, enabling proof construction.
+This document specifies how SPARQL query patterns are transformed into Noir circuit constraints.
 
-## 1. Preliminaries
+## 1. Overview
 
-### 1.1 Standard SPARQL Algebra
-
-Following [SPARQL 1.1 Query Language](https://www.w3.org/TR/sparql11-query/), the SPARQL algebra consists of:
-
-| Operation | Notation | Description |
-|-----------|----------|-------------|
-| BGP | $\text{BGP}(P)$ | Basic Graph Pattern |
-| Join | $P_1 \bowtie P_2$ | Natural join |
-| Union | $P_1 \cup P_2$ | Disjunction |
-| LeftJoin | $P_1 \mathbin{\text{⟕}} P_2$ | Optional pattern |
-| Filter | $\sigma_F(P)$ | Constraint filter |
-| Extend | $\rho_{v \leftarrow e}(P)$ | Variable binding |
-| Project | $\pi_V(P)$ | Variable projection |
-
-### 1.2 Solution Mapping
-
-A **solution mapping** $\mu$ is a partial function:
-$$
-\mu : V \rightharpoonup T
-$$
-
-Where $V$ is the set of variables and $T = U \cup B \cup L$ is the set of RDF terms.
-
-**Domain:** $\text{dom}(\mu) = \{v \in V \mid \mu(v) \text{ is defined}\}$
-
-**Compatibility:** Two mappings $\mu_1$ and $\mu_2$ are compatible ($\mu_1 \sim \mu_2$) iff:
-$$
-\forall v \in \text{dom}(\mu_1) \cap \text{dom}(\mu_2) : \mu_1(v) = \mu_2(v)
-$$
+A SPARQL SELECT query is transformed into a Noir circuit that:
+1. Takes signed dataset roots and variable bindings as input
+2. Verifies signatures on dataset roots
+3. Verifies Merkle inclusion of triples matching the query pattern
+4. Asserts variable binding consistency
 
 ---
 
-## 2. Extended Solution Mapping
+## 2. Basic Graph Pattern (BGP)
 
-### 2.1 Indexed Solution Mapping
+### 2.1 Triple Pattern Mapping
 
-For ZK proof generation, we extend solution mappings to track *where* each binding originated in the dataset.
+Each triple pattern `(?s, ?p, ?o)` generates:
 
-**Definition (Indexed Solution Mapping):**
+1. **Circuit input:** A `TripleInput` struct with encoded terms and Merkle path
+2. **Inclusion assertion:** Verify the triple is in a signed dataset
+3. **Binding assertions:** Link variables to their positions in the triple
 
-An indexed solution mapping $\mu^+$ is a function:
-$$
-\mu^+ : V \rightharpoonup (T \times \mathcal{P}(\mathcal{O}))
-$$
-
-Where $\mathcal{O} = (U \cup B) \times \mathbb{N} \times \mathbb{N}$ is the set of **occurrence indices**.
-
-An occurrence index $(g, i, j)$ represents:
-- $g$: Graph identifier (IRI or blank node for named graphs, $\bot$ for default)
-- $i$: Triple index within the graph
-- $j$: Position within the triple (0=subject, 1=predicate, 2=object)
-
-### 2.2 Projection Functions
-
-For an indexed solution mapping $\mu^+$:
-
-$$
-\text{term}(\mu^+(v)) = t \quad \text{where } \mu^+(v) = (t, O)
-$$
-
-$$
-\text{occ}(\mu^+(v)) = O \quad \text{where } \mu^+(v) = (t, O)
-$$
-
-### 2.3 Standard Mapping Extraction
-
-The underlying standard solution mapping:
-$$
-\text{std}(\mu^+)(v) = \text{term}(\mu^+(v))
-$$
-
----
-
-## 3. Extended Evaluation Semantics
-
-### 3.1 Notation
-
-Let $D$ be an RDF dataset with default graph $G_0$ and named graphs $\{(g_i, G_i)\}$.
-
-The extended evaluation function:
-$$
-\text{eval}^+ : \text{Pattern} \times \text{Dataset} \to \mathcal{P}(\text{IndexedSolutionMapping})
-$$
-
-### 3.2 Basic Graph Pattern (BGP)
-
-For a BGP consisting of triple patterns $\{tp_1, \ldots, tp_n\}$:
-
-$$
-\text{eval}^+(\text{BGP}(\{tp_1, \ldots, tp_n\}), D) = \bigcup_{(G, g) \in D} \text{eval}^+_G(\{tp_1, \ldots, tp_n\}, g)
-$$
-
-**Single Triple Pattern:**
-
-For triple pattern $tp = (s, p, o)$ evaluated against graph $G$ with identifier $g$:
-
-$$
-\text{eval}^+_G(tp, g) = \{\ \mu^+ \mid \exists (s', p', o') \in G, i \in \mathbb{N} :
-$$
-$$
-\quad \mu^+ \text{ maps each variable in } tp \text{ to matching term with occurrence } (g, i, pos)\ \}
-$$
-
-Where $pos \in \{0, 1, 2\}$ corresponds to subject, predicate, object positions.
-
-### 3.3 Join
-
-$$
-\text{eval}^+(P_1 \bowtie P_2, D) = \{\ \mu^+_1 \bowtie^+ \mu^+_2 \mid
-$$
-$$
-\quad \mu^+_1 \in \text{eval}^+(P_1, D), \mu^+_2 \in \text{eval}^+(P_2, D), \text{std}(\mu^+_1) \sim \text{std}(\mu^+_2)\ \}
-$$
-
-**Indexed Join Operation:**
-
-For compatible $\mu^+_1, \mu^+_2$:
-
-$$
-(\mu^+_1 \bowtie^+ \mu^+_2)(v) = \begin{cases}
-(\text{term}(\mu^+_1(v)), \text{occ}(\mu^+_1(v)) \cup \text{occ}(\mu^+_2(v))) & \text{if } v \in \text{dom}(\mu^+_1) \cap \text{dom}(\mu^+_2) \\
-\mu^+_1(v) & \text{if } v \in \text{dom}(\mu^+_1) \setminus \text{dom}(\mu^+_2) \\
-\mu^+_2(v) & \text{if } v \in \text{dom}(\mu^+_2) \setminus \text{dom}(\mu^+_1)
-\end{cases}
-$$
-
-### 3.4 Union
-
-$$
-\text{eval}^+(P_1 \cup P_2, D) = \text{eval}^+(P_1, D) \cup \text{eval}^+(P_2, D)
-$$
-
-Union preserves occurrence indices from whichever branch produced the binding.
-
-### 3.5 Left Join (Optional)
-
-$$
-\text{eval}^+(P_1 \mathbin{\text{⟕}} P_2, D) = (\text{eval}^+(P_1, D) \bowtie^+ \text{eval}^+(P_2, D)) \cup
-$$
-$$
-\quad \{\ \mu^+_1 \mid \mu^+_1 \in \text{eval}^+(P_1, D), \nexists \mu^+_2 \in \text{eval}^+(P_2, D) : \text{std}(\mu^+_1) \sim \text{std}(\mu^+_2)\ \}
-$$
-
-**Note:** The second set contains mappings where the optional pattern did not match. These have empty occurrence sets for optional variables.
-
-### 3.6 Filter
-
-$$
-\text{eval}^+(\sigma_F(P), D) = \{\ \mu^+ \in \text{eval}^+(P, D) \mid F(\text{std}(\mu^+)) = \text{true}\ \}
-$$
-
-Filter evaluation uses the standard mapping; occurrence indices are preserved unchanged.
-
-### 3.7 Extend (BIND)
-
-$$
-\text{eval}^+(\rho_{v \leftarrow e}(P), D) = \{\ \mu^+[v \mapsto (e(\text{std}(\mu^+)), \emptyset)] \mid \mu^+ \in \text{eval}^+(P, D)\ \}
-$$
-
-Extended variables have empty occurrence sets (they are computed, not sourced from data).
-
-### 3.8 Project
-
-$$
-\text{eval}^+(\pi_V(P), D) = \{\ \mu^+|_V \mid \mu^+ \in \text{eval}^+(P, D)\ \}
-$$
-
-Where $\mu^+|_V$ restricts $\mu^+$ to variables in $V$.
-
----
-
-## 4. Property Path Handling
-
-### 4.1 Path Expressions
-
-Property paths extend BGPs with navigational patterns:
-
-| Path | Notation | Meaning |
-|------|----------|---------|
-| IRI | $p$ | Single predicate |
-| Inverse | $\hat{p}$ | Reverse direction |
-| Sequence | $p_1 / p_2$ | Concatenation |
-| Alternative | $p_1 \mid p_2$ | Disjunction |
-| Zero-or-one | $p?$ | Optional |
-| Zero-or-more | $p*$ | Kleene star |
-| One-or-more | $p+$ | Kleene plus |
-| Negated | $!(p_1 \mid \ldots \mid p_n)$ | Negated property set |
-
-### 4.2 Bounded Path Expansion
-
-For ZK circuits, unbounded paths must be bounded. We define:
-
-$$
-\text{PATH\_SEGMENT\_MAX} = 8
-$$
-
-**Expansion Rules:**
-
-$$
-\text{expand}(p*) = \epsilon \mid p \mid p/p \mid \ldots \mid \underbrace{p/\ldots/p}_{\text{PATH\_SEGMENT\_MAX}}
-$$
-
-$$
-\text{expand}(p+) = p \mid p/p \mid \ldots \mid \underbrace{p/\ldots/p}_{\text{PATH\_SEGMENT\_MAX}}
-$$
-
-### 4.3 Path to BGP Conversion
-
-Each expanded path becomes a sequence of BGPs joined with intermediate variables:
-
-For path $s\ p_1/p_2/\ldots/p_n\ o$:
-
-$$
-\text{BGP}(\{(s, p_1, \_\_v_1), (\_\_v_1, p_2, \_\_v_2), \ldots, (\_\_v_{n-1}, p_n, o)\})
-$$
-
-Where $\_\_v_i$ are fresh intermediate variables.
-
-### 4.4 Path Occurrence Tracking
-
-For path evaluation, occurrences include all triples traversed:
-
-$$
-\text{occ}(\mu^+(s)) = \bigcup_{i=1}^{n} \{(g, idx_i, 0)\}
-$$
-$$
-\text{occ}(\mu^+(o)) = \bigcup_{i=1}^{n} \{(g, idx_i, 2)\}
-$$
-
-**Disclosure:** The actual path length taken (≤ PATH_SEGMENT_MAX) is disclosed.
-
----
-
-## 5. Filter Expression Handling
-
-### 5.1 Supported Filter Operations
-
-| Category | Operations |
-|----------|------------|
-| **Comparison** | `=`, `!=`, `<`, `>`, `<=`, `>=` |
-| **Logical** | `&&`, `||`, `!` |
-| **Term Testing** | `sameTerm`, `bound`, `isIRI`, `isBlank`, `isLiteral` |
-| **String** | `str`, `strlen`, `contains`, `strstarts`, `strends` |
-| **Numeric** | `+`, `-`, `*`, `/`, `abs`, `round`, `ceil`, `floor` |
-
-### 5.2 In-Circuit Filter Assertions
-
-Filters translate to circuit assertions:
-
-| Filter | Circuit Constraint |
-|--------|-------------------|
-| `sameTerm(?x, ?y)` | `assert_eq(enc(μ(?x)), enc(μ(?y)))` |
-| `?x = literal` | `assert_eq(enc(μ(?x)), enc(literal))` |
-| `?x < ?y` | Hidden inputs with bounds assertions |
-| `f1 && f2` | Both constraints |
-| `f1 || f2` | Branch indicator variables |
-
-### 5.3 Numeric Bounds (Hidden Inputs)
-
-For numeric comparisons that should not disclose exact values:
-
-**Proof of Numeric Bound (PoNB):**
-
-To prove $a \leq x \leq b$ without disclosing $x$:
-
-1. Hidden inputs: $x$, $a$, $b$ (bounds may be public or hidden)
-2. Circuit assertions:
-   - `assert(a <= x)`
-   - `assert(x <= b)`
-3. Public output: bounds $a$, $b$ (if disclosed)
-
----
-
-## 6. Union Branch Handling
-
-### 6.1 Branch Indicator Variables
-
-For $P_1 \cup P_2$, introduce branch indicators:
-
-$$
-b_1, b_2 \in \{0, 1\} \quad \text{with} \quad b_1 \lor b_2 = 1
-$$
-
-### 6.2 Disjunctive Constraints
-
-$$
-(b_1 \land C_1) \lor (b_2 \land C_2)
-$$
-
-Where $C_i$ are the constraints from branch $i$.
-
-### 6.3 Multi-Branch Extension
-
-For $P_1 \cup P_2 \cup \ldots \cup P_n$:
-
-$$
-\bigvee_{i=1}^{n} (b_i \land C_i) \quad \text{with} \quad \bigvee_{i=1}^{n} b_i = 1
-$$
-
----
-
-## 7. Optional Pattern Handling
-
-### 7.1 Nullable Bindings
-
-For $P_1 \mathbin{\text{⟕}} P_2$:
-
-Variables from $P_2$ may be unbound. In the circuit:
-
+**Example:**
+```sparql
+SELECT ?name WHERE { ?person foaf:name ?name }
 ```
-struct OptionalBinding {
-    is_bound: bool,
-    value: Field,
+
+**Generated Noir:**
+```noir
+// Input
+bgp: [TripleInput; 1],
+variables: Variables { person: Field, name: Field },
+
+// Assertions
+assert(verify_inclusion(bgp[0], root));
+assert(variables.person == bgp[0].terms[0]);  // subject
+assert(bgp[0].terms[1] == FOAF_NAME_ENCODED);  // predicate (constant)
+assert(variables.name == bgp[0].terms[2]);     // object
+```
+
+### 2.2 Constants in Patterns
+
+When a pattern position has a constant (IRI or literal), the circuit asserts equality with the pre-computed encoding:
+
+```noir
+// For pattern: ?s foaf:name "Alice"
+assert(bgp[0].terms[1] == 0x...);  // foaf:name encoding
+assert(bgp[0].terms[2] == 0x...);  // "Alice" encoding
+```
+
+---
+
+## 3. JOIN
+
+Multiple patterns in a WHERE clause create implicit JOINs.
+
+**SPARQL:**
+```sparql
+SELECT ?name ?age WHERE {
+    ?person foaf:name ?name .
+    ?person foaf:age ?age .
 }
 ```
 
-### 7.2 Optional Constraints
+**Mapping:**
+- Two `TripleInput` entries
+- Shared variable `?person` must match in both:
 
-Constraints from optional patterns are conditional:
+```noir
+// Variable unification
+assert(bgp[0].terms[0] == bgp[1].terms[0]);  // ?person in both
+```
 
-$$
-\text{is\_bound}(v) \implies C_v
-$$
+---
 
-Where $C_v$ are constraints involving variable $v$ from the optional pattern.
+## 4. UNION
 
-### 7.3 Metadata Tracking
+UNION creates disjunctive branches with indicator variables.
 
-Optional patterns are tracked in circuit metadata:
+**SPARQL:**
+```sparql
+SELECT ?contact WHERE {
+    { ?person foaf:mbox ?contact }
+    UNION
+    { ?person foaf:phone ?contact }
+}
+```
 
+**Mapping:**
+```noir
+// Branch indicators (at least one must be true)
+branch_1: bool,
+branch_2: bool,
+
+assert(branch_1 | branch_2);
+
+// Branch 1 constraints (when active)
+if branch_1 {
+    assert(verify_inclusion(bgp_branch1[0], root));
+    // ...
+}
+
+// Branch 2 constraints (when active)
+if branch_2 {
+    assert(verify_inclusion(bgp_branch2[0], root));
+    // ...
+}
+```
+
+---
+
+## 5. OPTIONAL (LEFT JOIN)
+
+Optional patterns may or may not match.
+
+**SPARQL:**
+```sparql
+SELECT ?name ?email WHERE {
+    ?person foaf:name ?name .
+    OPTIONAL { ?person foaf:mbox ?email }
+}
+```
+
+**Mapping:**
+```noir
+// Required pattern
+assert(verify_inclusion(bgp[0], root));
+
+// Optional pattern (conditional)
+optional_matched: bool,
+
+if optional_matched {
+    assert(verify_inclusion(optional_bgp[0], root));
+    assert(optional_bgp[0].terms[0] == bgp[0].terms[0]);  // ?person matches
+}
+```
+
+**Metadata tracks which variables are optional:**
 ```json
 {
   "optionalPatterns": [
-    {"variables": ["?x", "?y"], "triples": [...]}
+    {"variables": ["email"], "triples": [...]}
   ]
 }
 ```
 
 ---
 
-## 8. Query Analysis for Proof Requirements
+## 6. FILTER
 
-### 8.1 Analysis Output
+Filters add constraint assertions to the circuit.
 
-Given a SPARQL query $Q$, query analysis produces:
+### 6.1 Term Identity: `sameTerm`
 
-```
-struct QueryAnalysis {
-    input_patterns: Vec<TriplePattern>,     // Required BGP triples
-    optional_patterns: Vec<TriplePattern>,  // Optional BGP triples  
-    bindings: Vec<VariableBinding>,         // Variable → source mapping
-    equalities: Vec<EqualityConstraint>,    // sameTerm constraints
-    filters: Vec<FilterExpression>,         // Filter constraints
-    union_branches: Option<Vec<QueryAnalysis>>,  // For UNION
-    path_plans: Vec<PathPlan>,              // Expanded property paths
-}
+`sameTerm(?x, ?y)` tests whether two RDF terms are **identical** (same lexical form, datatype, and language tag).
+
+```sparql
+FILTER(sameTerm(?x, ?y))
 ```
 
-### 8.2 Variable Classification
+```noir
+// Direct field comparison - terms must be identical
+assert(variables.x == variables.y);
+```
 
-Variables are classified by their role:
+Since our encoding is deterministic, identical RDF terms produce identical Field values:
+```
+sameTerm(A, B) ↔ Enc_t(A) == Enc_t(B)
+```
 
-| Classification | Description | Disclosure |
-|----------------|-------------|------------|
-| **Projected** | In SELECT clause | Configurable |
-| **Internal** | Used in patterns, not projected | Hidden |
-| **Intermediate** | Generated for path expansion | Hidden |
+### 6.2 Value Equality: `=` (RDFterm-equal)
 
-### 8.3 Constraint Derivation
+The `=` operator tests for **equivalent values**, not identical terms. Per [W3C SPARQL 1.1 §17.4.1.7](https://www.w3.org/TR/sparql11-query/#func-RDFterm-equal):
 
-From the query analysis, derive:
-1. **Signature constraints** (PoKS): Verify signed data membership
-2. **Equality constraints**: Variable unification
-3. **Bound constraints** (PoNB): Numeric/date comparisons
-4. **Existence constraints**: At least one matching triple exists
+- Returns TRUE if terms have equivalent values
+- Returns FALSE if terms have different values
+- **Produces a type error** for literals with unsupported datatypes and different lexical forms
+
+**Key difference from `sameTerm`:**
+```sparql
+# These are TRUE with = but FALSE with sameTerm:
+FILTER("1"^^xsd:integer = "1.0"^^xsd:decimal)        # same numeric value
+FILTER("2005-01-01T00:00:00Z"^^xsd:dateTime = 
+       "2004-12-31T19:00:00-05:00"^^xsd:dateTime)    # same instant
+```
+
+**Current implementation (simplified):**
+
+For the initial implementation, we support `=` only when it can be reduced to term identity:
+
+```noir
+// When both operands have known types that can be compared
+// via their encoded representations:
+assert(variables.x == variables.y);
+```
+
+**Full implementation requirements:**
+
+A complete implementation of `=` requires:
+
+1. **Type-specific comparison functions:**
+   ```noir
+   fn numeric_equal(a: NumericEncoding, b: NumericEncoding) -> bool
+   fn datetime_equal(a: DateTimeEncoding, b: DateTimeEncoding) -> bool
+   ```
+
+2. **Type detection at circuit generation time:**
+   - If types are known and comparable → emit type-specific comparison
+   - If types are identical → fallback to term identity
+   - If types are unknown/unsupported → emit error or conservative failure
+
+3. **Witness for type information:**
+   ```noir
+   // Hidden inputs for type-aware equality
+   a_type: u8,  // 0=IRI, 1=blank, 2=literal
+   a_datatype: Field,  // for literals
+   ```
+
+### 6.3 Comparison with Constant
+
+```sparql
+FILTER(?name = "Alice")
+```
+
+```noir
+assert(variables.name == ALICE_ENCODED);
+```
+
+When comparing with a constant, we know the type at circuit generation time, so we can apply the appropriate comparison.
+
+### 6.4 Numeric Comparisons
+
+```sparql
+FILTER(?age >= 18)
+```
+
+Numeric comparisons use the `special_encoding` field from the literal encoding, which preserves numeric value:
+
+```noir
+// The literal encoding contains the numeric value in special_encoding
+// For xsd:integer, special_encoding = numeric_value
+assert(age_value >= 18);
+```
+
+**Note:** This requires hidden inputs to provide the unpacked numeric value and assertions to verify the unpacking is correct relative to the encoded term.
+
+### 6.5 Logical Operators
+
+```sparql
+FILTER(?a && ?b)
+FILTER(?a || ?b)
+FILTER(!?a)
+```
+
+```noir
+assert(constraint_a & constraint_b);
+assert(constraint_a | constraint_b);
+assert(!constraint_a);
+```
+
+### 6.6 Type Testing Functions
+
+```sparql
+FILTER(isIRI(?x))
+FILTER(isBlank(?x))
+FILTER(isLiteral(?x))
+```
+
+These require hidden type information:
+
+```noir
+// Hidden input provides type code
+x_type: u8,
+
+// Verify type matches the encoded term
+assert(verify_type_encoding(variables.x, x_type));
+
+// Then test
+assert(x_type == 0);  // isIRI: type code 0
+```
+
+See [W3C reference](./w3c/sparql11-query-reference.md) for detailed semantics.
 
 ---
 
-## 9. Implementation Reference
+## 7. BIND / EXTEND
 
-### 9.1 Rust Pattern Handling
+BIND introduces computed variables.
 
-From `transform/src/main.rs`:
-
-```rust
-fn handle_patterns(pattern: &GraphPattern) -> OutInfo {
-    match pattern {
-        GraphPattern::Bgp { patterns } => { /* BGP handling */ }
-        GraphPattern::Join { left, right } => { /* Join handling */ }
-        GraphPattern::Union { left, right } => { /* Union handling */ }
-        GraphPattern::LeftJoin { left, right, expression } => { /* Optional */ }
-        GraphPattern::Filter { inner, expression } => { /* Filter */ }
-        GraphPattern::Extend { inner, variable, expression } => { /* BIND */ }
-        GraphPattern::Path { subject, path, object } => { /* Property path */ }
-        // ...
-    }
+**SPARQL:**
+```sparql
+SELECT ?fullName WHERE {
+    ?person foaf:firstName ?first .
+    ?person foaf:lastName ?last .
+    BIND(CONCAT(?first, " ", ?last) AS ?fullName)
 }
 ```
 
-### 9.2 Path Expansion
+**Mapping:** BIND expressions are computed outside the circuit; the result is provided as a witness and verified if needed.
 
-```rust
-fn expand_path_to_plans(path: &PropertyPathExpression) -> Vec<serde_json::Value> {
-    match path {
-        PropertyPathExpression::NamedNode(nn) => { /* Simple predicate */ }
-        PropertyPathExpression::Sequence(a, b) => { /* p1/p2 */ }
-        PropertyPathExpression::Alternative(a, b) => { /* p1|p2 */ }
-        PropertyPathExpression::ZeroOrMore(inner) => { /* p* */ }
-        PropertyPathExpression::OneOrMore(inner) => { /* p+ */ }
-        // ...
+---
+
+## 8. Property Paths
+
+Property paths are expanded to bounded BGP sequences.
+
+### 8.1 Expansion
+
+| Path | Expansion (max depth 8) |
+|------|-------------------------|
+| `p+` | `p`, `p/p`, `p/p/p`, ... |
+| `p*` | `ε`, `p`, `p/p`, ... |
+| `p?` | `ε`, `p` |
+| `p1/p2` | Sequence |
+| `p1\|p2` | Alternative (UNION) |
+| `^p` | Reverse direction |
+
+### 8.2 Example
+
+```sparql
+SELECT ?ancestor WHERE { ?person foaf:knows+ ?ancestor }
+```
+
+**Expands to UNION of:**
+```
+?person foaf:knows ?ancestor .
+
+?person foaf:knows ?v1 . ?v1 foaf:knows ?ancestor .
+
+?person foaf:knows ?v1 . ?v1 foaf:knows ?v2 . ?v2 foaf:knows ?ancestor .
+...
+```
+
+**Note:** The actual path length taken is disclosed.
+
+---
+
+## 9. Generated Circuit Structure
+
+### 9.1 Main Function
+
+```noir
+fn main(
+    // Public inputs
+    public_keys: [PubKey; N_DATASETS],
+    
+    // Private inputs (witness)
+    roots: [Root; N_DATASETS],
+    bgp: [TripleInput; N_PATTERNS],
+    variables: Variables,
+) {
+    // 1. Verify signatures
+    for i in 0..N_DATASETS {
+        assert(verify_signature(public_keys[i], roots[i].signature, roots[i].value));
     }
+    
+    // 2. Verify triple inclusions
+    for i in 0..N_PATTERNS {
+        assert(verify_inclusion(bgp[i], roots[pattern_to_dataset[i]].value));
+    }
+    
+    // 3. Assert variable bindings
+    // (generated based on query)
+    
+    // 4. Assert filter constraints
+    // (generated based on query)
+}
+```
+
+### 9.2 Metadata Output
+
+The transformation produces metadata alongside the circuit:
+
+```json
+{
+  "variables": ["?person", "?name"],
+  "inputPatterns": [
+    {"subject": "?person", "predicate": "foaf:name", "object": "?name"}
+  ],
+  "optionalPatterns": [],
+  "unionBranches": null,
+  "pathPlans": []
 }
 ```
 
 ---
 
-## 10. Correctness Properties
+## 10. Supported SPARQL Features
 
-### 10.1 Soundness
-
-If the proof verifies, then:
-$$
-\exists \mu \in \text{eval}(Q, D) : \text{disclosed\_bindings} = \pi_V(\mu)
-$$
-
-### 10.2 Completeness
-
-For any valid solution $\mu \in \text{eval}(Q, D)$, a proof can be constructed.
-
-### 10.3 Zero-Knowledge
-
-The proof reveals only:
-- The SPARQL query $Q$
-- Public keys of dataset signers
-- Disclosed variable bindings (configurable)
-- Architectural parameters (merkle depth, path limits)
+| Feature | Status | Notes |
+|---------|--------|-------|
+| SELECT | ✅ | Projected variables |
+| BGP | ✅ | Basic patterns |
+| JOIN | ✅ | Multiple patterns |
+| UNION | ✅ | Disjunctive branches |
+| OPTIONAL | ✅ | Conditional matching |
+| FILTER | ✅ | Equality, comparison, logical |
+| BIND | ✅ | Computed variables |
+| Property Paths | ✅ | Bounded expansion |
+| DISTINCT | ⚠️ | Post-processing |
+| LIMIT | ⚠️ | Post-processing |
+| ORDER BY | ❌ | Not supported |
+| GROUP BY | ❌ | Deferred |
+| HAVING | ❌ | Deferred |
+| Aggregates | ❌ | Deferred |
 
 ---
 
 ## References
 
-1. [SPARQL 1.1 Query Language](https://www.w3.org/TR/sparql11-query/)
-2. [SPARQL 1.1 Query Semantics](https://www.w3.org/TR/sparql11-query/#sparqlAlgebra)
-3. WWW26 zkRDF Paper - Extended Evaluation Semantics
+- [SPARQL 1.1 Query Language](https://www.w3.org/TR/sparql11-query/) - Full W3C specification
+- [W3C Reference Excerpts](./w3c/sparql11-query-reference.md) - Key sections on `=` vs `sameTerm`
+- [XPath Functions and Operators](https://www.w3.org/TR/xpath-functions/) - Operator semantics
