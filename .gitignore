@@ -8,6 +8,9 @@ noir/lib/consts/src/lib.nr
 noir/lib/consts/Nargo.toml
 temp/
 
+# Generated circuit output
+noir_prove/
+
 # Benchmark results
 benchmark-results/
 benchmark-results-*.json
