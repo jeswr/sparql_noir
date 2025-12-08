@@ -1,0 +1,26 @@
+[package]
+name = "transform"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+spargebra = "0.4.0-beta.2"
+sparopt = "0.3.0-beta.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+oxsdatatypes = "0.2"
+spareval = "0.2.0-beta.3"
+clap = { version = "4.0", features = ["derive"] }
+oxrdf = "0.3.0-beta.2"
+secp256k1 = "0.24"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+k256 = "0.12"
+rand_core = "0.6"
+oxrdfio = "0.2.0-beta.3"
+blake3 = "1"
+num-bigint = "0.4"
+num-traits = "0.2"
+blake2 = "0.10"
+toml = "0.8"
