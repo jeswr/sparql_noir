@@ -12,12 +12,6 @@ use spargebra::{Query, SparqlParser};
 use spareval::QueryEvaluator;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// Module declarations at top
-mod encoding;
-mod eval;
-mod inputs;
-mod merkle;
-mod prover;
 #[allow(dead_code)]
 trait QueryEvaluatorExprExt {
     fn evaluate_expression(_expr: &Expression) -> Option<SparqlTerm> { None }
@@ -38,19 +32,19 @@ impl QueryEvaluatorExprExt for QueryEvaluator {}
 
 // --- Minimal data model for generation time ---
 #[derive(Clone, Debug)]
-enum CircomTerm {
+enum NoirTerm {
     Variable(String),
     Input(usize, usize), // (triple_idx, term_idx)
     Static(GroundTerm),
 }
 
 #[derive(Clone, Debug)]
-struct EqAssertion(pub CircomTerm, pub CircomTerm);
+struct EqAssertion(pub NoirTerm, pub NoirTerm);
 
 #[derive(Clone, Debug)]
 struct BindConstraint {
     left: String,      // variable name
-    right: CircomTerm, // where it binds from
+    right: NoirTerm, // where it binds from
 }
 
 #[derive(Clone, Debug)]
@@ -260,13 +254,13 @@ fn expand_path_to_plans(path: &PropertyPathExpression) -> Vec<serde_json::Value>
 
 
 fn serialize_term(
-    term: &CircomTerm,
+    term: &NoirTerm,
     state: &ProjectInfo,
-    bindings: &BTreeMap<String, CircomTerm>,
+    bindings: &BTreeMap<String, NoirTerm>,
 ) -> String {
     match term {
-        CircomTerm::Static(gt) => get_term_encoding_string(gt),
-        CircomTerm::Variable(name) => {
+        NoirTerm::Static(gt) => get_term_encoding_string(gt),
+        NoirTerm::Variable(name) => {
             if state.variables.iter().any(|v| v == name) {
                 format!("variables.{}", name)
             } else if let Some(mapped) = bindings.get(name) {
@@ -276,7 +270,7 @@ fn serialize_term(
                 format!("variables.{}", name)
             }
         }
-        CircomTerm::Input(i, j) => format!("bgp[{}].terms[{}]", i, j),
+        NoirTerm::Input(i, j) => format!("bgp[{}].terms[{}]", i, j),
     }
 }
 
@@ -291,7 +285,7 @@ fn try_eval_ebv(expr: &Expression) -> Option<bool> {
 fn filter_to_noir(
     expr: &Expression,
     state: &ProjectInfo,
-    bindings: &BTreeMap<String, CircomTerm>,
+    bindings: &BTreeMap<String, NoirTerm>,
     hidden: &mut Vec<serde_json::Value>,
 ) -> Result<String, String> {
     if let Some(b) = try_eval_ebv(expr) {
@@ -317,14 +311,14 @@ fn filter_to_noir(
         }
         Expression::Equal(a, b) => {
             // If both sides are constants, fold
-            if let (Ok(CircomTerm::Static(la)), Ok(CircomTerm::Static(lb))) =
-                (value_expr_to_circom(a), value_expr_to_circom(b))
+            if let (Ok(NoirTerm::Static(la)), Ok(NoirTerm::Static(lb))) =
+                (value_expr_to_term(a), value_expr_to_term(b))
             {
                 let eq = ground_term_eq(&la, &lb);
                 return Ok(if eq { "true".into() } else { "false".into() });
             }
-            let left = value_expr_to_circom(a)?;
-            let right = value_expr_to_circom(b)?;
+            let left = value_expr_to_term(a)?;
+            let right = value_expr_to_term(b)?;
             Ok(format!(
                 "{} == {}",
                 serialize_term(&left, state, bindings),
@@ -364,20 +358,20 @@ fn filter_to_noir(
     }
 }
 
-fn value_expr_to_circom(expr: &Expression) -> Result<CircomTerm, String> {
+fn value_expr_to_term(expr: &Expression) -> Result<NoirTerm, String> {
     match expr {
-        Expression::NamedNode(nn) => Ok(CircomTerm::Static(GroundTerm::NamedNode(nn.clone()))),
-        Expression::Literal(l) => Ok(CircomTerm::Static(GroundTerm::Literal(l.clone()))),
-        Expression::Variable(v) => Ok(CircomTerm::Variable(v.as_str().to_string())),
+        Expression::NamedNode(nn) => Ok(NoirTerm::Static(GroundTerm::NamedNode(nn.clone()))),
+        Expression::Literal(l) => Ok(NoirTerm::Static(GroundTerm::Literal(l.clone()))),
+        Expression::Variable(v) => Ok(NoirTerm::Variable(v.as_str().to_string())),
         // Try evaluator to fold more expressions to a constant term
         other => {
             // Call the shim trait version via UFCS to avoid API differences
             if let Some(term) = <QueryEvaluator as QueryEvaluatorExprExt>::evaluate_expression(other) {
                 match term {
                     spargebra::term::Term::NamedNode(nn) =>
-                        Ok(CircomTerm::Static(GroundTerm::NamedNode(nn))),
+                        Ok(NoirTerm::Static(GroundTerm::NamedNode(nn))),
                     spargebra::term::Term::Literal(l) =>
-                        Ok(CircomTerm::Static(GroundTerm::Literal(l))),
+                        Ok(NoirTerm::Static(GroundTerm::Literal(l))),
                     _ => Err("Unsupported evaluated term kind".into()),
                 }
             } else {
@@ -435,8 +429,8 @@ fn handle_patterns(patterns: &[TriplePattern]) -> Result<OutInfo, String> {
         match subject {
             TermPattern::NamedNode(nn) => {
                 eqs.push(EqAssertion(
-                    CircomTerm::Static(GroundTerm::NamedNode(nn.clone())),
-                    CircomTerm::Input(i, 0),
+                    NoirTerm::Static(GroundTerm::NamedNode(nn.clone())),
+                    NoirTerm::Input(i, 0),
                 ));
             }
             TermPattern::Variable(v) => {
@@ -444,13 +438,13 @@ fn handle_patterns(patterns: &[TriplePattern]) -> Result<OutInfo, String> {
                 let already = variables.contains(&name);
                 if already {
                     eqs.push(EqAssertion(
-                        CircomTerm::Variable(name.clone()),
-                        CircomTerm::Input(i, 0),
+                        NoirTerm::Variable(name.clone()),
+                        NoirTerm::Input(i, 0),
                     ));
                 } else {
                     binds.push(BindConstraint {
                         left: name.clone(),
-                        right: CircomTerm::Input(i, 0),
+                        right: NoirTerm::Input(i, 0),
                     });
                     variables.insert(name);
                 }
@@ -467,8 +461,8 @@ fn handle_patterns(patterns: &[TriplePattern]) -> Result<OutInfo, String> {
         match predicate {
             spargebra::term::NamedNodePattern::NamedNode(nn) => {
                 eqs.push(EqAssertion(
-                    CircomTerm::Static(GroundTerm::NamedNode(nn.clone())),
-                    CircomTerm::Input(i, 1),
+                    NoirTerm::Static(GroundTerm::NamedNode(nn.clone())),
+                    NoirTerm::Input(i, 1),
                 ));
             }
             spargebra::term::NamedNodePattern::Variable(v) => {
@@ -476,13 +470,13 @@ fn handle_patterns(patterns: &[TriplePattern]) -> Result<OutInfo, String> {
                 let already = variables.contains(&name);
                 if already {
                     eqs.push(EqAssertion(
-                        CircomTerm::Variable(name.clone()),
-                        CircomTerm::Input(i, 1),
+                        NoirTerm::Variable(name.clone()),
+                        NoirTerm::Input(i, 1),
                     ));
                 } else {
                     binds.push(BindConstraint {
                         left: name.clone(),
-                        right: CircomTerm::Input(i, 1),
+                        right: NoirTerm::Input(i, 1),
                     });
                     variables.insert(name);
                 }
@@ -493,14 +487,14 @@ fn handle_patterns(patterns: &[TriplePattern]) -> Result<OutInfo, String> {
         match object {
             TermPattern::NamedNode(nn) => {
                 eqs.push(EqAssertion(
-                    CircomTerm::Static(GroundTerm::NamedNode(nn.clone())),
-                    CircomTerm::Input(i, 2),
+                    NoirTerm::Static(GroundTerm::NamedNode(nn.clone())),
+                    NoirTerm::Input(i, 2),
                 ));
             }
             TermPattern::Literal(l) => {
                 eqs.push(EqAssertion(
-                    CircomTerm::Static(GroundTerm::Literal(l.clone())),
-                    CircomTerm::Input(i, 2),
+                    NoirTerm::Static(GroundTerm::Literal(l.clone())),
+                    NoirTerm::Input(i, 2),
                 ));
             }
             TermPattern::Variable(v) => {
@@ -508,13 +502,13 @@ fn handle_patterns(patterns: &[TriplePattern]) -> Result<OutInfo, String> {
                 let already = variables.contains(&name);
                 if already {
                     eqs.push(EqAssertion(
-                        CircomTerm::Variable(name.clone()),
-                        CircomTerm::Input(i, 2),
+                        NoirTerm::Variable(name.clone()),
+                        NoirTerm::Input(i, 2),
                     ));
                 } else {
                     binds.push(BindConstraint {
                         left: name.clone(),
-                        right: CircomTerm::Input(i, 2),
+                        right: NoirTerm::Input(i, 2),
                     });
                     variables.insert(name);
                 }
@@ -545,9 +539,9 @@ fn extend(
     // First pass: only support binding variables to other terms (variables or constants)
     let mut res = operation(inner)?;
     let right = match expression {
-        Expression::Variable(v) => CircomTerm::Variable(v.as_str().to_string()),
-        Expression::NamedNode(nn) => CircomTerm::Static(GroundTerm::NamedNode(nn.clone())),
-        Expression::Literal(l) => CircomTerm::Static(GroundTerm::Literal(l.clone())),
+        Expression::Variable(v) => NoirTerm::Variable(v.as_str().to_string()),
+        Expression::NamedNode(nn) => NoirTerm::Static(GroundTerm::NamedNode(nn.clone())),
+        Expression::Literal(l) => NoirTerm::Static(GroundTerm::Literal(l.clone())),
         _ => return Err("Unsupported BIND expression in first pass".into()),
     };
     res.binds.push(BindConstraint {
@@ -842,7 +836,7 @@ fn generate_circuit_from_query(query_str: &str) -> Result<(String, String, Strin
     let state = project(&root)?;
 
     // Build bindings map from binds for non-projected vars (first pass mirrors TS behavior)
-    let mut bindings: BTreeMap<String, CircomTerm> = BTreeMap::new();
+    let mut bindings: BTreeMap<String, NoirTerm> = BTreeMap::new();
     for b in &state.out.binds {
         if !state.variables.iter().any(|v| v == &b.left) && !bindings.contains_key(&b.left) {
             bindings.insert(b.left.clone(), b.right.clone());
@@ -856,7 +850,7 @@ fn generate_circuit_from_query(query_str: &str) -> Result<(String, String, Strin
     if let Some(branches) = &state.out.union_branches {
         for br in branches {
             // Build branch-local bindings: start with global 'bindings' then add br.binds (for non-projected vars)
-            let mut br_bindings: BTreeMap<String, CircomTerm> = bindings.clone();
+            let mut br_bindings: BTreeMap<String, NoirTerm> = bindings.clone();
             for b in &br.binds {
                 if !state.variables.iter().any(|v| v == &b.left)
                     && !br_bindings.contains_key(&b.left)
@@ -867,7 +861,7 @@ fn generate_circuit_from_query(query_str: &str) -> Result<(String, String, Strin
             let mut br_asser: Vec<String> = Vec::new();
             // Assert binds and eqs for this branch using branch-local bindings
             for b in &br.binds {
-                let left = CircomTerm::Variable(b.left.clone());
+                let left = NoirTerm::Variable(b.left.clone());
                 let right = b.right.clone();
                 br_asser.push(format!(
                     "{} == {}",
@@ -890,7 +884,7 @@ fn generate_circuit_from_query(query_str: &str) -> Result<(String, String, Strin
         }
     } else {
         for b in &state.out.binds {
-            let left = CircomTerm::Variable(b.left.clone());
+            let left = NoirTerm::Variable(b.left.clone());
             let right = b.right.clone();
             assertions.push(format!(
                 "{} == {}",
@@ -1180,11 +1174,11 @@ fn ground_term_to_term_json(gt: &GroundTerm) -> TermJson {
     }
 }
 
-fn circom_term_to_json_value(term: &CircomTerm) -> serde_json::Value {
+fn term_to_json_value(term: &NoirTerm) -> serde_json::Value {
     match term {
-        CircomTerm::Variable(name) => serde_json::json!({"type":"variable","value": name}),
-        CircomTerm::Input(i, j) => serde_json::json!({"type":"input","value":[i, j]}),
-        CircomTerm::Static(gt) => {
+        NoirTerm::Variable(name) => serde_json::json!({"type":"variable","value": name}),
+        NoirTerm::Input(i, j) => serde_json::json!({"type":"input","value":[i, j]}),
+        NoirTerm::Static(gt) => {
             let tj = ground_term_to_term_json(gt);
             serde_json::json!({"type":"static","value": tj})
         }
@@ -1194,10 +1188,10 @@ fn circom_term_to_json_value(term: &CircomTerm) -> serde_json::Value {
 fn push_custom_computed(
     hidden: &mut Vec<serde_json::Value>,
     computed_type: &str,
-    input_term: &CircomTerm,
+    input_term: &NoirTerm,
 ) -> usize {
     let idx = hidden.len();
-    let inp = circom_term_to_json_value(input_term);
+    let inp = term_to_json_value(input_term);
     hidden.push(serde_json::json!({
         "type": "customComputed",
         "computedType": computed_type,
@@ -1210,10 +1204,10 @@ fn is_check(
     arg: &Expression,
     tag: i32, // 0 IRI, 1 Blank, 2 Literal
     state: &ProjectInfo,
-    bindings: &BTreeMap<String, CircomTerm>,
+    bindings: &BTreeMap<String, NoirTerm>,
     hidden: &mut Vec<serde_json::Value>,
 ) -> Result<String, String> {
-    let term = value_expr_to_circom(arg)?;
+    let term = value_expr_to_term(arg)?;
     // Hidden input holds the inner term field encoding
     let h_idx = push_custom_computed(hidden, "term_to_field", &term);
     // Uses hash2 from dep::consts - resolved at Noir compile time
@@ -1250,7 +1244,7 @@ fn numeric_or_date_comparison(
     a: &Expression,
     b: &Expression,
     state: &ProjectInfo,
-    bindings: &BTreeMap<String, CircomTerm>,
+    bindings: &BTreeMap<String, NoirTerm>,
     hidden: &mut Vec<serde_json::Value>,
 ) -> Result<String, String> {
     // Represent a side of comparison
@@ -1263,7 +1257,7 @@ fn numeric_or_date_comparison(
         e: &Expression,
         desired_kind: Option<&str>, // "int" or "date"
         state: &ProjectInfo,
-        bindings: &BTreeMap<String, CircomTerm>,
+        bindings: &BTreeMap<String, NoirTerm>,
         hidden: &mut Vec<serde_json::Value>,
     ) -> Result<Side, String> {
         // If literal integer constant, use it directly
@@ -1276,7 +1270,7 @@ fn numeric_or_date_comparison(
         // Handle STRLEN(arg) - extract string length from the argument term
         if let Expression::FunctionCall(Function::StrLen, args) = e {
             if let [arg] = args.as_slice() {
-                let term = value_expr_to_circom(arg)?;
+                let term = value_expr_to_term(arg)?;
                 // Add hidden extraction for strlen
                 let len_idx = push_custom_computed(hidden, "strlen", &term);
                 // For STRLEN, we return the length directly as the comparison value
@@ -1291,7 +1285,7 @@ fn numeric_or_date_comparison(
             }
         }
         // Try to use customComputed extraction and encoding assertions
-        let term = value_expr_to_circom(e)?;
+        let term = value_expr_to_term(e)?;
         // Add hidden extractions
         let val_idx = push_custom_computed(hidden, "literal_value", &term);
         let spec_idx = push_custom_computed(hidden, "special_handling", &term);
@@ -1375,57 +1369,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .short('i')
                 .long("input")
                 .value_name("FILE")
-                .help("Sets the input RDF file")
+                .help("Input RDF file (legacy, not used)")
                 .num_args(1)
-                .required(true),
+                .required(false),
         )
         .arg(
             Arg::new("output")
                 .short('o')
                 .long("output")
                 .value_name("FILE")
-                .help("Sets the output JSON file")
+                .help("Output path (legacy, not used - circuit written to noir_prove/)")
                 .num_args(1)
-                .required(true),
+                .required(false),
         )
         .arg(
             Arg::new("query")
                 .short('q')
                 .long("query")
                 .value_name("QUERY")
-                .help("SPARQL query string (optional). If omitted, defaults to 'SELECT ?s ?p ?o WHERE { ?s ?p ?o . }'")
-                .num_args(1)
-                .required(false),
-        )
-        .arg(
-            Arg::new("bindings_out")
-                .long("bindings-out")
-                .value_name("FILE")
-                .help("Optional: write evaluated bindings and instantiated BGP triples to this JSON file")
-                .num_args(1)
-                .required(false),
-        )
-        .arg(
-            Arg::new("inputs_out")
-                .long("inputs-out")
-                .value_name("FILE")
-                .help("Optional: merge signer and bindings into Noir circuit input JSON at this path (requires --bindings-out)")
-                .num_args(1)
-                .required(false),
-        )
-        .arg(
-            Arg::new("prover_toml")
-                .long("prover-toml")
-                .value_name("FILE")
-                .help("Optional: also emit Prover.toml populated with the same inputs for Noir")
+                .help("SPARQL query string or path to .rq file")
                 .num_args(1)
                 .required(false),
         )
         .get_matches();
 
-    let input = matches.get_one::<String>("input").unwrap().as_str();
-    let output = matches.get_one::<String>("output").unwrap().as_str();
-    // Note: Rust signing is deprecated; signing now handled by sign.js. Inputs are accepted but ignored here.
+    // Legacy args - no longer used but kept for backwards compatibility
+    let _input = matches.get_one::<String>("input");
+    let _output = matches.get_one::<String>("output");
 
     // Query: read from CLI as string or use a safe default
     let query_cli_raw = matches.get_one::<String>("query").map(|s| s.to_string());
@@ -1474,18 +1444,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sparql_out, main_out, nargo_out, meta_out
     );
 
-    // Optionally evaluate bindings and emit instantiated BGP triples
-    if let Some(bindings_out) = matches.get_one::<String>("bindings_out") {
-        eval::evaluate_bindings(input, &query_text, bindings_out)?;
-        println!("Wrote bindings to {}", bindings_out);
-        if let Some(inputs_out) = matches.get_one::<String>("inputs_out") {
-            inputs::write_noir_inputs(output, bindings_out, inputs_out)?;
-            println!("Wrote Noir inputs to {}", inputs_out);
-            if let Some(toml_out) = matches.get_one::<String>("prover_toml") {
-                prover::write_prover_toml(output, bindings_out, toml_out)?;
-                println!("Wrote Prover.toml to {}", toml_out);
-            }
-        }
-    }
     Ok(())
 }
