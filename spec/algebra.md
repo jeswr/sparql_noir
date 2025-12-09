@@ -306,6 +306,8 @@ SELECT ?fullName WHERE {
 
 Property paths are expanded to bounded BGP sequences.
 
+> **Important:** Complex property paths (`/`, `+`, `*`) should be preprocessed before circuit generation. See [preprocessing.md](./preprocessing.md) for the full specification.
+
 ### 8.1 Expansion
 
 | Path | Expansion (max depth 8) |

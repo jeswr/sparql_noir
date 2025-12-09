@@ -12,11 +12,16 @@ fn bn254_modulus() -> BigUint {
     .expect("valid modulus")
 }
 
-fn blake3_field_hex(bytes: &[u8]) -> String {
+pub fn blake3_field_hex(bytes: &[u8]) -> String {
     let digest = blake3::hash(bytes);
     let p = bn254_modulus();
     let n = BigUint::from_bytes_le(digest.as_bytes()) % p;
     format!("0x{}", n.to_str_radix(16))
+}
+
+/// Pre-compute the blake3 hash of a string and return as hex field value
+pub fn string_to_field_hex(s: &str) -> String {
+    blake3_field_hex(s.as_bytes())
 }
 
 fn dec_string_to_field_hex(s: &str) -> String {
