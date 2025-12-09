@@ -4,9 +4,8 @@
 
 mod sparql;
 
-use dep::types::{Triple, Root, IndexedRoot};
-use dep::utils::{verify_inclusion, verify_signature, verify_signatures};
-use dep::consts::{hash2, hash4, MERKLE_DEPTH};
+use dep::types::Root;
+use dep::utils::{verify_inclusion, verify_signature};
 use dep::consts::signature::PubKey;
 
 use sparql::{BGP, checkBinding, Variables{{h0}}};

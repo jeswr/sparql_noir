@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-// use std::str::FromStr; // no longer needed
 
 use clap::{Arg, Command};
 use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
@@ -12,6 +11,13 @@ use spargebra::{Query, SparqlParser};
 
 use spareval::QueryEvaluator;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+// Module declarations at top
+mod encoding;
+mod eval;
+mod inputs;
+mod merkle;
+mod prover;
 #[allow(dead_code)]
 trait QueryEvaluatorExprExt {
     fn evaluate_expression(_expr: &Expression) -> Option<SparqlTerm> { None }
@@ -20,15 +26,15 @@ trait QueryEvaluatorExprExt {
 
 impl QueryEvaluatorExprExt for QueryEvaluator {}
 
-// --- Hash-agnostic code generation ---
-// The Rust transform has ZERO hash knowledge. It generates string literals like
-// "hash2([...])", "hash_string(...)", etc. These resolve to actual implementations
-// at Noir compile time based on what's configured in noir/lib/consts/src/lib.nr.
+// --- Noir Code Generation ---
+// This transform generates Noir code that uses hash functions from dep::consts.
+// The Noir compiler evaluates constant expressions at compile time, so static
+// hash expressions like hash2([0, encode_string("...")]) are computed during
+// circuit compilation, not at runtime in the circuit.
 //
-// This separation ensures:
-// 1. Rust only handles SPARQL → Noir code transformation
-// 2. Hash/signature selection is done via TypeScript setup.ts
-// 3. Generated circuits import from dep::consts
+// Note: We generate Noir expressions rather than pre-computed values because
+// the hash implementations (pedersen_hash, sha256) are specific to Noir's
+// crypto libraries and cannot be easily replicated in Rust.
 
 // --- Minimal data model for generation time ---
 #[derive(Clone, Debug)]
@@ -63,18 +69,20 @@ struct ProjectInfo {
     out: OutInfo,
 }
 
-// --- Helpers to format Noir expressions (port of encode.ts to code strings) ---
-// All hash functions reference dep::consts - resolved at Noir compile time
-fn string_to_field_fn(s: &str) -> String {
-    // Uses hash_string from dep::consts which returns [u8; 32]
-    // The Field::from_le_bytes conversion happens in the generated Noir code
+// --- Noir expression helpers ---
+// These generate Noir code strings that use dep::consts and dep::utils functions.
+// The Noir compiler evaluates these expressions at compile time for static inputs.
+
+/// Generate Noir expression to encode a string to a Field
+fn string_to_field_expr(s: &str) -> String {
     format!(
-        "Field::from_le_bytes(hash_string(\"{}\".as_bytes()))",
-        s.replace('"', "\\\"")
+        "utils::encode_string(\"{}\")",
+        s.replace('\\', "\\\\").replace('"', "\\\"")
     )
 }
 
-fn special_literal_value(lit: &spargebra::term::Literal) -> String {
+/// Handle special literal datatypes (boolean, integer)
+fn special_literal_expr(lit: &spargebra::term::Literal) -> String {
     let dt = lit.datatype();
     let v = lit.value();
     if dt.as_str() == "http://www.w3.org/2001/XMLSchema#boolean" {
@@ -87,36 +95,38 @@ fn special_literal_value(lit: &spargebra::term::Literal) -> String {
         }
     }
     if dt.as_str() == "http://www.w3.org/2001/XMLSchema#integer" {
-        if let Ok(_) = v.parse::<i128>() {
+        if v.parse::<i128>().is_ok() {
             return v.to_string();
         }
     }
-    string_to_field_fn(v)
+    string_to_field_expr(v)
 }
 
-fn term_to_field_fn(term: &GroundTerm) -> String {
+/// Generate Noir expression for term's inner field encoding (before type prefix)
+fn term_to_field_expr(term: &GroundTerm) -> String {
     match term {
-        GroundTerm::NamedNode(nn) => string_to_field_fn(nn.as_str()),
+        GroundTerm::NamedNode(nn) => string_to_field_expr(nn.as_str()),
         GroundTerm::Literal(l) => {
-            let value_encoding = string_to_field_fn(l.value());
-            let literal_encoding = special_literal_value(l);
+            let value_encoding = string_to_field_expr(l.value());
+            let literal_encoding = special_literal_expr(l);
             let lang = l
                 .language()
-                .map(|lg| string_to_field_fn(lg))
-                .unwrap_or_else(|| string_to_field_fn(""));
-            let datatype_encoding = string_to_field_fn(l.datatype().as_str());
+                .map(|lg| string_to_field_expr(lg))
+                .unwrap_or_else(|| string_to_field_expr(""));
+            let datatype_encoding = string_to_field_expr(l.datatype().as_str());
             // Uses hash4 from dep::consts - resolved at Noir compile time
             format!(
-                "hash4([{}, {}, {}, {}])",
+                "consts::hash4([{}, {}, {}, {}])",
                 value_encoding,
                 literal_encoding,
                 lang,
                 datatype_encoding
             )
-        } // Triple terms not supported in first pass
+        }
     }
 }
 
+/// Generate Noir expression for full term encoding (type prefix + inner)
 fn get_term_encoding_string(term: &GroundTerm) -> String {
     let term_type_code = match term {
         GroundTerm::NamedNode(_) => 0,
@@ -124,9 +134,9 @@ fn get_term_encoding_string(term: &GroundTerm) -> String {
     };
     // Uses hash2 from dep::consts - resolved at Noir compile time
     format!(
-        "hash2([{}, {}])",
+        "consts::hash2([{}, {}])",
         term_type_code,
-        term_to_field_fn(term)
+        term_to_field_expr(term)
     )
 }
 
@@ -901,10 +911,12 @@ fn generate_circuit_from_query(query_str: &str) -> Result<(String, String, Strin
         }
     }
 
-    // Emit Noir sparql.nr with dep::consts imports for hash functions
+    // Emit Noir sparql.nr with dep::consts and dep::utils imports
     let mut sparql_nr = String::new();
-    sparql_nr.push_str("// Generated by sparql_noir transform - hash functions from dep::consts\n");
-    sparql_nr.push_str("use dep::consts::{hash2, hash4, hash_string};\n");
+    sparql_nr.push_str("// Generated by sparql_noir transform\n");
+    // Always import consts and utils since we use them for hash expressions
+    sparql_nr.push_str("use dep::consts;\n");
+    sparql_nr.push_str("use dep::utils;\n");
     sparql_nr.push_str("use dep::types::Triple;\n\n");
     sparql_nr.push_str(&format!(
         "pub(crate) type BGP = [Triple; {}];\n",
@@ -971,10 +983,6 @@ fn generate_circuit_from_query(query_str: &str) -> Result<(String, String, Strin
             .replace("{{h1}}", "")
             .replace("{{h2}}", "");
     }
-    // Use hash2/hash4 from dep::consts - hash implementation is resolved at Noir compile time
-    main_template = main_template
-        .replace("{{hash2}}", "hash2")
-        .replace("{{hash4}}", "hash4");
 
     // Generate Nargo.toml content with dependencies to noir/lib/*
     let nargo_toml = r#"[package]
@@ -1162,11 +1170,6 @@ fn write_file(path: &str, contents: &str) -> std::io::Result<()> {
     ensure_parent(path)?;
     fs::write(path, contents)
 }
-mod encoding;
-mod eval;
-mod inputs;
-mod merkle;
-mod prover;
 
 // ---- Helpers for hidden inputs and advanced filters ----
 
@@ -1215,7 +1218,7 @@ fn is_check(
     let h_idx = push_custom_computed(hidden, "term_to_field", &term);
     // Uses hash2 from dep::consts - resolved at Noir compile time
     Ok(format!(
-        "{} == hash2([{}, hidden[{}]])",
+        "{} == consts::hash2([{}, hidden[{}]])",
         serialize_term(&term, state, bindings),
         tag,
         h_idx
@@ -1223,11 +1226,12 @@ fn is_check(
 }
 
 fn literal_encoding_with_hidden(dtype_iri: &str, value_idx: usize, special_idx: usize) -> String {
-    let lang = string_to_field_fn("");
-    let dtype = string_to_field_fn(dtype_iri);
-    // Uses hash4 from dep::consts - resolved at Noir compile time
+    // Use Noir expressions for static values - resolved at Noir compile time
+    let lang = string_to_field_expr("");
+    let dtype = string_to_field_expr(dtype_iri);
+    // hash4 still needed at runtime for hidden inputs, but static values use expressions
     format!(
-        "hash4([hidden[{}], hidden[{}], {}, {}])",
+        "consts::hash4([hidden[{}], hidden[{}], {}, {}])",
         value_idx,
         special_idx,
         lang,
@@ -1238,7 +1242,7 @@ fn literal_encoding_with_hidden(dtype_iri: &str, value_idx: usize, special_idx: 
 fn expected_term_encoding_literal(dtype_iri: &str, value_idx: usize, special_idx: usize) -> String {
     let inner = literal_encoding_with_hidden(dtype_iri, value_idx, special_idx);
     // Uses hash2 from dep::consts - resolved at Noir compile time
-    format!("hash2([{}, {}])", 2, inner)
+    format!("consts::hash2([{}, {}])", 2, inner)
 }
 
 fn numeric_or_date_comparison(

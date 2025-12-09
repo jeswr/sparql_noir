@@ -17,6 +17,11 @@
     "e2e": "node dist/scripts/e2e.js",
     "e2e:verbose": "node dist/scripts/e2e.js -v",
     "test": "npm run build:tsc && npm run e2e",
+    "test:sparql": "npx tsx test/run-sparql-tests.ts",
+    "test:sparql:features": "npx tsx test/run-sparql-tests.ts --features",
+    "test:sparql:bgp": "npx tsx test/run-sparql-tests.ts -t bgp",
+    "test:sparql:summary": "npx tsx test/run-sparql-tests.ts -o summary",
+    "test:parsing": "npx tsx test/test-sparql-parsing.ts",
     "example:sign": "node dist/scripts/sign.js -i inputs/data/ -o temp/",
     "example:verify": "node dist/scripts/verify.js -i temp/data.json --signature-only",
     "example": "npm run example:sign && npm run example:verify",
@@ -54,6 +59,7 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^24.10.1",
     "@types/secp256k1": "^4.0.7",
+    "rdf-test-suite": "^2.1.3",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }

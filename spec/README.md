@@ -8,6 +8,7 @@ Zero-knowledge proofs of SPARQL query results over signed RDF datasets.
 |----------|-------------|
 | [encoding.md](./encoding.md) | RDF term and triple encoding into field elements |
 | [algebra.md](./algebra.md) | SPARQL to Noir circuit mapping |
+| [preprocessing.md](./preprocessing.md) | Query transformations before circuit generation |
 | [proofs.md](./proofs.md) | API specification (sign, prove, verify, info) |
 | [disclosure.md](./disclosure.md) | What information is disclosed by proofs |
 | [config.md](./config.md) | Configuration parameters |
