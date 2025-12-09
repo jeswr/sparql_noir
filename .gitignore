@@ -8,6 +8,12 @@ noir/lib/consts/src/lib.nr
 noir/lib/consts/Nargo.toml
 temp/
 
+# TypeScript build artifacts in test folder
+test/*.js
+test/*.d.ts
+test/*.js.map
+test/*.d.ts.map
+
 # Generated circuit output
 noir_prove/
 
