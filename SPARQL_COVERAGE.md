@@ -2,7 +2,7 @@
 
 **Generated:** 2025-12-09  
 **Test Suite:** sparql_noir Rust Transform  
-**Pass Rate:** 48.8% (21/43 test queries)
+**Pass Rate:** 51.2% (22/43 test queries)
 
 ## Summary
 
@@ -20,7 +20,7 @@ The sparql_noir project generates ZK proofs that SPARQL query results are correc
 | **OPTIONAL** | ✅ Full | Left outer joins |
 | **FILTER (equality)** | ✅ Full | `?x = value`, `?x = ?y`, `?x != value` |
 | **FILTER (comparison)** | ✅ Full | `>`, `>=`, `<`, `<=`, `&&`, `\|\|` |
-| **FILTER (functions)** | ⚠️ Partial | `isURI()`, `BOUND()` work; `STRLEN()` not supported |
+| **FILTER (functions)** | ✅ Full | `isURI()`, `BOUND()`, `STRLEN()` |
 | **Property Paths (alternative \|)** | ✅ Full | `p1\|p2` |
 | **Property Paths (inverse ^)** | ✅ Full | `^p` |
 | **Property Paths (optional ?)** | ✅ Full | `p?` (zero or one) |
@@ -55,19 +55,17 @@ The sparql_noir project generates ZK proofs that SPARQL query results are correc
 
 ## Test Results by Category
 
-### Fully Supported (9 features)
+### Fully Supported (10 features)
 - Basic Graph Pattern (BGP): 3/3 ✓
 - Multiple Triple Patterns: 2/2 ✓
 - UNION: 2/2 ✓
 - OPTIONAL: 2/2 ✓
 - FILTER (equality): 3/3 ✓
 - FILTER (comparison): 3/3 ✓
+- FILTER (functions): 3/3 ✓ (isURI, BOUND, STRLEN)
 - Property Paths (alternative |): 1/1 ✓
 - Property Paths (inverse ^): 1/1 ✓
 - Property Paths (optional ?): 1/1 ✓
-
-### Partially Supported (1 feature)
-- FILTER (functions): 2/3 ~
 
 ### Not Working (8 features)
 - BIND: 0/2 ✗
