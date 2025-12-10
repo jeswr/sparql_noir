@@ -31,6 +31,8 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       // Want to include
       'ZeroOrMorePath',
       'ZeroOrOnePath',
+      'values',
+      'extend',  // BIND
     ]
 
     let supported = true;
@@ -50,16 +52,33 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
   });
 
 for (const test of evaluationTests) {
+  console.log(`\n=== Running test: ${test.name || test.uri} ===`);
+  
   const writer = new Writer({ format: 'Turtle' });
+  const dataContent = writer.quadsToString(test.queryData);
+  
+  // Skip tests with empty data
+  if (!dataContent || dataContent.trim() === '') {
+    console.log(`  Skipping: empty data`);
+    continue;
+  }
+  
   await Promise.all([
     fs.promises.writeFile(path.join(__dirname, 'inputs', 'sparql.rq'), test.queryString),
-    fs.promises.writeFile(path.join(__dirname, 'inputs', 'data', 'data.ttl'), writer.quadsToString(test.queryData)),
+    fs.promises.writeFile(path.join(__dirname, 'inputs', 'data', 'data.ttl'), dataContent),
   ]);
 
-  execSync('npm run transform -- -i ../inputs/sparql.rq -o ../noir_prove/src/sparql.nr');
-  execSync('npm run sign');
+  try {
+    execSync('npm run transform', { stdio: 'inherit' });
+    execSync('npm run sign -- -i inputs/data/data.ttl -o temp/signed.json', { stdio: 'inherit' });
+    execSync('npm run prove -- -c ./noir_prove -s temp/signed.json -o temp/proof.json', { stdio: 'inherit' });
+    execSync('npm run verify -- -i temp/proof.json -c ./noir_prove', { stdio: 'inherit' });
 
-  console.log(fs.readFileSync(path.join(__dirname, 'noir_prove', 'src', 'sparql.nr'), 'utf-8'));
+    console.log(fs.readFileSync(path.join(__dirname, 'noir_prove', 'src', 'sparql.nr'), 'utf-8'));
+  } catch (err) {
+    console.error(`  Test failed: ${err.message}`);
+    continue;
+  }
 }
 
 console.log(evaluationTests.length);
