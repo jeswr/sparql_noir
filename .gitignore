@@ -44,5 +44,6 @@ noir/bin/*/Prover.toml
 # Generated circuit tests
 test/circuits/sparql11/
 test/circuits/compiled/
+test/circuits/edge-cases/
 
 legacy/

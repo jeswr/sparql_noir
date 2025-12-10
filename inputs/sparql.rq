@@ -1,6 +1,7 @@
-PREFIX ex: <http://example.org/>
-SELECT ?s ?o WHERE {
-  ?s ex:knows ?o .
-  FILTER(?s != ?o)
-  FILTER(?o > 3)
+PREFIX : <http://example.org/> 
+
+SELECT ?z
+{
+  ?s ?p ?o .
+  BIND(?o+10 AS ?z)
 }
