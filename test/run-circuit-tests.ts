@@ -329,11 +329,19 @@ async function runTest(test: { name: string; category: string; path: string }): 
         if (!execResult.success) {
           // Circuit correctly rejected invalid input
           result.invalidInputsPassed++;
+          if (opts.verbose) {
+            console.log(`      ✓ Correctly rejected (${inputData.type || 'unknown'})`);
+            if (inputData.expectedError) {
+              console.log(`        Expected: ${inputData.expectedError}`);
+            }
+          }
         } else {
           // Circuit incorrectly accepted invalid input
           result.invalidInputsFailed++;
           if (opts.verbose) {
-            console.log(`      UNEXPECTED PASS: invalid input was accepted`);
+            console.log(`      ✗ UNEXPECTED PASS: invalid input was accepted`);
+            console.log(`        Type: ${inputData.type || 'unknown'}`);
+            console.log(`        Description: ${inputData.description || 'N/A'}`);
           }
         }
       } catch (err) {

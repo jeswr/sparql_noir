@@ -488,3 +488,234 @@ export async function transformQueryInMemory(queryContent: string): Promise<Circ
     if (fs.existsSync(tempQuery)) fs.unlinkSync(tempQuery);
   }
 }
+
+/**
+ * Types of negative tests that can be generated
+ */
+export type NegativeTestType = 
+  | 'wrong_variable_value'      // Variable has incorrect encoded value
+  | 'wrong_predicate'           // Predicate doesn't match pattern
+  | 'wrong_object'              // Object doesn't match pattern  
+  | 'mismatched_subject'        // Subjects don't match across patterns sharing a variable
+  | 'invalid_merkle_path'       // Merkle proof path is invalid
+  | 'wrong_root'                // Triple doesn't belong to the claimed root
+  | 'swapped_triples';          // BGP triples in wrong order
+
+/**
+ * Information about a negative test case
+ */
+export interface NegativeTestCase {
+  type: NegativeTestType;
+  description: string;
+  expectedError: string;
+  inputs: {
+    public_key: object[];
+    roots: object[];
+    bgp: BGPTriple[];
+    variables: Record<string, string>;
+  };
+}
+
+/**
+ * Mutate a hex string by changing a single character
+ */
+function mutateHexString(hex: string): string {
+  // Find the first non-zero hex digit after 0x and increment/change it
+  const prefix = hex.startsWith('0x') ? '0x' : '';
+  const digits = hex.slice(prefix.length);
+  
+  // Find a position to mutate (preferably not leading zeros)
+  let pos = 0;
+  for (let i = 0; i < digits.length; i++) {
+    if (digits[i] !== '0') {
+      pos = i;
+      break;
+    }
+  }
+  
+  // Change the digit
+  const oldChar = digits[pos];
+  let newChar: string;
+  if (oldChar === 'f') {
+    newChar = 'e';
+  } else if (oldChar >= '0' && oldChar <= '9') {
+    newChar = String.fromCharCode(oldChar.charCodeAt(0) + 1);
+  } else {
+    newChar = String.fromCharCode(oldChar.charCodeAt(0) + 1);
+  }
+  
+  return prefix + digits.slice(0, pos) + newChar + digits.slice(pos + 1);
+}
+
+/**
+ * Generate negative test cases from a valid input
+ */
+export function generateNegativeTestCases(
+  validInputs: CheckBindingInputs,
+  signedData: SignedData,
+  metadata: CircuitMetadata
+): NegativeTestCase[] {
+  const negativeTests: NegativeTestCase[] = [];
+  
+  const baseInputs = {
+    public_key: [signedData.pubKey],
+    roots: [{
+      value: signedData.root,
+      signature: signedData.signature,
+    }],
+  };
+  
+  // 1. Wrong variable value - mutate a projected variable
+  const varNames = Object.keys(validInputs.variables);
+  if (varNames.length > 0) {
+    const varName = varNames[0];
+    const mutatedVariables = { ...validInputs.variables };
+    mutatedVariables[varName] = mutateHexString(validInputs.variables[varName]);
+    
+    negativeTests.push({
+      type: 'wrong_variable_value',
+      description: `Variable ?${varName} has incorrect encoded value`,
+      expectedError: `Failed constraint: variables.${varName} == bgp[*].terms[*]`,
+      inputs: {
+        ...baseInputs,
+        bgp: validInputs.bgp,
+        variables: mutatedVariables,
+      },
+    });
+  }
+  
+  // 2. Wrong predicate - change the predicate term of a triple
+  if (validInputs.bgp.length > 0) {
+    const mutatedBgp = validInputs.bgp.map((t, i) => {
+      if (i === 0) {
+        return {
+          ...t,
+          terms: [t.terms[0], mutateHexString(t.terms[1]), t.terms[2], t.terms[3]],
+        };
+      }
+      return t;
+    });
+    
+    negativeTests.push({
+      type: 'wrong_predicate',
+      description: 'Predicate of first triple has incorrect encoded value',
+      expectedError: 'Failed constraint: consts::hash2([0, ...]) == bgp[0].terms[1]',
+      inputs: {
+        ...baseInputs,
+        bgp: mutatedBgp,
+        variables: validInputs.variables,
+      },
+    });
+  }
+  
+  // 3. Wrong object - change the object term of a triple  
+  if (validInputs.bgp.length > 0) {
+    const mutatedBgp = validInputs.bgp.map((t, i) => {
+      if (i === 0) {
+        return {
+          ...t,
+          terms: [t.terms[0], t.terms[1], mutateHexString(t.terms[2]), t.terms[3]],
+        };
+      }
+      return t;
+    });
+    
+    negativeTests.push({
+      type: 'wrong_object',
+      description: 'Object of first triple has incorrect encoded value',
+      expectedError: 'Failed constraint: ... == bgp[0].terms[2]',
+      inputs: {
+        ...baseInputs,
+        bgp: mutatedBgp,
+        variables: validInputs.variables,
+      },
+    });
+  }
+  
+  // 4. Mismatched subjects - if there are multiple BGP patterns with shared variables
+  if (validInputs.bgp.length >= 2) {
+    const mutatedBgp = validInputs.bgp.map((t, i) => {
+      if (i === 1) {
+        return {
+          ...t,
+          terms: [mutateHexString(t.terms[0]), t.terms[1], t.terms[2], t.terms[3]],
+        };
+      }
+      return t;
+    });
+    
+    negativeTests.push({
+      type: 'mismatched_subject',
+      description: 'Subject of second triple differs from first (shared variable mismatch)',
+      expectedError: 'Failed constraint: bgp[0].terms[0] == bgp[1].terms[0]',
+      inputs: {
+        ...baseInputs,
+        bgp: mutatedBgp,
+        variables: validInputs.variables,
+      },
+    });
+  }
+  
+  // 5. Invalid merkle path - corrupt the merkle proof path
+  if (validInputs.bgp.length > 0 && validInputs.bgp[0].path.length > 0) {
+    const mutatedBgp = validInputs.bgp.map((t, i) => {
+      if (i === 0) {
+        const mutatedPath = [...t.path];
+        mutatedPath[0] = mutateHexString(mutatedPath[0]);
+        return {
+          ...t,
+          path: mutatedPath,
+        };
+      }
+      return t;
+    });
+    
+    negativeTests.push({
+      type: 'invalid_merkle_path',
+      description: 'Merkle proof path for first triple is corrupted',
+      expectedError: 'Failed constraint in verify_inclusion: merkle root mismatch',
+      inputs: {
+        ...baseInputs,
+        bgp: mutatedBgp,
+        variables: validInputs.variables,
+      },
+    });
+  }
+  
+  // 6. Wrong root - use a different root value
+  if (signedData.root) {
+    negativeTests.push({
+      type: 'wrong_root',
+      description: 'Merkle root does not match the signed root',
+      expectedError: 'Failed constraint in verify_inclusion or verify_signature',
+      inputs: {
+        public_key: [signedData.pubKey],
+        roots: [{
+          value: mutateHexString(signedData.root),
+          signature: signedData.signature,
+        }],
+        bgp: validInputs.bgp,
+        variables: validInputs.variables,
+      },
+    });
+  }
+  
+  // 7. Swapped triples - swap BGP triple order (if applicable)
+  if (validInputs.bgp.length >= 2) {
+    const swappedBgp = [validInputs.bgp[1], validInputs.bgp[0], ...validInputs.bgp.slice(2)];
+    
+    negativeTests.push({
+      type: 'swapped_triples',
+      description: 'BGP triples are in wrong order',
+      expectedError: 'Failed constraint: pattern-specific term does not match expected position',
+      inputs: {
+        ...baseInputs,
+        bgp: swappedBgp,
+        variables: validInputs.variables,
+      },
+    });
+  }
+  
+  return negativeTests;
+}
+
