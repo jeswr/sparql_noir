@@ -340,3 +340,100 @@ npm run verify -- --proof proof.json
 3. **Generated circuits import** - never generate inline hash code
 4. **Test with `nargo check`** after any Noir library changes
 5. **Run E2E** after changes to validate full pipeline
+6. **Run transform tests** to verify generated Noir is correct
+
+## Transform Correctness Requirements
+
+**CRITICAL:** The Rust transform generates Noir circuit code. ALL constraint checking MUST happen in the generated Noir code, NOT in Rust at compile time. The Rust transform should only:
+1. Parse SPARQL and generate Noir code strings
+2. Do minimal constant folding for simple literals
+3. Never evaluate filter conditions at Rust compile time
+
+### Generated Circuit Must Include
+
+For a query like `SELECT ?s ?o WHERE { ?s ex:knows ?o . FILTER(?s != ?o) FILTER(?o > 3) }`:
+
+1. **Variables struct** - ONLY projected variables from SELECT clause:
+   ```noir
+   pub(crate) struct Variables {
+     pub(crate) s: Field,
+     pub(crate) o: Field,  // NOT 'p' since it's not projected
+   }
+   ```
+
+2. **Static term checks** - Assert predicates/objects match expected IRIs/literals:
+   ```noir
+   // ex:knows must be checked
+   assert(consts::hash2([0, utils::encode_string("http://example.org/knows")]) == bgp[0].terms[1]);
+   ```
+
+3. **Filter constraints in Noir** - ALL filter logic must be Noir assertions:
+   ```noir
+   // ?s != ?o
+   assert((variables.s == variables.o) == false);
+   // ?o > 3 - comparison must happen in Noir, not Rust
+   assert(variables.o > encoded_literal_3);
+   ```
+
+4. **IEEE 754 comparisons** - For float/double special values (NaN, INF, -INF):
+   - Constant-to-constant comparisons CAN be folded in Rust
+   - Variable comparisons MUST generate Noir code that handles IEEE semantics
+   - NaN comparisons: Generate Noir that checks for NaN and returns false
+   - INF comparisons: Generate Noir that handles infinity ordering
+
+### Common Transform Bugs to Avoid
+
+| Bug | Symptom | Fix |
+|-----|---------|-----|
+| Non-projected vars in Variables struct | `p: Field` when `?p` not in SELECT | Only iterate `info.variables` (projected vars) |
+| Missing static term assertions | No check for `ex:knows` | Generate assertions for NamedNode predicates/objects |
+| Filter evaluated in Rust | `?o > 3` becomes `true`/`false` literal | Generate Noir comparison expression |
+| IEEE 754 in Rust only | NaN/INF handled at compile time | Generate Noir code for runtime IEEE semantics |
+
+## Testing Infrastructure
+
+### Snapshot Tests (`test/fixtures/`)
+
+Test that generated `sparql.nr` matches expected output:
+
+```
+test/fixtures/
+├── basic_bgp/
+│   ├── query.rq          # Input SPARQL
+│   └── expected.nr       # Expected sparql.nr output
+├── filter_comparison/
+│   ├── query.rq
+│   └── expected.nr
+├── static_predicate/
+│   ├── query.rq
+│   └── expected.nr
+└── ...
+```
+
+Run with: `cargo test --manifest-path transform/Cargo.toml`
+
+### Circuit Validity Tests (`test/circuits/`)
+
+Test that generated circuits accept valid inputs and reject invalid ones:
+
+```
+test/circuits/
+├── basic_bgp/
+│   ├── query.rq
+│   ├── valid_inputs/     # Should produce valid proofs
+│   │   └── case1.toml
+│   └── invalid_inputs/   # Should fail circuit constraints
+│       ├── wrong_predicate.toml
+│       └── filter_fails.toml
+└── ...
+```
+
+Run with: `npm run test:circuits`
+
+### Test Categories
+
+1. **Projection tests** - Verify Variables struct contains exactly SELECT vars
+2. **Static term tests** - Verify IRIs/literals in patterns generate assertions
+3. **Filter tests** - Verify FILTER expressions become Noir constraints
+4. **Negative tests** - Verify invalid inputs fail circuit constraints
+

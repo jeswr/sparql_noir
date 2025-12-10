@@ -33,6 +33,31 @@ function serializeInputValue(key: string, value: InputValue): string {
 }
 
 /**
+ * Helper to recursively serialize struct fields using dot notation for nested objects
+ * This is used within [[array]] blocks to properly serialize nested structs
+ */
+function serializeStructFields(obj: InputMap, prefix: string): string[] {
+  const lines: string[] = [];
+  
+  for (const [objKey, objValue] of Object.entries(obj)) {
+    const fullKey = prefix ? `${prefix}.${objKey}` : objKey;
+    
+    if (typeof objValue === 'string' || typeof objValue === 'number' || typeof objValue === 'boolean') {
+      lines.push(`${fullKey} = "${objValue}"`);
+    } else if (Array.isArray(objValue)) {
+      // Handle arrays within structs
+      const arrayStr = objValue.map(v => `"${v}"`).join(', ');
+      lines.push(`${fullKey} = [${arrayStr}]`);
+    } else if (typeof objValue === 'object' && objValue !== null) {
+      // Recursively handle nested objects with dot notation
+      lines.push(...serializeStructFields(objValue as InputMap, fullKey));
+    }
+  }
+  
+  return lines;
+}
+
+/**
  * Serializes an array to TOML format
  */
 function serializeArray(key: string, array: InputValue[]): string {
@@ -44,17 +69,8 @@ function serializeArray(key: string, array: InputValue[]): string {
     for (let i = 0; i < array.length; i++) {
       const obj = array[i] as InputMap;
       lines.push(`[[${key}]] # ${key}[${i}]`);
-      for (const [objKey, objValue] of Object.entries(obj)) {
-        if (typeof objValue === 'string' || typeof objValue === 'number' || typeof objValue === 'boolean') {
-          lines.push(`${objKey} = "${objValue}"`);
-        } else if (Array.isArray(objValue)) {
-          // Handle nested arrays within structs
-          const arrayStr = objValue.map(v => `"${v}"`).join(', ');
-          lines.push(`${objKey} = [${arrayStr}]`);
-        } else {
-          throw new Error(`Unsupported nested object type in array for key ${key}.${objKey}`);
-        }
-      }
+      // Use helper to recursively serialize struct fields with dot notation
+      lines.push(...serializeStructFields(obj, ''));
       lines.push(''); // Empty line between array elements
     }
     return lines.join('\n').trim();
