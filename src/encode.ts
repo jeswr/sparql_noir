@@ -50,7 +50,12 @@ export function specialLiteralHandling(term: Literal) {
       return '0';
   }
   if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#integer') {
-    return parseInt(term.value, 10).toString();
+    const parsed = parseInt(term.value, 10);
+    if (!Number.isNaN(parsed)) {
+      return parsed.toString();
+    }
+    // Fallback: treat as string if parse fails (invalid integer literal)
+    return stringToFieldFn(term.value);
   }
   if (term.datatype && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#dateTime') {
     // Convert to epoch milliseconds for numeric comparisons
