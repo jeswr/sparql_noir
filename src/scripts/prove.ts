@@ -14,57 +14,48 @@ import { Command } from 'commander';
 import { Noir, type CompiledCircuit } from '@noir-lang/noir_js';
 import { UltraHonkBackend } from '@aztec/bb.js';
 import { Store, DataFactory as DF } from 'n3';
-import { stringQuadToQuad, termToString, stringToTerm } from 'rdf-string-ttl';
+import { stringQuadToQuad, termToString } from 'rdf-string-ttl';
 import type { Term, Quad, Literal } from '@rdfjs/types';
+import type { SignedData } from './sign.js';
 
-// CLI Setup
-const program = new Command();
+// --- Exported Types ---
 
-program
-  .name('prove')
-  .description('Generate a ZK proof for SPARQL query results')
-  .requiredOption('-c, --circuit <path>', 'Path to compiled circuit directory (contains target/*.json)')
-  .requiredOption('-s, --signed <path>', 'Path to signed RDF data JSON (output from sign.ts)')
-  .option('-o, --output <path>', 'Output path for proof JSON', 'proof.json')
-  .option('-m, --metadata <path>', 'Path to circuit metadata JSON (defaults to circuit/metadata.json)')
-  .option('--threads <n>', 'Number of threads for proof generation', '6')
-  .addHelpText('after', `
-Examples:
-  $ npm run prove -- -c output -s signed.json -o proof.json
-
-The script will:
-  1. Load the compiled Noir circuit
-  2. Load signed RDF data and metadata
-  3. Resolve variable bindings from SPARQL patterns
-  4. Generate ZK proof with UltraHonk backend
-  5. Save proof to output file
-`)
-  .parse();
-
-const opts = program.opts<{
-  circuit: string;
-  signed: string;
-  output: string;
-  metadata?: string;
-  threads: string;
-}>();
-
-// --- Type Definitions ---
-
-interface SignedData {
-  triples: string[][];          // [[s, p, o, g], ...] field encodings
-  paths: string[][];            // Merkle proof paths
-  direction: boolean[][];       // Merkle proof directions
-  root: string;                 // Merkle root field
-  signature: unknown;           // Signature (format depends on scheme)
-  pubKey: unknown;              // Public key (format depends on scheme)
-  nquads: Array<{               // Original quads in string format
-    subject: string;
-    predicate: string;
-    object: string;
-    graph: string;
-  }>;
+export interface ProveOptions {
+  circuitDir: string;
+  signedData: SignedData;
+  metadataPath?: string | undefined;
+  threads?: number;
+  /** If true, only generate witness without creating the actual ZK proof (faster for testing) */
+  witnessOnly?: boolean | undefined;
 }
+
+export interface ProofOutput {
+  proof: number[];
+  publicInputs: unknown;
+  circuit: string;
+  timestamp: string;
+  timingMs: number;
+}
+
+export interface WitnessOutput {
+  witness: number[];
+  circuit: string;
+  timestamp: string;
+  timingMs: number;
+}
+
+export interface ProveResult {
+  proofs: ProofOutput[];
+  witnesses?: WitnessOutput[] | undefined;
+  metadata: {
+    totalBindings: number;
+    successfulProofs: number;
+    circuit: string;
+    witnessOnly?: boolean | undefined;
+  };
+}
+
+// --- Internal Type Definitions ---
 
 interface TermJson {
   termType: string;
@@ -97,14 +88,6 @@ interface HiddenInput {
   value?: [number, number] | TermJson;
   input?: { type: string; value: unknown };
   computedType?: string;
-}
-
-interface ProofOutput {
-  proof: number[];
-  publicInputs: unknown;
-  circuit: string;
-  timestamp: string;
-  timingMs: number;
 }
 
 // --- Utility Functions ---
@@ -157,13 +140,7 @@ function equalQuadIgnoreBlankLabel(q1: Quad, q2: Quad): boolean {
     equalTermIgnoreBlankLabel(q1.graph, q2.graph);
 }
 
-function pad32(arr: number[]): number[] {
-  if (arr.length === 32) return arr;
-  if (arr.length > 32) return arr.slice(-32);
-  return Array(32 - arr.length).fill(0).concat(arr);
-}
-
-function serializeProof(obj: unknown): unknown {
+export function serializeProof(obj: unknown): unknown {
   if (obj instanceof Uint8Array) return Array.from(obj);
   if (Buffer.isBuffer(obj)) return Array.from(obj);
   if (obj && typeof obj === 'object') {
@@ -181,46 +158,33 @@ function serializeProof(obj: unknown): unknown {
   return obj;
 }
 
-// --- Main Execution ---
+// --- Exported Prove Function ---
 
-async function main() {
-  const circuitDir = path.resolve(process.cwd(), opts.circuit);
-  const signedPath = path.resolve(process.cwd(), opts.signed);
-  const outputPath = path.resolve(process.cwd(), opts.output);
-  const metadataPath = opts.metadata
-    ? path.resolve(process.cwd(), opts.metadata)
-    : path.join(circuitDir, 'metadata.json');
-
-  // Validate paths
-  if (!fs.existsSync(circuitDir)) {
-    console.error(`Error: Circuit directory '${circuitDir}' does not exist.`);
-    process.exit(1);
-  }
-  if (!fs.existsSync(signedPath)) {
-    console.error(`Error: Signed data file '${signedPath}' does not exist.`);
-    process.exit(1);
-  }
+/**
+ * Generate ZK proofs for SPARQL query results
+ */
+export async function generateProofs(options: ProveOptions): Promise<ProveResult> {
+  const { circuitDir, signedData, metadataPath: metaPathOpt, threads = 6, witnessOnly = false } = options;
 
   // Find compiled circuit JSON
   const targetDir = path.join(circuitDir, 'target');
   if (!fs.existsSync(targetDir)) {
-    console.error(`Error: Circuit target directory '${targetDir}' does not exist. Run 'nargo compile' first.`);
-    process.exit(1);
+    throw new Error(`Circuit target directory '${targetDir}' does not exist. Run 'nargo compile' first.`);
   }
   
   const circuitFiles = fs.readdirSync(targetDir).filter(f => f.endsWith('.json'));
   if (circuitFiles.length === 0) {
-    console.error(`Error: No compiled circuit JSON found in '${targetDir}'.`);
-    process.exit(1);
+    throw new Error(`No compiled circuit JSON found in '${targetDir}'.`);
   }
   
   const circuitJsonPath = path.join(targetDir, circuitFiles[0]!);
   console.log(`Loading circuit: ${circuitJsonPath}`);
 
-  // Load files
+  // Load circuit
   const circuit = JSON.parse(fs.readFileSync(circuitJsonPath, 'utf8')) as CompiledCircuit;
-  const signedData = JSON.parse(fs.readFileSync(signedPath, 'utf8')) as SignedData;
   
+  // Load metadata
+  const metadataPath = metaPathOpt || path.join(circuitDir, 'metadata.json');
   let metadata: CircuitMetadata | undefined;
   if (fs.existsSync(metadataPath)) {
     metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')) as CircuitMetadata;
@@ -263,14 +227,12 @@ async function main() {
   const inputPatterns = metadata?.input_patterns || metadata?.inputPatterns || [];
   
   if (inputPatterns.length === 0) {
-    console.error('Error: No input patterns found in metadata.');
-    process.exit(1);
+    throw new Error('No input patterns found in metadata.');
   }
 
   console.log(`Query has ${inputPatterns.length} BGP pattern(s)`);
 
   // Simple binding resolution: find quads that match patterns
-  // For now, we do a simple scan - a full implementation would use the SPARQL evaluator
   const bindings: Map<string, Term>[] = [];
   
   // Convert patterns to RDF terms
@@ -314,17 +276,17 @@ async function main() {
   }
 
   if (bindings.length === 0) {
-    console.error('Error: No bindings found for the query.');
-    process.exit(1);
+    throw new Error('No bindings found for the query.');
   }
 
   console.log(`Processing ${bindings.length} binding(s)`);
 
-  // Initialize Noir and backend
+  // Initialize Noir and backend (backend only needed if generating proofs)
   const noir = new Noir(circuit);
-  const backend = new UltraHonkBackend(circuit.bytecode, { threads: parseInt(opts.threads) });
+  const backend = witnessOnly ? null : new UltraHonkBackend(circuit.bytecode, { threads });
 
   const proofs: ProofOutput[] = [];
+  const witnesses: WitnessOutput[] = [];
   let successCount = 0;
 
   for (let bindingIdx = 0; bindingIdx < bindings.length; bindingIdx++) {
@@ -358,8 +320,6 @@ async function main() {
     for (const varName of selectVars) {
       const term = binding.get(varName);
       if (term) {
-        // For now, use the raw field encoding from the triple
-        // A full implementation would use getTermEncodingsStrings
         const patternIdx = 0; // First pattern for now
         
         // Find which position in the pattern this variable is
@@ -401,24 +361,39 @@ async function main() {
       // @ts-expect-error - circuit input types are complex and vary by circuit
       const { witness } = await noir.execute(circuitInput);
 
-      // Generate proof
-      console.log(`  Generating proof...`);
-      const proof = await backend.generateProof(witness);
+      if (witnessOnly) {
+        // Witness-only mode: skip proof generation
+        const endTime = Date.now();
+        const timingMs = endTime - startTime;
+        console.log(`  Witness generated in ${(timingMs / 1000).toFixed(2)}s (skipping proof)`);
 
-      const endTime = Date.now();
-      const timingMs = endTime - startTime;
+        witnesses.push({
+          witness: serializeProof(witness) as number[],
+          circuit: path.basename(circuitDir),
+          timestamp: new Date().toISOString(),
+          timingMs,
+        });
+        successCount++;
+      } else {
+        // Full proof generation
+        console.log(`  Generating proof...`);
+        const proof = await backend!.generateProof(witness);
 
-      console.log(`  Proof generated in ${(timingMs / 1000).toFixed(2)}s`);
+        const endTime = Date.now();
+        const timingMs = endTime - startTime;
 
-      proofs.push({
-        proof: serializeProof(proof.proof) as number[],
-        publicInputs: proof.publicInputs,
-        circuit: path.basename(circuitDir),
-        timestamp: new Date().toISOString(),
-        timingMs,
-      });
+        console.log(`  Proof generated in ${(timingMs / 1000).toFixed(2)}s`);
 
-      successCount++;
+        proofs.push({
+          proof: serializeProof(proof.proof) as number[],
+          publicInputs: proof.publicInputs,
+          circuit: path.basename(circuitDir),
+          timestamp: new Date().toISOString(),
+          timingMs,
+        });
+
+        successCount++;
+      }
     } catch (err) {
       const msg = String((err as Error)?.message || err);
       if (msg.includes('Cannot satisfy constraint') || msg.includes('Cannot satisfy')) {
@@ -430,36 +405,126 @@ async function main() {
   }
 
   // Cleanup
-  try {
-    if (typeof (backend as unknown as { destroy: () => void }).destroy === 'function') {
-      await (backend as unknown as { destroy: () => Promise<void> }).destroy();
-    }
-  } catch { /* ignore cleanup errors */ }
-
-  if (proofs.length === 0) {
-    console.error('\nError: No proofs could be generated.');
-    process.exit(1);
+  if (backend) {
+    try {
+      if (typeof (backend as unknown as { destroy: () => void }).destroy === 'function') {
+        await (backend as unknown as { destroy: () => Promise<void> }).destroy();
+      }
+    } catch { /* ignore cleanup errors */ }
   }
 
-  // Write output
-  const output = {
+  if (witnessOnly) {
+    if (witnesses.length === 0) {
+      throw new Error('No witnesses could be generated.');
+    }
+    console.log(`\nSuccessfully generated ${witnesses.length} witness(es)`);
+  } else {
+    if (proofs.length === 0) {
+      throw new Error('No proofs could be generated.');
+    }
+    console.log(`\nSuccessfully generated ${proofs.length} proof(s)`);
+  }
+
+  return {
     proofs,
+    witnesses: witnessOnly ? witnesses : undefined,
     metadata: {
       totalBindings: bindings.length,
       successfulProofs: successCount,
       circuit: path.basename(circuitDir),
-      signedData: path.basename(signedPath),
+      witnessOnly: witnessOnly || undefined,
     },
   };
-
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  fs.writeFileSync(outputPath, JSON.stringify(output, null, 2));
-
-  console.log(`\nSuccessfully generated ${proofs.length} proof(s)`);
-  console.log(`Output saved to: ${outputPath}`);
 }
 
-main().catch(err => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+// --- CLI Entry Point ---
+
+// Only run CLI if this is the main module
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+
+if (isMainModule) {
+  const program = new Command();
+
+  program
+    .name('prove')
+    .description('Generate a ZK proof for SPARQL query results')
+    .requiredOption('-c, --circuit <path>', 'Path to compiled circuit directory (contains target/*.json)')
+    .requiredOption('-s, --signed <path>', 'Path to signed RDF data JSON (output from sign.ts)')
+    .option('-o, --output <path>', 'Output path for proof JSON', 'proof.json')
+    .option('-m, --metadata <path>', 'Path to circuit metadata JSON (defaults to circuit/metadata.json)')
+    .option('--threads <n>', 'Number of threads for proof generation', '6')
+    .option('-w, --witness-only', 'Only generate witness, skip proof generation (faster for testing)')
+    .addHelpText('after', `
+Examples:
+  $ npm run prove -- -c output -s signed.json -o proof.json
+  $ npm run prove -- -c output -s signed.json -w  # witness only (faster)
+
+The script will:
+  1. Load the compiled Noir circuit
+  2. Load signed RDF data and metadata
+  3. Resolve variable bindings from SPARQL patterns
+  4. Generate ZK proof with UltraHonk backend (or just witness if -w)
+  5. Save proof/witness to output file
+`)
+    .parse();
+
+  const opts = program.opts<{
+    circuit: string;
+    signed: string;
+    output: string;
+    metadata?: string;
+    threads: string;
+    witnessOnly?: boolean;
+  }>();
+
+  async function main() {
+    const circuitDir = path.resolve(process.cwd(), opts.circuit);
+    const signedPath = path.resolve(process.cwd(), opts.signed);
+    const outputPath = path.resolve(process.cwd(), opts.output);
+
+    // Validate paths
+    if (!fs.existsSync(circuitDir)) {
+      console.error(`Error: Circuit directory '${circuitDir}' does not exist.`);
+      process.exit(1);
+    }
+    if (!fs.existsSync(signedPath)) {
+      console.error(`Error: Signed data file '${signedPath}' does not exist.`);
+      process.exit(1);
+    }
+
+    // Load signed data
+    const signedData = JSON.parse(fs.readFileSync(signedPath, 'utf8')) as SignedData;
+
+    try {
+      const result = await generateProofs({
+        circuitDir,
+        signedData,
+        metadataPath: opts.metadata ? path.resolve(process.cwd(), opts.metadata) : undefined,
+        threads: parseInt(opts.threads),
+        witnessOnly: opts.witnessOnly,
+      });
+
+      // Write output
+      const output = {
+        ...result,
+        metadata: {
+          ...result.metadata,
+          signedData: path.basename(signedPath),
+        },
+      };
+
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+      fs.writeFileSync(outputPath, JSON.stringify(output, null, 2));
+
+      console.log(`Output saved to: ${outputPath}`);
+    } catch (err) {
+      console.error('Error:', (err as Error).message);
+      process.exit(1);
+    }
+  }
+
+  main().catch(err => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+  });
+}
