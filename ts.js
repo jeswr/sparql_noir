@@ -9,7 +9,8 @@ const __dirname = new URL('.', import.meta.url).pathname;
 
 const loader = new ManifestLoader();
 
-const tests = await loader.from("https://w3c.github.io/rdf-tests/sparql/sparql11/manifest-sparql11-query.ttl");
+// Use SPARQL 1.0 tests which have basic BGP, OPTIONAL, FILTER tests
+const tests = await loader.from("https://w3c.github.io/rdf-tests/sparql/sparql10/manifest.ttl");
 const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
   .filter(test => {
     if (
@@ -18,6 +19,51 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       !test.queryString.includes('SELECT')
     ) {
       return false;
+    }
+
+    // Check for unsupported SPARQL features in the query string
+    const unsupportedPatterns = [
+      /\bEXISTS\s*\{/i,
+      /\bNOT\s+EXISTS\s*\{/i,
+      /\bisNumeric\s*\(/i,
+      /\bABS\s*\(/i,
+      /\bCONTAINS\s*\(/i,
+      /\bSTRSTARTS\s*\(/i,
+      /\bSTRENDS\s*\(/i,
+      /\bSUBSTR\s*\(/i,
+      /\bREPLACE\s*\(/i,
+      /\bUCASE\s*\(/i,
+      /\bLCASE\s*\(/i,
+      /\bENCODE_FOR_URI\s*\(/i,
+      /\bCONCAT\s*\(/i,
+      /\bROUND\s*\(/i,
+      /\bCEIL\s*\(/i,
+      /\bFLOOR\s*\(/i,
+      /\bRAND\s*\(/i,
+      /\bNOW\s*\(/i,
+      /\bYEAR\s*\(/i,
+      /\bMONTH\s*\(/i,
+      /\bDAY\s*\(/i,
+      /\bHOURS\s*\(/i,
+      /\bMINUTES\s*\(/i,
+      /\bSECONDS\s*\(/i,
+      /\bTIMEZONE\s*\(/i,
+      /\bTZ\s*\(/i,
+      /\bMD5\s*\(/i,
+      /\bSHA1\s*\(/i,
+      /\bSHA256\s*\(/i,
+      /\bSHA384\s*\(/i,
+      /\bSHA512\s*\(/i,
+      /\bCOALESCE\s*\(/i,
+      /\bIF\s*\(/i,
+      /\bIN\s*\(/i,
+      /\bNOT\s+IN\s*\(/i,
+    ];
+
+    for (const pattern of unsupportedPatterns) {
+      if (pattern.test(test.queryString)) {
+        return false;
+      }
     }
 
     const unsupported = [
@@ -63,13 +109,18 @@ for (const test of evaluationTests) {
     continue;
   }
   
-  await Promise.all([
-    fs.promises.writeFile(path.join(__dirname, 'inputs', 'sparql.rq'), test.queryString),
-    fs.promises.writeFile(path.join(__dirname, 'inputs', 'data', 'data.ttl'), dataContent),
-  ]);
+  console.log(`  Query: ${test.queryString.substring(0, 80).replace(/\n/g, ' ')}...`);
+  
+  fs.writeFileSync(path.join(__dirname, 'inputs', 'sparql.rq'), test.queryString);
+  fs.writeFileSync(path.join(__dirname, 'inputs', 'data', 'data.ttl'), dataContent);
+
+  // Verify files were written correctly
+  const writtenQuery = fs.readFileSync(path.join(__dirname, 'inputs', 'sparql.rq'), 'utf-8');
+  console.log(`  Written query: ${writtenQuery.substring(0, 80).replace(/\n/g, ' ')}...`);
 
   try {
-    execSync('npm run transform', { stdio: 'inherit' });
+    execSync('npm run transform -- -q inputs/sparql.rq', { stdio: 'inherit' });
+    execSync('cd noir_prove && nargo compile', { stdio: 'inherit' });
     execSync('npm run sign -- -i inputs/data/data.ttl -o temp/signed.json', { stdio: 'inherit' });
     execSync('npm run prove -- -c ./noir_prove -s temp/signed.json -o temp/proof.json', { stdio: 'inherit' });
     execSync('npm run verify -- -i temp/proof.json -c ./noir_prove', { stdio: 'inherit' });

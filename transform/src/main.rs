@@ -1797,7 +1797,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .get_matches();
 
-    // Read query
+    // Read query - require explicit query specification
     let query_text = if let Some(q) = matches.get_one::<String>("query") {
         let path = Path::new(q);
         if path.exists() {
@@ -1806,7 +1806,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             q.clone()
         }
     } else {
-        "SELECT ?s ?p ?o WHERE { ?s ?p ?o . }".to_string()
+        return Err("No query specified. Use -q <query> or -q <path/to/query.rq>".into());
     };
 
     let (sparql_nr, main_nr, nargo_toml, metadata) = generate_circuit(&query_text)?;
