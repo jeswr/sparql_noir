@@ -1,7 +1,5 @@
-PREFIX : <http://example.org/> 
-
-SELECT ?z
-{
-  ?s ?p ?o .
-  BIND(?o+10 AS ?z)
+PREFIX : <http://example.org/>
+SELECT * WHERE {
+	?s :num ?num
+	FILTER(ABS(?num) >= 2)
 }
