@@ -59,11 +59,29 @@ struct Binding {
     term: Term,
 }
 
+/// Graph context for a triple pattern (from GRAPH clause).
+#[derive(Clone, Debug)]
+enum GraphContext {
+    /// No explicit GRAPH clause, uses default graph
+    Default,
+    /// GRAPH <iri> - static named graph
+    NamedNode(String),
+    /// GRAPH ?var - variable graph
+    Variable(String),
+}
+
+/// Triple pattern with its graph context.
+#[derive(Clone, Debug)]
+struct ContextualizedTriple {
+    pattern: TriplePattern,
+    graph: GraphContext,
+}
+
 /// Collected information from processing a graph pattern.
 #[derive(Clone, Debug)]
 struct PatternInfo {
     /// Triple patterns that must be provided as BGP inputs
-    patterns: Vec<TriplePattern>,
+    patterns: Vec<ContextualizedTriple>,
     /// Variable bindings discovered during pattern processing
     bindings: Vec<Binding>,
     /// Equality assertions between terms
@@ -1121,11 +1139,25 @@ fn fresh_variable() -> TermPattern {
 
 /// Process a list of triple patterns, extracting bindings and assertions.
 fn process_patterns(patterns: &[TriplePattern]) -> Result<PatternInfo, String> {
+    process_patterns_with_graph(patterns, GraphContext::Default)
+}
+
+/// Process triple patterns with a specific graph context.
+fn process_patterns_with_graph(patterns: &[TriplePattern], graph: GraphContext) -> Result<PatternInfo, String> {
     let mut info = PatternInfo::new();
     let mut seen_vars: BTreeSet<String> = BTreeSet::new();
+    
+    // If the graph is a variable, add it to seen_vars after first use
+    let graph_var = match &graph {
+        GraphContext::Variable(v) => Some(v.clone()),
+        _ => None,
+    };
 
     for (i, pattern) in patterns.iter().enumerate() {
-        info.patterns.push(pattern.clone());
+        info.patterns.push(ContextualizedTriple {
+            pattern: pattern.clone(),
+            graph: graph.clone(),
+        });
 
         // Process subject (position 0)
         match &pattern.subject {
@@ -1307,63 +1339,57 @@ fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
         }
 
         GraphPattern::Join { left, right } => {
-            // Flatten into a single pattern list if possible
-            let mut patterns: Vec<TriplePattern> = Vec::new();
-            for side in [left.as_ref(), right.as_ref()] {
-                match side {
-                    GraphPattern::Bgp { patterns: p } => patterns.extend(p.clone()),
-                    GraphPattern::Path {
-                        subject,
-                        path,
-                        object,
-                    } => match path {
-                        PropertyPathExpression::NamedNode(nn) => {
-                            patterns.push(TriplePattern {
-                                subject: subject.clone(),
-                                predicate: NamedNodePattern::NamedNode(nn.clone()),
-                                object: object.clone(),
-                            });
-                        }
-                        PropertyPathExpression::Reverse(inner) => {
-                            if let PropertyPathExpression::NamedNode(nn) = inner.as_ref() {
-                                patterns.push(TriplePattern {
-                                    subject: object.clone(),
-                                    predicate: NamedNodePattern::NamedNode(nn.clone()),
-                                    object: subject.clone(),
-                                });
-                            } else {
-                                return Err(format!(
-                                    "Unsupported reverse path in join: {:?}",
-                                    path
-                                ));
-                            }
-                        }
-                        _ => return Err(format!("Unsupported path in join: {:?}", path)),
-                    },
-                    GraphPattern::Extend {
-                        inner,
-                        variable,
-                        expression,
-                    } => {
-                        let mut info = process_graph_pattern(inner)?;
-                        let term = match expression {
-                            Expression::Variable(v) => Term::Variable(v.as_str().to_string()),
-                            Expression::NamedNode(nn) => {
-                                Term::Static(GroundTerm::NamedNode(nn.clone()))
-                            }
-                            Expression::Literal(l) => Term::Static(GroundTerm::Literal(l.clone())),
-                            _ => return Err("Unsupported BIND expression".into()),
-                        };
-                        info.bindings.push(Binding {
-                            variable: variable.as_str().to_string(),
-                            term,
-                        });
-                        return Ok(info);
-                    }
-                    _ => return Err(format!("Unsupported join side: {:?}", side)),
-                }
+            // Recursively process both sides and merge results
+            let left_info = process_graph_pattern(left)?;
+            let right_info = process_graph_pattern(right)?;
+            
+            // Merge the two PatternInfo results
+            let offset = left_info.patterns.len();
+            let mut merged = PatternInfo::new();
+            
+            // Merge patterns
+            merged.patterns.extend(left_info.patterns);
+            merged.patterns.extend(right_info.patterns);
+            
+            // Merge bindings (keep track of which are from right side)
+            merged.bindings.extend(left_info.bindings);
+            for binding in right_info.bindings {
+                // Adjust Input references for right side
+                let adjusted_term = match binding.term {
+                    Term::Input(idx, pos) => Term::Input(idx + offset, pos),
+                    other => other,
+                };
+                merged.bindings.push(Binding {
+                    variable: binding.variable,
+                    term: adjusted_term,
+                });
             }
-            process_patterns(&patterns)
+            
+            // Merge assertions with adjusted offsets
+            merged.assertions.extend(left_info.assertions);
+            for assertion in right_info.assertions {
+                let adj_left = match assertion.0 {
+                    Term::Input(idx, pos) => Term::Input(idx + offset, pos),
+                    other => other,
+                };
+                let adj_right = match assertion.1 {
+                    Term::Input(idx, pos) => Term::Input(idx + offset, pos),
+                    other => other,
+                };
+                merged.assertions.push(Assertion(adj_left, adj_right));
+            }
+            
+            // Merge filters
+            merged.filters.extend(left_info.filters);
+            merged.filters.extend(right_info.filters);
+            
+            // Handle union branches (if any)
+            if left_info.union_branches.is_some() || right_info.union_branches.is_some() {
+                // For now, just keep the first one found
+                merged.union_branches = left_info.union_branches.or(right_info.union_branches);
+            }
+            
+            Ok(merged)
         }
 
         GraphPattern::Filter { expr, inner } => {
@@ -1439,6 +1465,54 @@ fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
                 filters: Vec::new(),
                 union_branches: Some(branches),
             })
+        }
+
+        GraphPattern::Graph { name, inner } => {
+            // Named graph pattern - process inner pattern and set graph context
+            let mut info = process_graph_pattern(inner)?;
+            
+            // Determine the graph context
+            let graph_context = match name {
+                NamedNodePattern::NamedNode(nn) => GraphContext::NamedNode(nn.as_str().to_string()),
+                NamedNodePattern::Variable(v) => GraphContext::Variable(v.as_str().to_string()),
+            };
+            
+            // Update all patterns with the graph context
+            for pattern in &mut info.patterns {
+                pattern.graph = graph_context.clone();
+            }
+            
+            // Add assertions for the graph component (position 3) of each triple
+            match name {
+                NamedNodePattern::NamedNode(nn) => {
+                    // Static graph name - assert each triple's graph matches
+                    for i in 0..info.patterns.len() {
+                        info.assertions.push(Assertion(
+                            Term::Static(GroundTerm::NamedNode(nn.clone())),
+                            Term::Input(i, 3),
+                        ));
+                    }
+                }
+                NamedNodePattern::Variable(v) => {
+                    // Variable graph name - bind and assert consistency
+                    let var_name = v.as_str().to_string();
+                    if !info.patterns.is_empty() {
+                        // Bind variable to first pattern's graph
+                        info.bindings.push(Binding {
+                            variable: var_name.clone(),
+                            term: Term::Input(0, 3),
+                        });
+                        // Assert all other patterns have the same graph
+                        for i in 1..info.patterns.len() {
+                            info.assertions.push(Assertion(
+                                Term::Variable(var_name.clone()),
+                                Term::Input(i, 3),
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(info)
         }
 
         _ => Err(format!("Unsupported graph pattern: {:?}", gp)),
@@ -1654,17 +1728,17 @@ utils = { path = "../noir/lib/utils" }
     // Metadata
     let metadata = serde_json::json!({
         "variables": info.variables,
-        "inputPatterns": info.pattern.patterns.iter().map(pattern_to_json).collect::<Vec<_>>(),
+        "inputPatterns": info.pattern.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>(),
         "optionalPatterns": [],
         "unionBranches": info.pattern.union_branches.as_ref().map(|bs| {
-            bs.iter().map(|b| b.patterns.iter().map(pattern_to_json).collect::<Vec<_>>()).collect::<Vec<_>>()
+            bs.iter().map(|b| b.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>()).collect::<Vec<_>>()
         }).unwrap_or_default(),
         "hiddenInputs": hidden,
         // Legacy snake_case keys for compatibility
-        "input_patterns": info.pattern.patterns.iter().map(pattern_to_json).collect::<Vec<_>>(),
+        "input_patterns": info.pattern.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>(),
         "optional_patterns": [],
         "union_branches": info.pattern.union_branches.as_ref().map(|bs| {
-            bs.iter().map(|b| b.patterns.iter().map(pattern_to_json).collect::<Vec<_>>()).collect::<Vec<_>>()
+            bs.iter().map(|b| b.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>()).collect::<Vec<_>>()
         }).unwrap_or_default(),
         "hidden_inputs": hidden,
     });
@@ -1735,12 +1809,17 @@ fn named_node_pattern_to_json(nnp: &NamedNodePattern) -> serde_json::Value {
     }
 }
 
-fn pattern_to_json(tp: &TriplePattern) -> serde_json::Value {
+fn contextualized_pattern_to_json(ct: &ContextualizedTriple) -> serde_json::Value {
+    let graph = match &ct.graph {
+        GraphContext::Default => serde_json::json!({"termType": "DefaultGraph"}),
+        GraphContext::NamedNode(iri) => serde_json::json!({"termType": "NamedNode", "value": iri}),
+        GraphContext::Variable(name) => serde_json::json!({"termType": "Variable", "value": name}),
+    };
     serde_json::json!({
-        "subject": term_pattern_to_json(&tp.subject),
-        "predicate": named_node_pattern_to_json(&tp.predicate),
-        "object": term_pattern_to_json(&tp.object),
-        "graph": {"termType": "DefaultGraph"}
+        "subject": term_pattern_to_json(&ct.pattern.subject),
+        "predicate": named_node_pattern_to_json(&ct.pattern.predicate),
+        "object": term_pattern_to_json(&ct.pattern.object),
+        "graph": graph
     })
 }
 
