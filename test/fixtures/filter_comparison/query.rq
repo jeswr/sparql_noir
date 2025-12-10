@@ -1,6 +1,7 @@
 PREFIX ex: <http://example.org/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 SELECT ?s ?o WHERE {
   ?s ex:knows ?o .
   FILTER(?s != ?o)
-  FILTER(?o > 3)
+  FILTER(?o > "3"^^xsd:integer)
 }

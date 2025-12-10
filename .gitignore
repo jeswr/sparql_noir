@@ -39,5 +39,10 @@ noir/bin/*/Prover.toml
 # Noir installation
 .noirup/
 .nargo/
+.rdf-test-suite-cache/
+
+# Generated circuit tests
+test/circuits/sparql11/
+test/circuits/compiled/
 
 legacy/
