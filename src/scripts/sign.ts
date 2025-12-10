@@ -148,6 +148,32 @@ export async function signRdfData(inputPath: string): Promise<SignedData> {
 }
 
 /**
+ * Process RDF data without signing - minimal data for skip-signing mode
+ * Still computes encoded triples (needed for binding) but skips Merkle tree/signature
+ */
+export async function processRdfDataWithoutSigning(inputPath: string): Promise<SignedData> {
+  // Dereference, parse and canonicalize the RDF dataset
+  const { store } = await dereferenceToStore.default(inputPath, { localFiles: true });
+  const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
+  
+  const { triples, noirInput } = await processQuadsForMerkle(quads);
+  
+  // We still need to run the Noir execution to get the encoded triple values,
+  // but we don't need the signature. The merkle function returns triples in encoded form.
+  const jsonRes = runJson(`[${noirInput}]`)[0];
+  
+  // Add quad string representations
+  jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
+  
+  // Return with empty/placeholder signature data
+  jsonRes.signature = [];
+  jsonRes.pubKey = {};
+  delete jsonRes.root_u8;
+  
+  return jsonRes as SignedData;
+}
+
+/**
  * Sign RDF data and write to output file
  */
 export async function signAndWrite(options: SignOptions): Promise<SignedData> {

@@ -22,11 +22,13 @@ import type { SignedData } from './sign.js';
 
 export interface ProveOptions {
   circuitDir: string;
-  signedData: SignedData;
+  signedData: SignedData | null;
   metadataPath?: string | undefined;
   threads?: number;
   /** If true, only generate witness without creating the actual ZK proof (faster for testing) */
   witnessOnly?: boolean | undefined;
+  /** If true, skip signature verification (use simplified circuit) */
+  skipSigning?: boolean | undefined;
 }
 
 export interface ProofOutput {
@@ -88,6 +90,122 @@ interface HiddenInput {
   value?: [number, number] | TermJson;
   input?: { type: string; value: unknown };
   computedType?: string;
+}
+
+// Helper function to parse datetime values in various formats
+function parseDatetimeValue(value: string): number | null {
+  // Try standard Date.parse first
+  let ms = Date.parse(value);
+  if (!Number.isNaN(ms)) {
+    return ms;
+  }
+  
+  // Handle xsd:date format: YYYY-MM-DD with optional timezone
+  // Examples: "2006-08-23", "2006-08-23+00:00", "2006-08-23Z"
+  const dateMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})(Z|[+-]\d{2}:\d{2})?$/);
+  if (dateMatch) {
+    const [, year, month, day, tz] = dateMatch;
+    // Parse as ISO date string
+    let isoString = `${year}-${month}-${day}`;
+    if (tz) {
+      isoString += tz === 'Z' ? 'T00:00:00Z' : `T00:00:00${tz}`;
+    }
+    ms = Date.parse(isoString);
+    if (!Number.isNaN(ms)) {
+      return ms;
+    }
+    // Fallback: parse as UTC
+    ms = Date.UTC(parseInt(year!, 10), parseInt(month!, 10) - 1, parseInt(day!, 10));
+    if (!Number.isNaN(ms)) {
+      return ms;
+    }
+  }
+  
+  return null;
+}
+
+// Helper function to compute hidden input values based on metadata
+function computeHiddenInputs(
+  hiddenInputs: HiddenInput[],
+  binding: Map<string, Term>
+): string[] | null {
+  if (!hiddenInputs || hiddenInputs.length === 0) {
+    return [];
+  }
+
+  const hiddenValues: string[] = [];
+
+  for (const hidden of hiddenInputs) {
+    if (hidden.type === 'customComputed' && hidden.computedType === 'datetime_value') {
+      // Handle datetime comparison hidden inputs
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      if (!input) {
+        console.warn('Hidden input missing input field');
+        return null;
+      }
+
+      if (input.type === 'variable') {
+        // Get the bound value for this variable
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for hidden input`);
+          return null;
+        }
+        if (boundTerm.termType !== 'Literal') {
+          console.warn(`Variable ${varName} is not a literal for datetime comparison`);
+          return null;
+        }
+        // Parse datetime and convert to epoch milliseconds
+        const ms = parseDatetimeValue(boundTerm.value);
+        if (ms === null) {
+          console.warn(`Could not parse datetime: ${boundTerm.value}`);
+          return null;
+        }
+        hiddenValues.push(ms.toString());
+      } else if (input.type === 'static') {
+        // Static value from metadata
+        const termJson = input.value as TermJson;
+        if (!termJson || termJson.termType !== 'Literal') {
+          console.warn('Static hidden input is not a literal');
+          return null;
+        }
+        const ms = parseDatetimeValue(termJson.value || '');
+        if (ms === null) {
+          console.warn(`Could not parse static datetime: ${termJson.value}`);
+          return null;
+        }
+        hiddenValues.push(ms.toString());
+      } else {
+        console.warn(`Unknown hidden input type: ${input.type}`);
+        return null;
+      }
+    } else if (hidden.type === 'variable') {
+      // Direct variable reference
+      const varName = (hidden.value as unknown) as string;
+      const boundTerm = binding.get(varName);
+      if (!boundTerm) {
+        console.warn(`Variable ${varName} not found in binding for hidden input`);
+        return null;
+      }
+      // For now, treat as string and encode
+      hiddenValues.push(boundTerm.value);
+    } else if (hidden.type === 'static') {
+      // Static value
+      const termJson = hidden.value as TermJson;
+      if (termJson && typeof termJson === 'object' && termJson.value) {
+        hiddenValues.push(termJson.value);
+      } else {
+        console.warn('Invalid static hidden input');
+        return null;
+      }
+    } else {
+      console.warn(`Unhandled hidden input type: ${hidden.type}`);
+      return null;
+    }
+  }
+
+  return hiddenValues;
 }
 
 // --- Utility Functions ---
@@ -164,7 +282,7 @@ export function serializeProof(obj: unknown): unknown {
  * Generate ZK proofs for SPARQL query results
  */
 export async function generateProofs(options: ProveOptions): Promise<ProveResult> {
-  const { circuitDir, signedData, metadataPath: metaPathOpt, threads = 6, witnessOnly = false } = options;
+  const { circuitDir, signedData, metadataPath: metaPathOpt, threads = 6, witnessOnly = false, skipSigning = false } = options;
 
   // Find compiled circuit JSON
   const targetDir = path.join(circuitDir, 'target');
@@ -193,8 +311,13 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     console.warn(`Warning: No metadata file found at '${metadataPath}'. Using minimal defaults.`);
   }
 
+  // For skip-signing mode, we need minimal data structure
+  if (skipSigning && !signedData) {
+    throw new Error('signedData is required even in skipSigning mode for triples/nquads');
+  }
+
   // Build RDF store from signed quads
-  const quadArr = signedData.nquads.map(nq => stringQuadToQuad(nq));
+  const quadArr = signedData!.nquads.map(nq => stringQuadToQuad(nq));
   const stringArr = quadArr.map(q => termToString(q));
   const stringIndexMap = new Map(stringArr.map((s, i) => [s, i]));
   const store = new Store(quadArr);
@@ -216,10 +339,16 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
 
   // Build triple object for circuit input
   function getTripleObject(id: number) {
+    if (skipSigning) {
+      // Simplified: only terms, no Merkle proof data
+      return {
+        terms: signedData!.triples[id],
+      };
+    }
     return {
-      terms: signedData.triples[id],
-      path: signedData.paths[id],
-      directions: signedData.direction[id],
+      terms: signedData!.triples[id],
+      path: signedData!.paths[id],
+      directions: signedData!.direction[id],
     };
   }
 
@@ -287,11 +416,17 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
 
   const proofs: ProofOutput[] = [];
   const witnesses: WitnessOutput[] = [];
-  let successCount = 0;
+
+  // Prepare all binding inputs first
+  interface BindingInput {
+    bindingIdx: number;
+    circuitInput: Record<string, unknown>;
+  }
+
+  const bindingInputs: BindingInput[] = [];
 
   for (let bindingIdx = 0; bindingIdx < bindings.length; bindingIdx++) {
     const binding = bindings[bindingIdx]!;
-    console.log(`\nProcessing binding ${bindingIdx + 1}/${bindings.length}`);
     
     // Find triple indices for each pattern
     const tripleIndices: number[] = [];
@@ -299,31 +434,71 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     // For the first pattern, find matching triple
     const firstPatternQuad = matchingQuads[bindingIdx];
     if (!firstPatternQuad) {
-      console.warn(`  Skipping: no matching quad at index ${bindingIdx}`);
       continue;
     }
     const idx = findTripleIndex(firstPatternQuad);
     if (idx < 0) {
-      console.warn(`  Skipping: could not find triple index for binding`);
       continue;
     }
     tripleIndices.push(idx);
 
-    // Pad to expected pattern count
-    while (tripleIndices.length < inputPatterns.length) {
-      tripleIndices.push(tripleIndices[0]!);
+    // For subsequent patterns, find matching triples using the bindings from previous patterns
+    for (let patternIdx = 1; patternIdx < inputPatterns.length; patternIdx++) {
+      const pattern = patternQuads[patternIdx]!;
+      
+      // Substitute bound variables into the pattern for matching
+      const subjectMatch = pattern.subject.termType === 'Variable' 
+        ? binding.get(pattern.subject.value) || null 
+        : pattern.subject;
+      const predicateMatch = pattern.predicate.termType === 'Variable'
+        ? binding.get(pattern.predicate.value) || null
+        : pattern.predicate;
+      const objectMatch = pattern.object.termType === 'Variable'
+        ? binding.get(pattern.object.value) || null
+        : pattern.object;
+      const graphMatch = pattern.graph.termType === 'Variable'
+        ? binding.get(pattern.graph.value) || null
+        : (pattern.graph.termType === 'DefaultGraph' ? null : pattern.graph);
+
+      const matchingForPattern = store.getQuads(subjectMatch, predicateMatch, objectMatch, graphMatch);
+      
+      if (matchingForPattern.length > 0) {
+        const matchedQuad = matchingForPattern[0]!;
+        const matchedIdx = findTripleIndex(matchedQuad);
+        if (matchedIdx >= 0) {
+          tripleIndices.push(matchedIdx);
+          
+          // Update binding with newly bound variables from this pattern
+          if (pattern.subject.termType === 'Variable' && !binding.has(pattern.subject.value)) {
+            binding.set(pattern.subject.value, matchedQuad.subject);
+          }
+          if (pattern.predicate.termType === 'Variable' && !binding.has(pattern.predicate.value)) {
+            binding.set(pattern.predicate.value, matchedQuad.predicate);
+          }
+          if (pattern.object.termType === 'Variable' && !binding.has(pattern.object.value)) {
+            binding.set(pattern.object.value, matchedQuad.object);
+          }
+          if (pattern.graph.termType === 'Variable' && !binding.has(pattern.graph.value)) {
+            binding.set(pattern.graph.value, matchedQuad.graph);
+          }
+        } else {
+          // Fallback: use first pattern's triple
+          tripleIndices.push(tripleIndices[0]!);
+        }
+      } else {
+        // No match found, use first pattern's triple as fallback
+        tripleIndices.push(tripleIndices[0]!);
+      }
     }
 
-    // Build variables object for circuit
+    // Build variables object for circuit - search all patterns for variable values
     const variables: Record<string, string> = {};
     const selectVars = metadata?.variables || [];
     for (const varName of selectVars) {
-      const term = binding.get(varName);
-      if (term) {
-        const patternIdx = 0; // First pattern for now
-        
-        // Find which position in the pattern this variable is
+      // Search all patterns for this variable
+      for (let patternIdx = 0; patternIdx < inputPatterns.length; patternIdx++) {
         const positions: (keyof PatternJson)[] = ['subject', 'predicate', 'object', 'graph'];
+        let found = false;
         for (let pi = 0; pi < positions.length; pi++) {
           const pos = positions[pi]!;
           const pattern = inputPatterns[patternIdx];
@@ -331,77 +506,130 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
           const patternTerm = pattern[pos] as TermJson | undefined;
           if (patternTerm && patternTerm.termType === 'Variable' && patternTerm.value === varName) {
             const tripleIdx = tripleIndices[patternIdx];
-            const triple = tripleIdx !== undefined ? signedData.triples[tripleIdx] : undefined;
+            const triple = tripleIdx !== undefined ? signedData!.triples[tripleIdx] : undefined;
             if (triple) {
               variables[varName] = triple[pi]!;
+              found = true;
+              break;
             }
-            break;
           }
         }
+        if (found) break;
       }
     }
 
+    // Compute hidden inputs if needed
+    const hiddenInputs = metadata?.hiddenInputs || metadata?.hidden_inputs || [];
+    const hiddenValues = computeHiddenInputs(hiddenInputs, binding);
+    if (hiddenValues === null) {
+      // Skip this binding if hidden input computation failed
+      continue;
+    }
+
     // Build circuit input
-    const circuitInput = {
-      public_key: [signedData.pubKey],
+    const baseInput = skipSigning ? {
+      // Simplified circuit: only BGP and variables
+      bgp: tripleIndices.map(i => getTripleObject(i)),
+      variables,
+    } : {
+      // Full circuit: includes signature verification
+      public_key: [signedData!.pubKey],
       roots: [{
-        value: signedData.root,
-        signature: signedData.signature,
+        value: signedData!.root,
+        signature: signedData!.signature,
         keyIndex: 0,
       }],
       bgp: tripleIndices.map(i => getTripleObject(i)),
       variables,
     };
 
-    const startTime = Date.now();
+    // Add hidden inputs if present
+    const circuitInput = hiddenValues.length > 0 
+      ? { ...baseInput, hidden: hiddenValues }
+      : baseInput;
 
-    try {
-      // Generate witness
-      console.log(`  Generating witness...`);
+    bindingInputs.push({ bindingIdx, circuitInput });
+  }
+
+  if (bindingInputs.length === 0) {
+    throw new Error('No valid binding inputs could be prepared.');
+  }
+
+  console.log(`\nGenerating witnesses for ${bindingInputs.length} binding(s) in parallel...`);
+
+  // Generate all witnesses in parallel
+  const witnessStartTime = Date.now();
+  const witnessResults = await Promise.allSettled(
+    bindingInputs.map(async ({ bindingIdx, circuitInput }) => {
+      const startTime = Date.now();
       // @ts-expect-error - circuit input types are complex and vary by circuit
       const { witness } = await noir.execute(circuitInput);
+      const timingMs = Date.now() - startTime;
+      return { bindingIdx, witness, timingMs };
+    })
+  );
+  const witnessEndTime = Date.now();
+  console.log(`  All witnesses generated in ${((witnessEndTime - witnessStartTime) / 1000).toFixed(2)}s`);
 
+  // Process witness results
+  const successfulWitnesses: { bindingIdx: number; witness: Uint8Array; timingMs: number }[] = [];
+  for (const result of witnessResults) {
+    if (result.status === 'fulfilled') {
+      successfulWitnesses.push(result.value);
       if (witnessOnly) {
-        // Witness-only mode: skip proof generation
-        const endTime = Date.now();
-        const timingMs = endTime - startTime;
-        console.log(`  Witness generated in ${(timingMs / 1000).toFixed(2)}s (skipping proof)`);
-
         witnesses.push({
-          witness: serializeProof(witness) as number[],
+          witness: serializeProof(result.value.witness) as number[],
           circuit: path.basename(circuitDir),
           timestamp: new Date().toISOString(),
-          timingMs,
+          timingMs: result.value.timingMs,
         });
-        successCount++;
-      } else {
-        // Full proof generation
-        console.log(`  Generating proof...`);
-        const proof = await backend!.generateProof(witness);
-
-        const endTime = Date.now();
-        const timingMs = endTime - startTime;
-
-        console.log(`  Proof generated in ${(timingMs / 1000).toFixed(2)}s`);
-
-        proofs.push({
-          proof: serializeProof(proof.proof) as number[],
-          publicInputs: proof.publicInputs,
-          circuit: path.basename(circuitDir),
-          timestamp: new Date().toISOString(),
-          timingMs,
-        });
-
-        successCount++;
       }
-    } catch (err) {
-      const msg = String((err as Error)?.message || err);
-      if (msg.includes('Cannot satisfy constraint') || msg.includes('Cannot satisfy')) {
-        console.warn(`  Skipping binding due to unsatisfiable constraints`);
-        continue;
+    } else {
+      const msg = String(result.reason?.message || result.reason);
+      if (!msg.includes('Cannot satisfy constraint') && !msg.includes('Cannot satisfy')) {
+        console.warn(`  Warning: witness generation failed: ${msg}`);
       }
-      console.error(`  Error: ${msg}`);
     }
+  }
+
+  console.log(`  Successfully generated ${successfulWitnesses.length}/${bindingInputs.length} witnesses`);
+
+  if (successfulWitnesses.length === 0) {
+    throw new Error('No witnesses could be generated.');
+  }
+
+  // If not witness-only mode, generate proofs in parallel
+  if (!witnessOnly && backend) {
+    console.log(`\nGenerating proofs for ${successfulWitnesses.length} witness(es) in parallel...`);
+    
+    const proofStartTime = Date.now();
+    const proofResults = await Promise.allSettled(
+      successfulWitnesses.map(async ({ bindingIdx, witness }) => {
+        const startTime = Date.now();
+        const proof = await backend.generateProof(witness);
+        const timingMs = Date.now() - startTime;
+        return { bindingIdx, proof, timingMs };
+      })
+    );
+    const proofEndTime = Date.now();
+    console.log(`  All proofs generated in ${((proofEndTime - proofStartTime) / 1000).toFixed(2)}s`);
+
+    // Process proof results
+    for (const result of proofResults) {
+      if (result.status === 'fulfilled') {
+        proofs.push({
+          proof: serializeProof(result.value.proof.proof) as number[],
+          publicInputs: result.value.proof.publicInputs,
+          circuit: path.basename(circuitDir),
+          timestamp: new Date().toISOString(),
+          timingMs: result.value.timingMs,
+        });
+      } else {
+        console.warn(`  Warning: proof generation failed: ${result.reason?.message || result.reason}`);
+      }
+    }
+
+    console.log(`  Successfully generated ${proofs.length}/${successfulWitnesses.length} proofs`);
   }
 
   // Cleanup
@@ -412,6 +640,8 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       }
     } catch { /* ignore cleanup errors */ }
   }
+
+  const successCount = witnessOnly ? witnesses.length : proofs.length;
 
   if (witnessOnly) {
     if (witnesses.length === 0) {

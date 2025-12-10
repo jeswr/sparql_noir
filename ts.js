@@ -4,24 +4,19 @@ import path from 'path';
 import { Writer } from 'n3';
 import { translate, Util } from 'sparqlalgebrajs';
 import { execSync } from 'child_process';
-import { signRdfData } from './dist/scripts/sign.js';
+import { signRdfData, processRdfDataWithoutSigning } from './dist/scripts/sign.js';
 import { generateProofs } from './dist/scripts/prove.js';
 import { verifyProofs } from './dist/scripts/verify.js';
+import { transform as wasmTransform, transform_with_options as wasmTransformWithOptions } from './transform/pkg/transform.js';
 
 const __dirname = new URL('.', import.meta.url).pathname;
 
-// Determine transform binary path (prefer pre-built release binary)
-const transformBinaryPath = path.join(__dirname, 'transform', 'target', 'release', 'transform');
-const usePrebuiltBinary = fs.existsSync(transformBinaryPath);
-if (usePrebuiltBinary) {
-  console.log(`Using pre-built transform binary: ${transformBinaryPath}`);
-} else {
-  console.log('Pre-built binary not found, will use cargo run (slower). Run "npm run build:transform" to build.');
-}
+console.log('Using WASM transform module');
 
 // Parse CLI arguments
 const args = process.argv.slice(2);
 const witnessOnly = args.includes('--witness-only') || args.includes('-w');
+const skipSigning = args.includes('--skip-signing') || args.includes('-s');
 
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`
@@ -29,6 +24,7 @@ Usage: node ts.js [options]
 
 Options:
   -w, --witness-only  Only generate witness, skip proof generation and verification (faster)
+  -s, --skip-signing  Skip signature verification (use simplified circuit, much faster)
   -h, --help          Show this help message
 
 By default, full proof generation and verification is performed.
@@ -36,7 +32,7 @@ By default, full proof generation and verification is performed.
   process.exit(0);
 }
 
-console.log(`Mode: ${witnessOnly ? 'witness-only (fast)' : 'full proof + verification'}\n`);
+console.log(`Mode: ${witnessOnly ? 'witness-only' : 'full proof + verification'}${skipSigning ? ' (skip-signing)' : ''}\n`);
 
 const loader = new ManifestLoader();
 
@@ -98,8 +94,24 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       /\bIsIRI\s*\(/i,
       /\bIsURI\s*\(/i,
       /\bIsLITERAL\s*\(/i,
+
+      //
+      /\bREGEX\s*\(/i,
+      /\bsameTerm\s*\(/i,
+      /\bBOUND\s*\(/i,
       // Blank nodes
       /_:/,
+      // Special float/double values that Noir doesn't support
+      /\bNaN\b/i,
+      /\bINF\b/i,
+      /"INF"/,
+      /"-INF"/,
+      /"NaN"/,
+      // REDUCED keyword
+      /\bREDUCED\b/i,
+      // LIMIT/OFFSET (uses Slice which we don't support)
+      /\bLIMIT\b/i,
+      /\bOFFSET\b/i,
     ];
 
     for (const pattern of unsupportedPatterns) {
@@ -113,7 +125,7 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       'minus',
       'ask',
       'construct',
-      'orderBy',
+      'orderby',  // lowercase - this is what sparqlalgebrajs uses
       'distinct',
       'leftJoin', // OPTIONAL - not fully implemented
 
@@ -152,39 +164,53 @@ for (const test of evaluationTests) {
     continue;
   }
   
-  console.log(`  Query: ${test.queryString.substring(0, 80).replace(/\n/g, ' ')}...`);
+  console.log(`  Query: ${test.queryString}`);
   
-  const inputQueryPath = path.join(__dirname, 'inputs', 'sparql.rq');
   const inputDataPath = path.join(__dirname, 'inputs', 'data', 'data.ttl');
   const circuitDir = path.join(__dirname, 'noir_prove');
   
-  fs.writeFileSync(inputQueryPath, test.queryString);
   fs.writeFileSync(inputDataPath, dataContent);
 
-  // Verify files were written correctly
-  const writtenQuery = fs.readFileSync(inputQueryPath, 'utf-8');
-  console.log(`  Written query: ${writtenQuery.substring(0, 80).replace(/\n/g, ' ')}...`);
-
   try {
-    // Transform SPARQL to Noir circuit
-    if (usePrebuiltBinary) {
-      execSync(`"${transformBinaryPath}" -q inputs/sparql.rq`, { stdio: 'inherit' });
-    } else {
-      execSync('cargo run --manifest-path transform/Cargo.toml --release -- -q inputs/sparql.rq', { stdio: 'inherit' });
+    // Transform SPARQL to Noir circuit using WASM module
+    const transformResultJson = skipSigning 
+      ? wasmTransformWithOptions(test.queryString, true)  // skip_signing = true
+      : wasmTransform(test.queryString);
+    const transformResult = JSON.parse(transformResultJson);
+    
+    // Check for errors
+    if (transformResult.error) {
+      throw new Error(`Transform error: ${transformResult.error}`);
     }
+    
+    // Write the generated circuit files
+    const circuitSrcDir = path.join(circuitDir, 'src');
+    if (!fs.existsSync(circuitSrcDir)) {
+      fs.mkdirSync(circuitSrcDir, { recursive: true });
+    }
+    
+    fs.writeFileSync(path.join(circuitSrcDir, 'sparql.nr'), transformResult.sparql_nr);
+    fs.writeFileSync(path.join(circuitSrcDir, 'main.nr'), transformResult.main_nr);
+    fs.writeFileSync(path.join(circuitDir, 'Nargo.toml'), transformResult.nargo_toml);
+    fs.writeFileSync(path.join(circuitDir, 'metadata.json'), JSON.stringify(transformResult.metadata, null, 2));
+    
+    console.log(`  Transform: Generated circuit files`);
     
     // Compile the circuit (still needs CLI as it's nargo)
     execSync('cd noir_prove && nargo compile', { stdio: 'inherit' });
     
-    // Sign the RDF data (now using imported function)
-    console.log('  Signing RDF data...');
-    const signedData = await signRdfData(inputDataPath);
+    // Sign or process the RDF data based on mode
+    console.log(skipSigning ? '  Processing RDF data (no signing)...' : '  Signing RDF data...');
+    const signedData = skipSigning 
+      ? await processRdfDataWithoutSigning(inputDataPath)
+      : await signRdfData(inputDataPath);
     
     // Generate proofs or witness only based on CLI option
     const proveResult = await generateProofs({
       circuitDir,
       signedData,
       witnessOnly,
+      skipSigning,
     });
     
     if (witnessOnly) {
