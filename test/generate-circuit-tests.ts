@@ -37,9 +37,11 @@ import {
   signDataInMemory,
   transformQueryInMemory,
   generateCheckBindingInputs,
+  generateNegativeTestCases,
   type SignedData,
   type CircuitMetadata,
   type CheckBindingInputs,
+  type NegativeTestCase,
 } from './lib/check-binding-inputs.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -121,6 +123,8 @@ interface ProcessedTest {
   metadata?: CircuitMetadata;
   signedData?: SignedData;
   checkBindingInputs?: Array<CheckBindingInputs | null>;
+  // Negative test cases (when --full flag is used)
+  negativeTestCases?: NegativeTestCase[];
 }
 
 const program = new Command();
@@ -629,6 +633,15 @@ async function processTestCase(test: TestCase): Promise<ProcessedTest | null> {
       }
       result.checkBindingInputs = checkBindingInputs;
       
+      // Generate negative test cases from the first valid input
+      const firstValidInput = checkBindingInputs.find(x => x !== null);
+      if (firstValidInput) {
+        result.negativeTestCases = generateNegativeTestCases(firstValidInput, signedData, metadata);
+        if (opts.verbose) {
+          console.log(`    Generated ${result.negativeTestCases.length} negative test cases`);
+        }
+      }
+      
       if (opts.verbose) {
         const validCount = checkBindingInputs.filter(x => x !== null).length;
         console.log(`    Generated ${validCount}/${bindings.length} valid checkBinding inputs`);
@@ -731,15 +744,35 @@ function generateTestFiles(test: ProcessedTest, category: string): void {
     }
   }
   
-  // Placeholder for invalid inputs (to be generated synthetically)
-  fs.writeFileSync(
-    path.join(testDir, 'invalid_inputs', 'README.md'),
-    '# Invalid Inputs\n\nThese will be synthetically generated.\n'
-  );
+  // Generate invalid input files (negative test cases)
+  if (test.negativeTestCases && test.negativeTestCases.length > 0) {
+    for (let i = 0; i < test.negativeTestCases.length; i++) {
+      const negTest = test.negativeTestCases[i];
+      const inputPath = path.join(testDir, 'invalid_inputs', `${negTest.type}.json`);
+      
+      fs.writeFileSync(inputPath, JSON.stringify({
+        description: negTest.description,
+        type: negTest.type,
+        expectedError: negTest.expectedError,
+        // Full circuit inputs (with deliberate errors)
+        public_key: negTest.inputs.public_key,
+        roots: negTest.inputs.roots,
+        bgp: negTest.inputs.bgp,
+        variables: negTest.inputs.variables,
+      }, null, 2));
+    }
+  } else {
+    // Placeholder if no negative tests generated
+    fs.writeFileSync(
+      path.join(testDir, 'invalid_inputs', 'README.md'),
+      '# Invalid Inputs\n\nNo negative test cases could be generated (no valid inputs available).\n'
+    );
+  }
   
   const fullInputCount = test.checkBindingInputs?.filter(x => x !== null).length || 0;
+  const negativeCount = test.negativeTestCases?.length || 0;
   const inputDesc = hasFullInputs 
-    ? `${fullInputCount}/${test.bindings.length} full inputs` 
+    ? `${fullInputCount}/${test.bindings.length} valid, ${negativeCount} invalid` 
     : `${test.bindings.length} bindings`;
   
   console.log(`  Created: ${safeName}/ (${inputDesc})`);
