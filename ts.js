@@ -281,8 +281,11 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       /\bREGEX\s*\(/i,
       /\bsameTerm\s*\(/i,
       /\bBOUND\s*\(/i,
-      // Blank nodes
+      // Blank nodes (explicit or via square bracket syntax)
       /_:/,
+      /\[\s*[^\]]*\s*\]/,  // Square bracket blank node syntax [ ... ]
+      // RDF list syntax (1 2 3) generates blank nodes
+      /\(\s*\??\w+(?:\s+\??\w+)*\s*\)/,  // List syntax like (1) or (?v ?w)
       // Special float/double values that Noir doesn't support
       /\bNaN\b/i,
       /\bINF\b/i,
@@ -322,6 +325,7 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       'orderby',  // lowercase - this is what sparqlalgebrajs uses
       'distinct',
       'leftjoin', // OPTIONAL - not fully implemented (lowercase per sparqlalgebrajs)
+      'graph',    // GRAPH - incomplete support with UNION
 
       // Want to include
       'ZeroOrMorePath',
