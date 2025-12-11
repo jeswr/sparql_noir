@@ -204,6 +204,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxsdatatypes"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06fa874d87eae638daae9b4e3198864fe2cce68589f227c0b2cf5b62b1530516"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "peg"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -393,6 +402,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "getrandom",
+ "oxsdatatypes",
  "serde",
  "serde_json",
  "spargebra",

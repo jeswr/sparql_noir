@@ -202,44 +202,59 @@ fn serialize_term(term: &Term, query: &QueryInfo, bindings: &BTreeMap<String, Te
 
 /// Compute the special literal encoding for the second field of hash4.
 /// This must match the TypeScript specialLiteralHandling function in encode.ts.
+/// Uses oxsdatatypes for robust parsing of XSD typed literals.
 fn special_literal_handling(value: &str, datatype: &str) -> String {
-    const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
-    const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
-    const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
+    use oxsdatatypes::{Boolean, Integer, DateTime, Double};
     
-    if datatype == XSD_BOOLEAN {
-        // Boolean: true/1 → "1", false/0 → "0"
-        let lower = value.to_lowercase();
-        if lower == "true" || value == "1" {
-            return "1".to_string();
-        }
-        if lower == "false" || value == "0" {
-            return "0".to_string();
-        }
-        // Fallback: encode as string
+    // XSD namespace prefix
+    const XSD_PREFIX: &str = "http://www.w3.org/2001/XMLSchema#";
+    
+    // Check if this is an XSD datatype
+    if !datatype.starts_with(XSD_PREFIX) {
         return encode_string_expr(value);
     }
     
-    if datatype == XSD_INTEGER {
-        // Integer: parse and return numeric value as string
-        // Strip leading '+' as Noir doesn't support that syntax
-        let normalized = value.trim_start_matches('+');
-        if let Ok(num) = normalized.parse::<i64>() {
-            return num.to_string();
+    let local_name = &datatype[XSD_PREFIX.len()..];
+    
+    match local_name {
+        // Boolean: true/1 → 1, false/0 → 0
+        "boolean" => {
+            if let Ok(b) = value.parse::<Boolean>() {
+                return if bool::from(b) { "1" } else { "0" }.to_string();
+            }
+            encode_string_expr(value)
         }
-        // Fallback: encode as string if parse fails
-        return encode_string_expr(value);
+        
+        // All integer types use oxsdatatypes::Integer parsing
+        "integer" | "int" | "long" | "short" | "byte" 
+        | "nonNegativeInteger" | "positiveInteger" | "negativeInteger" | "nonPositiveInteger"
+        | "unsignedInt" | "unsignedLong" | "unsignedShort" | "unsignedByte" => {
+            if let Ok(i) = value.parse::<Integer>() {
+                return i64::from(i).to_string();
+            }
+            encode_string_expr(value)
+        }
+        
+        // DateTime: convert to epoch milliseconds
+        "dateTime" => {
+            if let Ok(dt) = value.parse::<DateTime>() {
+                // Parse Unix epoch: 1970-01-01T00:00:00Z
+                if let Ok(epoch) = "1970-01-01T00:00:00Z".parse::<DateTime>() {
+                    // Subtract epoch from parsed datetime to get duration
+                    if let Some(duration) = dt.checked_sub(epoch) {
+                        // Get total seconds as Decimal, convert to Double (f64)
+                        let total_seconds: f64 = Double::from(duration.as_seconds()).into();
+                        let epoch_ms = (total_seconds * 1000.0) as i64;
+                        return epoch_ms.to_string();
+                    }
+                }
+            }
+            encode_string_expr(value)
+        }
+        
+        // Default: encode as string
+        _ => encode_string_expr(value)
     }
-    
-    if datatype == XSD_DATETIME {
-        // DateTime: would need to convert to epoch milliseconds
-        // For now, use string encoding (same as TypeScript fallback)
-        // TODO: implement proper datetime parsing
-        return encode_string_expr(value);
-    }
-    
-    // Default: encode as string
-    encode_string_expr(value)
 }
 
 fn serialize_ground_term(gt: &GroundTerm) -> String {

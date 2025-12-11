@@ -144,7 +144,7 @@ function linkCachedDependencies(circuitDir) {
 const args = process.argv.slice(2);
 const witnessOnly = args.includes('--witness-only') || args.includes('-w');
 const skipSigning = args.includes('--skip-signing') || args.includes('-s');
-const quietMode = args.includes('--quiet') || args.includes('-q');
+const quietMode = !args.includes('--verbose') && !args.includes('-v');
 const concurrencyArg = args.find(a => a.startsWith('--concurrency=') || a.startsWith('-j'));
 const concurrency = concurrencyArg 
   ? parseInt(concurrencyArg.split('=')[1] || concurrencyArg.slice(2), 10) 
@@ -175,7 +175,7 @@ Usage: node ts.js [options]
 Options:
   -w, --witness-only      Only generate witness, skip proof generation and verification (faster)
   -s, --skip-signing      Skip signature verification (use simplified circuit, much faster)
-  -q, --quiet             Suppress verbose logging (only show test results)
+  -v, --verbose           Enable verbose logging (quiet by default)
   -j<N>, --concurrency=N  Number of parallel tests (default: number of CPUs)
   -f=PATTERN, --filter=PATTERN  Only run tests matching PATTERN (case-insensitive regex)
   -i=N, --index=N         Only run test at index N
