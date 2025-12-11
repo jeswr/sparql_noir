@@ -145,6 +145,43 @@ function parseNumericValue(value: string): number | null {
   return null;
 }
 
+// Helper function to get RDF term type code for circuit type checking
+// NamedNode → 0, BlankNode → 1, Literal → 2, Variable → 3, DefaultGraph → 4
+function getTermTypeCode(term: Term): number {
+  switch (term.termType) {
+    case 'NamedNode':
+      return 0;
+    case 'BlankNode':
+      return 1;
+    case 'Literal':
+      return 2;
+    case 'Variable':
+      return 3;
+    case 'DefaultGraph':
+      return 4;
+    default:
+      return -1;
+  }
+}
+
+// Helper function to get term type code from JSON representation
+function getTermTypeCodeFromJson(termJson: TermJson): number {
+  switch (termJson.termType) {
+    case 'NamedNode':
+      return 0;
+    case 'BlankNode':
+      return 1;
+    case 'Literal':
+      return 2;
+    case 'Variable':
+      return 3;
+    case 'DefaultGraph':
+      return 4;
+    default:
+      return -1;
+  }
+}
+
 // Helper function to compute hidden input values based on metadata
 function computeHiddenInputs(
   hiddenInputs: HiddenInput[],
@@ -243,6 +280,42 @@ function computeHiddenInputs(
         hiddenValues.push(numValue.toString());
       } else {
         console.warn(`Unknown hidden input type for literal_value: ${input.type}`);
+        return null;
+      }
+    } else if (hidden.type === 'customComputed' && hidden.computedType === 'term_to_field') {
+      // Handle term type checking hidden inputs (isIRI, isBlank, isLiteral)
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      if (!input) {
+        console.warn('Hidden input missing input field for term_to_field');
+        return null;
+      }
+
+      if (input.type === 'variable') {
+        // Get the bound value for this variable
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for hidden term_to_field input`);
+          return null;
+        }
+        // Return the term type code
+        const typeCode = getTermTypeCode(boundTerm);
+        hiddenValues.push(typeCode.toString());
+      } else if (input.type === 'static') {
+        // Static value from metadata
+        const termJson = input.value as TermJson;
+        if (!termJson || !termJson.termType) {
+          console.warn('Static hidden input is missing termType for term_to_field');
+          return null;
+        }
+        const typeCode = getTermTypeCodeFromJson(termJson);
+        hiddenValues.push(typeCode.toString());
+      } else if (input.type === 'input') {
+        // Reference to a BGP input - need to get from binding context
+        console.warn('Input type for term_to_field not yet supported');
+        return null;
+      } else {
+        console.warn(`Unknown hidden input type for term_to_field: ${input.type}`);
         return null;
       }
     } else if (hidden.type === 'variable') {

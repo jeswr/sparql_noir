@@ -166,10 +166,6 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       /\bLANG\s*\(/i,
       /\bSTR\s*\(/i,
       /\bDATATYPE\s*\(/i,
-      /\bIsBLANK\s*\(/i,
-      /\bIsIRI\s*\(/i,
-      /\bIsURI\s*\(/i,
-      /\bIsLITERAL\s*\(/i,
 
       //
       /\bREGEX\s*\(/i,
