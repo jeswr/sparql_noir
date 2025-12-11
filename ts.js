@@ -21,6 +21,9 @@ const noirCacheDir = path.join(__dirname, 'temp', 'noir-cache');
 // Cache directory for signed dataset results
 const signedDataCacheDir = path.join(__dirname, 'temp', 'signed-cache');
 
+// Cache directory for compiled circuits
+const circuitCacheDir = path.join(__dirname, 'temp', 'circuit-cache');
+
 /**
  * Get a cache key for the data content (MD5 hash of content + signing mode)
  */
@@ -53,6 +56,40 @@ function cacheSignedData(dataContent, skipSigning, signedData) {
   const cacheKey = getSignedDataCacheKey(dataContent, skipSigning);
   const cachePath = path.join(signedDataCacheDir, cacheKey);
   fs.writeFileSync(cachePath, JSON.stringify(signedData));
+}
+
+/**
+ * Get a cache key for compiled circuit (hash of sparql.nr + main.nr + Nargo.toml)
+ */
+function getCircuitCacheKey(sparqlNr, mainNr, nargoToml) {
+  const combined = sparqlNr + '\n---\n' + mainNr + '\n---\n' + nargoToml;
+  return crypto.createHash('md5').update(combined).digest('hex') + '.json';
+}
+
+/**
+ * Try to get compiled circuit from cache
+ */
+function getCachedCircuit(sparqlNr, mainNr, nargoToml) {
+  const cacheKey = getCircuitCacheKey(sparqlNr, mainNr, nargoToml);
+  const cachePath = path.join(circuitCacheDir, cacheKey);
+  if (fs.existsSync(cachePath)) {
+    try {
+      return JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Save compiled circuit to cache
+ */
+function cacheCircuit(sparqlNr, mainNr, nargoToml, compiled) {
+  fs.mkdirSync(circuitCacheDir, { recursive: true });
+  const cacheKey = getCircuitCacheKey(sparqlNr, mainNr, nargoToml);
+  const cachePath = path.join(circuitCacheDir, cacheKey);
+  fs.writeFileSync(cachePath, JSON.stringify(compiled));
 }
 
 /**
@@ -124,6 +161,9 @@ const rerunFailed = args.includes('--failed') || args.includes('--rerun-failed')
 const singleBinding = args.includes('--single-binding') || args.includes('-1');
 const maxBindingsArg = args.find(a => a.startsWith('--max-bindings=') || a.startsWith('-b='));
 const maxBindings = singleBinding ? 1 : (maxBindingsArg ? parseInt(maxBindingsArg.split('=')[1], 10) : undefined);
+const transformOnly = args.includes('--transform-only') || args.includes('-t');
+const showTiming = args.includes('--timing') || args.includes('-T');
+const noCacheCircuit = args.includes('--no-cache-circuit');
 
 // Path to store failing test names
 const failedTestsFile = path.join(__dirname, 'temp', 'failed-tests.json');
@@ -143,6 +183,9 @@ Options:
   -F, --failed, --rerun-failed  Only run tests that failed in the previous run
   -1, --single-binding    Only generate witness for one binding per test (faster)
   -b=N, --max-bindings=N  Maximum number of bindings to process per test
+  -t, --transform-only    Only test SPARQL->Noir transform, skip compile/prove (fastest)
+  -T, --timing            Show timing breakdown for each test
+  --no-cache-circuit      Disable circuit compilation caching
   -h, --help              Show this help message
 
 Examples:
@@ -328,6 +371,7 @@ async function runTest(test, testIndex) {
   const testName = test.name || test.uri;
   const writer = new Writer({ format: 'Turtle' });
   const dataContent = writer.quadsToString(test.queryData);
+  const timing = { transform: 0, compile: 0, sign: 0, prove: 0, verify: 0 };
   
   // Skip tests with empty data
   if (!dataContent || dataContent.trim() === '') {
@@ -345,14 +389,22 @@ async function runTest(test, testIndex) {
 
   try {
     // Transform SPARQL to Noir circuit using WASM module
+    let startTime = Date.now();
     const transformResultJson = skipSigning 
       ? wasmTransformWithOptions(test.queryString, true)  // skip_signing = true
       : wasmTransform(test.queryString);
     const transformResult = JSON.parse(transformResultJson);
+    timing.transform = Date.now() - startTime;
     
     // Check for errors
     if (transformResult.error) {
       throw new Error(`Transform error: ${transformResult.error}`);
+    }
+    
+    // In transform-only mode, just check the transform succeeded
+    if (transformOnly) {
+      fs.rmSync(testDir, { recursive: true });
+      return { status: 'passed', name: testName, timing };
     }
     
     // Write the generated circuit files
@@ -370,14 +422,27 @@ async function runTest(test, testIndex) {
     // Link cached noir dependencies to avoid re-downloading for each test
     linkCachedDependencies(circuitDir);
     
-    // Compile the circuit using WASM (suppress noisy console output)
-    const fm = createFileManager(circuitDir);
-    suppressLogs();
-    let compiledArtifacts;
-    try {
-      compiledArtifacts = await compile_program(fm, undefined, () => {}, () => {});
-    } finally {
-      restoreLogs();
+    // Try to get compiled circuit from cache
+    startTime = Date.now();
+    let compiledArtifacts = noCacheCircuit ? null : getCachedCircuit(transformResult.sparql_nr, transformResult.main_nr, nargoToml);
+    
+    if (compiledArtifacts) {
+      // Use cached compilation
+      timing.compile = Date.now() - startTime;
+    } else {
+      // Compile the circuit using WASM (suppress noisy console output)
+      const fm = createFileManager(circuitDir);
+      suppressLogs();
+      try {
+        compiledArtifacts = await compile_program(fm, undefined, () => {}, () => {});
+        // Cache the compilation result
+        if (!noCacheCircuit) {
+          cacheCircuit(transformResult.sparql_nr, transformResult.main_nr, nargoToml, compiledArtifacts.program || compiledArtifacts);
+        }
+      } finally {
+        restoreLogs();
+      }
+      timing.compile = Date.now() - startTime;
     }
     
     // Save the compiled artifacts
@@ -389,6 +454,7 @@ async function runTest(test, testIndex) {
     );
     
     // Sign or process the RDF data based on mode (use cache if available)
+    startTime = Date.now();
     let signedData = getCachedSignedData(dataContent, skipSigning);
     if (!signedData) {
       suppressLogs();
@@ -401,8 +467,10 @@ async function runTest(test, testIndex) {
         restoreLogs();
       }
     }
+    timing.sign = Date.now() - startTime;
     
     // Generate proofs or witness only based on CLI option (suppress verbose output)
+    startTime = Date.now();
     suppressLogs();
     let proveResult;
     try {
@@ -416,9 +484,11 @@ async function runTest(test, testIndex) {
     } finally {
       restoreLogs();
     }
+    timing.prove = Date.now() - startTime;
     
     if (!witnessOnly) {
       // Verify proofs (suppress verbose output)
+      startTime = Date.now();
       suppressLogs();
       let verifyResult;
       try {
@@ -429,6 +499,7 @@ async function runTest(test, testIndex) {
       } finally {
         restoreLogs();
       }
+      timing.verify = Date.now() - startTime;
       
       if (!verifyResult.success) {
         throw new Error('Verification failed');
@@ -438,7 +509,7 @@ async function runTest(test, testIndex) {
     // Clean up test directory on success
     fs.rmSync(testDir, { recursive: true });
     
-    return { status: 'passed', name: testName };
+    return { status: 'passed', name: testName, timing };
   } catch (err) {
     const sparqlNrPath = path.join(circuitSrcDir, 'sparql.nr');
     const sparqlNr = fs.existsSync(sparqlNrPath) 
@@ -454,6 +525,7 @@ async function runTest(test, testIndex) {
       query: test.queryString,
       error: err.message,
       sparqlNr,
+      timing,
     };
   }
 }
@@ -477,7 +549,18 @@ async function runTestsWithConcurrency(tests, maxConcurrency) {
       // Print progress
       const symbol = result.status === 'passed' ? '✓' : result.status === 'skipped' ? '○' : '✗';
       const suffix = result.status === 'skipped' ? ` (skipped: ${result.reason})` : '';
-      console.log(`  ${symbol} ${result.name}${suffix}`);
+      let timingStr = '';
+      if (showTiming && result.timing) {
+        const t = result.timing;
+        const parts = [];
+        if (t.transform) parts.push(`T:${t.transform}ms`);
+        if (t.compile) parts.push(`C:${t.compile}ms`);
+        if (t.sign) parts.push(`S:${t.sign}ms`);
+        if (t.prove) parts.push(`P:${t.prove}ms`);
+        if (t.verify) parts.push(`V:${t.verify}ms`);
+        if (parts.length) timingStr = ` [${parts.join(' ')}]`;
+      }
+      console.log(`  ${symbol} ${result.name}${suffix}${timingStr}`);
     }
   }
   
