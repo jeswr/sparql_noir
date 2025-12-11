@@ -17,6 +17,10 @@ pub fn hash_string<let N: u32>(input: [u8; N]) -> [u8; {{stringHashOutputSize}}]
   {{stringHash}}(input)
 }
 
+pub fn encode_string<let N: u32>(string: str<N>) -> Field {
+  Field::from_le_bytes(hash_string(string.as_bytes()))
+}
+
 // Recursion
 pub global HONK_VK_SIZE: u32 = 112;
 pub global HONK_PROOF_SIZE: u32 = 456;

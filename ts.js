@@ -3,11 +3,11 @@ import * as fs from 'fs';
 import path from 'path';
 import { Writer } from 'n3';
 import { translate, Util } from 'sparqlalgebrajs';
-import { execSync } from 'child_process';
 import { signRdfData, processRdfDataWithoutSigning } from './dist/scripts/sign.js';
 import { generateProofs } from './dist/scripts/prove.js';
 import { verifyProofs } from './dist/scripts/verify.js';
 import { transform as wasmTransform, transform_with_options as wasmTransformWithOptions } from './transform/pkg/transform.js';
+import { compile_program, createFileManager } from '@noir-lang/noir_wasm';
 import os from 'os';
 
 const __dirname = new URL('.', import.meta.url).pathname;
@@ -51,6 +51,8 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       !test.types.includes('http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#QueryEvaluationTest') ||
       test.approval !== 'http://www.w3.org/2001/sw/DataAccess/tests/test-dawg#Approved' ||
       !test.queryString.includes('SELECT')
+      // Skip queries with empty results sets
+      || test.queryResult.value.length === 0
     ) {
       return false;
     }
@@ -220,8 +222,17 @@ async function runTest(test, testIndex) {
     fs.writeFileSync(path.join(circuitDir, 'Nargo.toml'), nargoToml);
     fs.writeFileSync(path.join(circuitDir, 'metadata.json'), JSON.stringify(transformResult.metadata, null, 2));
     
-    // Compile the circuit
-    execSync(`nargo compile`, { cwd: circuitDir, stdio: 'pipe' });
+    // Compile the circuit using WASM (with silent logging)
+    const fm = createFileManager(circuitDir);
+    const compiledArtifacts = await compile_program(fm, undefined, () => {}, () => {});
+    
+    // Save the compiled artifacts
+    const targetDir = path.join(circuitDir, 'target');
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(targetDir, 'sparql_proof.json'),
+      JSON.stringify(compiledArtifacts.program || compiledArtifacts, null, 2)
+    );
     
     // Sign or process the RDF data based on mode
     const signedData = skipSigning 

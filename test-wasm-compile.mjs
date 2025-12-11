@@ -4,12 +4,6 @@
  * 
  * This script demonstrates how to use the WASM-based Noir compiler
  * directly from Node.js, eliminating the need for child_process calls.
- * 
- * KEY FINDINGS:
- * 1. @noir-lang/noir_wasm provides compile_program() and createFileManager()
- * 2. It automatically resolves Git dependencies via GithubCodeArchiveDependencyResolver
- * 3. The FileManager needs to be rooted at the project directory containing Nargo.toml
- * 4. This eliminates the need for `nargo compile` child process calls
  */
 
 import { compile_program, createFileManager } from '@noir-lang/noir_wasm';
@@ -18,39 +12,18 @@ import * as path from 'path';
 
 const __dirname = new URL('.', import.meta.url).pathname;
 
-/**
- * Compile a Noir circuit using the WASM compiler.
- * This is equivalent to running `nargo compile` but without spawning a child process.
- * 
- * @param {string} circuitDir - Path to the Noir project directory (containing Nargo.toml)
- * @returns {Promise<object>} - The compiled program artifacts
- */
-export async function compileCircuitWasm(circuitDir, workspaceRoot = null) {
+async function compileCircuit(circuitDir) {
   console.log(`Compiling circuit at: ${circuitDir}`);
   
-  // The FileManager needs to be rooted at a directory that can access all dependencies
-  // Since we have relative path dependencies like "../noir/lib/consts", we need to
-  // create the FileManager at the workspace root (parent of noir_prove), not at the circuit dir
-  const absoluteCircuitDir = path.resolve(circuitDir);
-  
-  // If no workspace root provided, assume we need to go up one level to access ../noir/lib/consts
-  const root = workspaceRoot ? path.resolve(workspaceRoot) : path.dirname(absoluteCircuitDir);
-  const fm = createFileManager(root);
+  // Create a file manager for the circuit directory
+  const fm = createFileManager(circuitDir);
   
   try {
-    console.log(`Workspace root: ${root}`);
-    console.log(`Circuit directory: ${absoluteCircuitDir}`);
     console.log('Starting compilation...');
     const startTime = Date.now();
     
     // Compile the program using WASM
-    // This replaces: execSync('cd noir_prove && nargo compile')
-    const compiledArtifacts = await compile_program(
-      fm,
-      absoluteCircuitDir,  // Must be an absolute path to the project with Nargo.toml
-      (msg) => console.log(msg),  // logFn
-      (msg) => {}                 // debugLogFn (silent)
-    );
+    const compiledArtifacts = await compile_program(fm);
     
     const endTime = Date.now();
     console.log(`Compilation completed in ${endTime - startTime}ms`);
@@ -80,16 +53,14 @@ export async function compileCircuitWasm(circuitDir, workspaceRoot = null) {
   }
 }
 
-// Run the test if executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const circuitDir = path.join(__dirname, 'noir_prove');
-  compileCircuitWasm(circuitDir)
-    .then(() => {
-      console.log('\n✅ Successfully compiled circuit using noir_wasm!');
-      console.log('This proves we can eliminate the `nargo compile` child process call.');
-    })
-    .catch((err) => {
-      console.error('\n❌ Failed:', err);
-      process.exit(1);
-    });
-}
+// Run the test
+const circuitDir = path.join(__dirname, 'noir_prove');
+compileCircuit(circuitDir)
+  .then(() => {
+    console.log('\n✅ Successfully compiled circuit using noir_wasm!');
+    console.log('This proves we can eliminate the `nargo compile` child process call.');
+  })
+  .catch((err) => {
+    console.error('\n❌ Failed:', err);
+    process.exit(1);
+  });
