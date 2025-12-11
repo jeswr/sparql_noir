@@ -75,6 +75,18 @@ const concurrency = concurrencyArg
   ? parseInt(concurrencyArg.split('=')[1] || concurrencyArg.slice(2), 10) 
   : os.cpus().length;
 
+// Test filtering options
+const filterArg = args.find(a => a.startsWith('--filter=') || a.startsWith('-f='));
+const testFilter = filterArg ? filterArg.split('=')[1] : null;
+const indexArg = args.find(a => a.startsWith('--index=') || a.startsWith('-i='));
+const testIndex = indexArg ? parseInt(indexArg.split('=')[1], 10) : null;
+const rangeArg = args.find(a => a.startsWith('--range=') || a.startsWith('-r='));
+const testRange = rangeArg ? rangeArg.split('=')[1].split('-').map(n => parseInt(n, 10)) : null;
+const rerunFailed = args.includes('--failed') || args.includes('--rerun-failed') || args.includes('-F');
+
+// Path to store failing test names
+const failedTestsFile = path.join(__dirname, 'temp', 'failed-tests.json');
+
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`
 Usage: node ts.js [options]
@@ -84,7 +96,18 @@ Options:
   -s, --skip-signing      Skip signature verification (use simplified circuit, much faster)
   -q, --quiet             Suppress verbose logging (only show test results)
   -j<N>, --concurrency=N  Number of parallel tests (default: number of CPUs)
+  -f=PATTERN, --filter=PATTERN  Only run tests matching PATTERN (case-insensitive regex)
+  -i=N, --index=N         Only run test at index N
+  -r=START-END, --range=START-END  Only run tests from index START to END (inclusive)
+  -F, --failed, --rerun-failed  Only run tests that failed in the previous run
   -h, --help              Show this help message
+
+Examples:
+  node ts.js -f="isBlank"           Run only tests with "isBlank" in the name
+  node ts.js -i=5                   Run only test at index 5
+  node ts.js -r=10-20               Run tests from index 10 to 20
+  node ts.js -s -w -f="equality"    Run equality tests with skip-signing and witness-only
+  node ts.js -s -w --failed         Re-run only tests that failed last time
 
 By default, full proof generation and verification is performed.
 
@@ -420,11 +443,64 @@ async function runTestsWithConcurrency(tests, maxConcurrency) {
   return testResults;
 }
 
+// Apply test filters
+let testsToRun = evaluationTests;
+let filterDescription = '';
+
+if (rerunFailed) {
+  if (fs.existsSync(failedTestsFile)) {
+    const failedTestNames = JSON.parse(fs.readFileSync(failedTestsFile, 'utf-8'));
+    if (failedTestNames.length > 0) {
+      testsToRun = testsToRun.filter(t => failedTestNames.includes(t.name || t.uri));
+      filterDescription = ` (re-running ${failedTestNames.length} previously failed)`;
+    } else {
+      console.log('No previously failed tests to re-run.');
+      process.exit(0);
+    }
+  } else {
+    console.log('No previous test run found. Run tests first without --failed.');
+    process.exit(0);
+  }
+}
+
+if (testFilter) {
+  const regex = new RegExp(testFilter, 'i');
+  testsToRun = testsToRun.filter(t => regex.test(t.name || t.uri));
+  filterDescription = ` (filtered by pattern: "${testFilter}")`;
+}
+
+if (testIndex !== null) {
+  if (testIndex >= 0 && testIndex < testsToRun.length) {
+    testsToRun = [testsToRun[testIndex]];
+    filterDescription = ` (index: ${testIndex})`;
+  } else {
+    console.error(`Error: Test index ${testIndex} is out of range (0-${testsToRun.length - 1})`);
+    process.exit(1);
+  }
+}
+
+if (testRange) {
+  const [start, end] = testRange;
+  if (start >= 0 && end < testsToRun.length && start <= end) {
+    testsToRun = testsToRun.slice(start, end + 1);
+    filterDescription = ` (range: ${start}-${end})`;
+  } else {
+    console.error(`Error: Test range ${start}-${end} is invalid (valid: 0-${testsToRun.length - 1})`);
+    process.exit(1);
+  }
+}
+
+if (testsToRun.length === 0) {
+  console.log('No tests match the filter criteria.');
+  process.exit(0);
+}
+
 // Run all tests in parallel
-console.log(`Running ${evaluationTests.length} tests...\n`);
-const testResults = await runTestsWithConcurrency(evaluationTests, concurrency);
+console.log(`Running ${testsToRun.length} of ${evaluationTests.length} tests${filterDescription}...\n`);
+const testResults = await runTestsWithConcurrency(testsToRun, concurrency);
 
 // Aggregate results
+const failedTestNames = [];
 for (const result of testResults) {
   if (result.status === 'passed') {
     results.passed++;
@@ -433,8 +509,13 @@ for (const result of testResults) {
   } else {
     results.failed++;
     results.failures.push(result);
+    failedTestNames.push(result.name);
   }
 }
+
+// Save failed test names for --failed option
+fs.mkdirSync(path.dirname(failedTestsFile), { recursive: true });
+fs.writeFileSync(failedTestsFile, JSON.stringify(failedTestNames, null, 2));
 
 // Print summary
 console.log('\n' + '─'.repeat(60));
@@ -442,7 +523,7 @@ console.log('\nTest Results:');
 console.log(`  ${results.passed} passed`);
 console.log(`  ${results.failed} failed`);
 console.log(`  ${results.skipped} skipped`);
-console.log(`  ${evaluationTests.length} total\n`);
+console.log(`  ${testsToRun.length} run (${evaluationTests.length} total available)\n`);
 
 // Print failure details
 if (results.failures.length > 0) {
