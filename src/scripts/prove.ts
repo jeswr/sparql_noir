@@ -29,6 +29,8 @@ export interface ProveOptions {
   witnessOnly?: boolean | undefined;
   /** If true, skip signature verification (use simplified circuit) */
   skipSigning?: boolean | undefined;
+  /** Maximum number of bindings to process (undefined = all bindings) */
+  maxBindings?: number | undefined;
 }
 
 export interface ProofOutput {
@@ -693,12 +695,20 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     throw new Error('No valid binding inputs could be prepared.');
   }
 
-  console.log(`\nGenerating witnesses for ${bindingInputs.length} binding(s) in parallel...`);
+  // Apply maxBindings limit if specified
+  const maxBindings = options.maxBindings;
+  let bindingsToProcess = bindingInputs;
+  if (maxBindings !== undefined && maxBindings > 0 && bindingInputs.length > maxBindings) {
+    bindingsToProcess = bindingInputs.slice(0, maxBindings);
+    console.log(`Limiting to ${maxBindings} binding(s) (${bindingInputs.length} available)`);
+  }
+
+  console.log(`\nGenerating witnesses for ${bindingsToProcess.length} binding(s) in parallel...`);
 
   // Generate all witnesses in parallel
   const witnessStartTime = Date.now();
   const witnessResults = await Promise.allSettled(
-    bindingInputs.map(async ({ bindingIdx, circuitInput }) => {
+    bindingsToProcess.map(async ({ bindingIdx, circuitInput }) => {
       const startTime = Date.now();
       // @ts-expect-error - circuit input types are complex and vary by circuit
       const { witness } = await noir.execute(circuitInput);
@@ -730,7 +740,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     }
   }
 
-  console.log(`  Successfully generated ${successfulWitnesses.length}/${bindingInputs.length} witnesses`);
+  console.log(`  Successfully generated ${successfulWitnesses.length}/${bindingsToProcess.length} witnesses`);
 
   if (successfulWitnesses.length === 0) {
     throw new Error('No witnesses could be generated.');
