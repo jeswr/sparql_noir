@@ -200,6 +200,48 @@ fn serialize_term(term: &Term, query: &QueryInfo, bindings: &BTreeMap<String, Te
     }
 }
 
+/// Compute the special literal encoding for the second field of hash4.
+/// This must match the TypeScript specialLiteralHandling function in encode.ts.
+fn special_literal_handling(value: &str, datatype: &str) -> String {
+    const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+    const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
+    
+    if datatype == XSD_BOOLEAN {
+        // Boolean: true/1 → "1", false/0 → "0"
+        let lower = value.to_lowercase();
+        if lower == "true" || value == "1" {
+            return "1".to_string();
+        }
+        if lower == "false" || value == "0" {
+            return "0".to_string();
+        }
+        // Fallback: encode as string
+        return encode_string_expr(value);
+    }
+    
+    if datatype == XSD_INTEGER {
+        // Integer: parse and return numeric value as string
+        // Strip leading '+' as Noir doesn't support that syntax
+        let normalized = value.trim_start_matches('+');
+        if let Ok(num) = normalized.parse::<i64>() {
+            return num.to_string();
+        }
+        // Fallback: encode as string if parse fails
+        return encode_string_expr(value);
+    }
+    
+    if datatype == XSD_DATETIME {
+        // DateTime: would need to convert to epoch milliseconds
+        // For now, use string encoding (same as TypeScript fallback)
+        // TODO: implement proper datetime parsing
+        return encode_string_expr(value);
+    }
+    
+    // Default: encode as string
+    encode_string_expr(value)
+}
+
 fn serialize_ground_term(gt: &GroundTerm) -> String {
     match gt {
         GroundTerm::NamedNode(nn) => {
@@ -209,9 +251,11 @@ fn serialize_ground_term(gt: &GroundTerm) -> String {
             let value = l.value();
             let datatype = l.datatype().as_str();
             let lang = l.language().unwrap_or("");
+            let special_encoding = special_literal_handling(value, datatype);
             format!(
-                "consts::hash2([2, consts::hash4([{}, 0, {}, {}])])",
+                "consts::hash2([2, consts::hash4([{}, {}, {}, {}])])",
                 encode_string_expr(value),
+                special_encoding,
                 encode_string_expr(lang),
                 encode_string_expr(datatype)
             )

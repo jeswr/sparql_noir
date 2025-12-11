@@ -14,9 +14,47 @@ import { Command } from 'commander';
 import { Noir, type CompiledCircuit } from '@noir-lang/noir_js';
 import { UltraHonkBackend } from '@aztec/bb.js';
 import { Store, DataFactory as DF } from 'n3';
-import { stringQuadToQuad, termToString } from 'rdf-string-ttl';
+import { stringQuadToQuad as rdfStringToQuad, termToString } from 'rdf-string-ttl';
 import type { Term, Quad, Literal } from '@rdfjs/types';
 import type { SignedData } from './sign.js';
+
+// --- Custom stringQuadToQuad that properly handles escape sequences ---
+
+/**
+ * Unescape a string value from N-Quads format.
+ * Handles \n, \r, \t, \\, etc.
+ */
+function unescapeNQuadsString(s: string): string {
+  return s
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\"/g, '"');
+}
+
+/**
+ * Parse a string quad object from rdf-string-ttl format, with proper escape handling.
+ */
+function stringQuadToQuad(sq: { subject: string; predicate: string; object: string; graph: string }): Quad {
+  // First parse with the standard function
+  const quad = rdfStringToQuad(sq);
+  
+  // Then fix the object value if it's a literal (might have escape sequences)
+  if (quad.object.termType === 'Literal') {
+    const lit = quad.object as Literal;
+    const unescapedValue = unescapeNQuadsString(lit.value);
+    if (unescapedValue !== lit.value) {
+      // Create a new quad with the unescaped literal
+      const newLit = lit.language
+        ? DF.literal(unescapedValue, lit.language)
+        : DF.literal(unescapedValue, lit.datatype);
+      return DF.quad(quad.subject, quad.predicate, newLit, quad.graph) as Quad;
+    }
+  }
+  
+  return quad;
+}
 
 // --- Exported Types ---
 
@@ -500,6 +538,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
   }
 
   console.log(`Query has ${inputPatterns.length} BGP pattern(s)`);
+  console.log(`Metadata patterns raw: input_patterns=${metadata?.input_patterns?.length || 0}, inputPatterns=${metadata?.inputPatterns?.length || 0}`);
 
   // Simple binding resolution: find quads that match patterns
   const bindings: Map<string, Term>[] = [];
@@ -522,25 +561,117 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
   );
 
   console.log(`Found ${matchingQuads.length} matching quad(s) for first pattern`);
+  console.log(`First pattern: s=${firstPattern.subject.termType}, p=${firstPattern.predicate.termType}, o=${firstPattern.object.termType}`);
+  if (firstPattern.object.termType === 'Literal') {
+    console.log(`  Object value: ${JSON.stringify((firstPattern.object as Literal).value)}`);
+    console.log(`  Object datatype: ${(firstPattern.object as Literal).datatype?.value}`);
+  }
+  if (patternQuads.length > 1) {
+    const secondPattern = patternQuads[1];
+    console.log(`Second pattern: s=${secondPattern?.subject.termType}, p=${secondPattern?.predicate.termType}, o=${secondPattern?.object.termType}`);
+  }
 
-  // For each matching quad, build a binding
-  for (const quad of matchingQuads) {
+  // Helper function to extract binding from a quad given a pattern
+  function extractBinding(quad: Quad, pattern: typeof firstPattern): Map<string, Term> {
     const binding = new Map<string, Term>();
-    
-    // Extract bindings from first pattern
-    if (firstPattern.subject.termType === 'Variable') {
-      binding.set(firstPattern.subject.value, quad.subject);
+    if (pattern.subject.termType === 'Variable') {
+      binding.set(pattern.subject.value, quad.subject);
     }
-    if (firstPattern.predicate.termType === 'Variable') {
-      binding.set(firstPattern.predicate.value, quad.predicate);
+    if (pattern.predicate.termType === 'Variable') {
+      binding.set(pattern.predicate.value, quad.predicate);
     }
-    if (firstPattern.object.termType === 'Variable') {
-      binding.set(firstPattern.object.value, quad.object);
+    if (pattern.object.termType === 'Variable') {
+      binding.set(pattern.object.value, quad.object);
     }
-    if (firstPattern.graph.termType === 'Variable') {
-      binding.set(firstPattern.graph.value, quad.graph);
+    if (pattern.graph.termType === 'Variable') {
+      binding.set(pattern.graph.value, quad.graph);
     }
-    
+    return binding;
+  }
+
+  // Helper function to check if two bindings are compatible (no conflicting values for same variable)
+  function bindingsCompatible(b1: Map<string, Term>, b2: Map<string, Term>): boolean {
+    for (const [varName, term1] of b1) {
+      const term2 = b2.get(varName);
+      if (term2 && !equalTermIgnoreBlankLabel(term1, term2)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Helper function to merge two bindings
+  function mergeBindings(b1: Map<string, Term>, b2: Map<string, Term>): Map<string, Term> {
+    const merged = new Map(b1);
+    for (const [varName, term] of b2) {
+      if (!merged.has(varName)) {
+        merged.set(varName, term);
+      }
+    }
+    return merged;
+  }
+
+  // Track bindings along with their corresponding quads for each pattern
+  interface BindingWithQuads {
+    binding: Map<string, Term>;
+    quads: Quad[];
+  }
+
+  let bindingsWithQuads: BindingWithQuads[];
+
+  // For single-pattern queries, just use the matching quads directly
+  if (patternQuads.length === 1) {
+    bindingsWithQuads = matchingQuads.map(quad => ({
+      binding: extractBinding(quad, firstPattern),
+      quads: [quad]
+    }));
+  } else {
+    // Multi-pattern queries: compute full join of all patterns
+    // Start with bindings from first pattern
+    let currentBindings: BindingWithQuads[] = 
+      matchingQuads.map(q => ({ binding: extractBinding(q, firstPattern), quads: [q] }));
+
+    // Join with each subsequent pattern
+    for (let patternIdx = 1; patternIdx < patternQuads.length; patternIdx++) {
+      const pattern = patternQuads[patternIdx]!;
+      const newBindings: BindingWithQuads[] = [];
+
+      for (const { binding, quads } of currentBindings) {
+        // Find matching quads for this pattern, substituting bound variables
+        const subjectMatch = pattern.subject.termType === 'Variable' 
+          ? binding.get(pattern.subject.value) || null 
+          : pattern.subject;
+        const predicateMatch = pattern.predicate.termType === 'Variable'
+          ? binding.get(pattern.predicate.value) || null
+          : pattern.predicate;
+        const objectMatch = pattern.object.termType === 'Variable'
+          ? binding.get(pattern.object.value) || null
+          : pattern.object;
+        const graphMatch = pattern.graph.termType === 'Variable'
+          ? binding.get(pattern.graph.value) || null
+          : (pattern.graph.termType === 'DefaultGraph' ? null : pattern.graph);
+
+        const matchingForPattern = store.getQuads(subjectMatch, predicateMatch, objectMatch, graphMatch);
+
+        // For each matching quad, create a new combined binding
+        for (const matchedQuad of matchingForPattern) {
+          const newBinding = extractBinding(matchedQuad, pattern);
+          if (bindingsCompatible(binding, newBinding)) {
+            const merged = mergeBindings(binding, newBinding);
+            newBindings.push({ binding: merged, quads: [...quads, matchedQuad] });
+          }
+        }
+      }
+
+      currentBindings = newBindings;
+    }
+
+    bindingsWithQuads = currentBindings;
+    console.log(`After join: ${bindingsWithQuads.length} bindings from ${matchingQuads.length} first pattern matches`);
+  }
+
+  // Extract just the bindings for the main loop
+  for (const { binding } of bindingsWithQuads) {
     bindings.push(binding);
   }
 
@@ -567,68 +698,28 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
 
   for (let bindingIdx = 0; bindingIdx < bindings.length; bindingIdx++) {
     const binding = bindings[bindingIdx]!;
+    const { quads } = bindingsWithQuads[bindingIdx]!;
     
-    // Find triple indices for each pattern
+    // Find triple indices for each pattern using the pre-computed quads
     const tripleIndices: number[] = [];
     
-    // For the first pattern, find matching triple
-    const firstPatternQuad = matchingQuads[bindingIdx];
-    if (!firstPatternQuad) {
-      continue;
-    }
-    const idx = findTripleIndex(firstPatternQuad);
-    if (idx < 0) {
-      continue;
-    }
-    tripleIndices.push(idx);
-
-    // For subsequent patterns, find matching triples using the bindings from previous patterns
-    for (let patternIdx = 1; patternIdx < inputPatterns.length; patternIdx++) {
-      const pattern = patternQuads[patternIdx]!;
-      
-      // Substitute bound variables into the pattern for matching
-      const subjectMatch = pattern.subject.termType === 'Variable' 
-        ? binding.get(pattern.subject.value) || null 
-        : pattern.subject;
-      const predicateMatch = pattern.predicate.termType === 'Variable'
-        ? binding.get(pattern.predicate.value) || null
-        : pattern.predicate;
-      const objectMatch = pattern.object.termType === 'Variable'
-        ? binding.get(pattern.object.value) || null
-        : pattern.object;
-      const graphMatch = pattern.graph.termType === 'Variable'
-        ? binding.get(pattern.graph.value) || null
-        : (pattern.graph.termType === 'DefaultGraph' ? null : pattern.graph);
-
-      const matchingForPattern = store.getQuads(subjectMatch, predicateMatch, objectMatch, graphMatch);
-      
-      if (matchingForPattern.length > 0) {
-        const matchedQuad = matchingForPattern[0]!;
-        const matchedIdx = findTripleIndex(matchedQuad);
-        if (matchedIdx >= 0) {
-          tripleIndices.push(matchedIdx);
-          
-          // Update binding with newly bound variables from this pattern
-          if (pattern.subject.termType === 'Variable' && !binding.has(pattern.subject.value)) {
-            binding.set(pattern.subject.value, matchedQuad.subject);
-          }
-          if (pattern.predicate.termType === 'Variable' && !binding.has(pattern.predicate.value)) {
-            binding.set(pattern.predicate.value, matchedQuad.predicate);
-          }
-          if (pattern.object.termType === 'Variable' && !binding.has(pattern.object.value)) {
-            binding.set(pattern.object.value, matchedQuad.object);
-          }
-          if (pattern.graph.termType === 'Variable' && !binding.has(pattern.graph.value)) {
-            binding.set(pattern.graph.value, matchedQuad.graph);
-          }
-        } else {
-          // Fallback: use first pattern's triple
-          tripleIndices.push(tripleIndices[0]!);
-        }
-      } else {
-        // No match found, use first pattern's triple as fallback
-        tripleIndices.push(tripleIndices[0]!);
+    for (let patternIdx = 0; patternIdx < inputPatterns.length; patternIdx++) {
+      const quad = quads[patternIdx];
+      if (!quad) {
+        // Should not happen if binding resolution is correct
+        continue;
       }
+      const idx = findTripleIndex(quad);
+      if (idx < 0) {
+        // Skip this binding if we can't find the triple
+        break;
+      }
+      tripleIndices.push(idx);
+    }
+    
+    // Skip if we couldn't find all pattern triples
+    if (tripleIndices.length !== inputPatterns.length) {
+      continue;
     }
 
     // Build variables object for circuit - search all patterns for variable values
