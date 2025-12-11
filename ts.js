@@ -229,7 +229,7 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
     if (
       !test.types.includes('http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#QueryEvaluationTest') ||
       test.approval !== 'http://www.w3.org/2001/sw/DataAccess/tests/test-dawg#Approved' ||
-      !test.queryString.includes('SELECT')
+      (!test.queryString.includes('SELECT') && !test.queryString.includes('ASK'))
       // Skip queries with empty results sets
       || test.queryResult.value.length === 0
     ) {
@@ -331,11 +331,11 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
     const unsupported = [
       'group',
       'minus',
-      'ask',
+      // 'ask',  // ASK queries are supported by transform
       'construct',
       'orderby',  // lowercase - this is what sparqlalgebrajs uses
       'distinct',
-      'leftjoin', // OPTIONAL - not fully implemented (lowercase per sparqlalgebrajs)
+      // 'leftjoin', // OPTIONAL - now implemented as UNION of (left) and (left+right)
       'graph',    // GRAPH - incomplete support with UNION
 
       // Want to include

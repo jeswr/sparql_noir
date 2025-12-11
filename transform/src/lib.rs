@@ -1065,12 +1065,57 @@ fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
             Ok(info)
         }
 
-        GraphPattern::LeftJoin { left, expression, .. } => {
-            let mut info = process_graph_pattern(left)?;
+        GraphPattern::LeftJoin { left, right, expression } => {
+            // Process both left (required) and right (optional) sides
+            let left_info = process_graph_pattern(left)?;
+            let right_info = process_graph_pattern(right)?;
+            
+            // For now, treat OPTIONAL as UNION of (left alone) and (left + right)
+            // This is a simplification but allows basic OPTIONAL queries to work
+            
+            // Branch 1: Just the left side (when optional doesn't match)
+            let branch1 = left_info.clone();
+            
+            // Branch 2: Left + right together (when optional matches)
+            let mut branch2 = PatternInfo {
+                patterns: Vec::new(),
+                bindings: Vec::new(),
+                assertions: Vec::new(),
+                filters: Vec::new(),
+                union_branches: None,
+            };
+            
+            // Merge patterns from both sides
+            branch2.patterns.extend(left_info.patterns.clone());
+            branch2.patterns.extend(right_info.patterns);
+            
+            // Merge bindings and assertions
+            branch2.bindings.extend(left_info.bindings.clone());
+            branch2.bindings.extend(right_info.bindings);
+            branch2.assertions.extend(left_info.assertions.clone());
+            branch2.assertions.extend(right_info.assertions);
+            
+            // Add filter expression if present
             if let Some(expr) = expression {
-                info.filters.push(expr.clone());
+                branch2.filters.push(expr.clone());
             }
-            Ok(info)
+            branch2.filters.extend(left_info.filters.clone());
+            branch2.filters.extend(right_info.filters);
+            
+            // Return as a UNION of the two branches
+            let patterns = if branch1.patterns.len() >= branch2.patterns.len() {
+                branch1.patterns.clone()
+            } else {
+                branch2.patterns.clone()
+            };
+            
+            Ok(PatternInfo {
+                patterns,
+                bindings: Vec::new(),
+                assertions: Vec::new(),
+                filters: Vec::new(),
+                union_branches: Some(vec![branch1, branch2]),
+            })
         }
 
         GraphPattern::Union { left, right } => {
@@ -1151,12 +1196,24 @@ fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
 }
 
 fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
-    if let GraphPattern::Project { inner, variables } = gp {
-        let vars: Vec<String> = variables.iter().map(|v| v.as_str().to_string()).collect();
-        let pattern = process_graph_pattern(inner)?;
-        Ok(QueryInfo { variables: vars, pattern })
-    } else {
-        Err(format!("Expected PROJECT, got: {:?}", gp))
+    match gp {
+        GraphPattern::Project { inner, variables } => {
+            let vars: Vec<String> = variables.iter().map(|v| v.as_str().to_string()).collect();
+            let pattern = process_graph_pattern(inner)?;
+            Ok(QueryInfo { variables: vars, pattern })
+        }
+        // ASK queries don't have PROJECT - they just check if a pattern matches
+        // For ASK, we treat it as projecting all variables in the pattern
+        _ => {
+            let pattern = process_graph_pattern(gp)?;
+            // Collect all variables from bindings
+            let mut vars: Vec<String> = pattern.bindings.iter()
+                .map(|b| b.variable.clone())
+                .collect();
+            vars.sort();
+            vars.dedup();
+            Ok(QueryInfo { variables: vars, pattern })
+        }
     }
 }
 
