@@ -1,6 +1,7 @@
 import { ManifestLoader } from 'rdf-test-suite';
 import * as fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { Writer } from 'n3';
 import { translate, Util } from 'sparqlalgebrajs';
 import { signRdfData, processRdfDataWithoutSigning } from './dist/scripts/sign.js';
@@ -16,6 +17,43 @@ console.log('Using WASM transform module');
 
 // Shared cache directory for noir dependencies (archives and libs)
 const noirCacheDir = path.join(__dirname, 'temp', 'noir-cache');
+
+// Cache directory for signed dataset results
+const signedDataCacheDir = path.join(__dirname, 'temp', 'signed-cache');
+
+/**
+ * Get a cache key for the data content (MD5 hash of content + signing mode)
+ */
+function getSignedDataCacheKey(dataContent, skipSigning) {
+  const hash = crypto.createHash('md5').update(dataContent).digest('hex');
+  return `${hash}-${skipSigning ? 'nosig' : 'sig'}.json`;
+}
+
+/**
+ * Try to get signed data from cache
+ */
+function getCachedSignedData(dataContent, skipSigning) {
+  const cacheKey = getSignedDataCacheKey(dataContent, skipSigning);
+  const cachePath = path.join(signedDataCacheDir, cacheKey);
+  if (fs.existsSync(cachePath)) {
+    try {
+      return JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Save signed data to cache
+ */
+function cacheSignedData(dataContent, skipSigning, signedData) {
+  fs.mkdirSync(signedDataCacheDir, { recursive: true });
+  const cacheKey = getSignedDataCacheKey(dataContent, skipSigning);
+  const cachePath = path.join(signedDataCacheDir, cacheKey);
+  fs.writeFileSync(cachePath, JSON.stringify(signedData));
+}
 
 /**
  * Initialize the shared noir dependency cache by copying from noir_prove
@@ -350,15 +388,18 @@ async function runTest(test, testIndex) {
       JSON.stringify(compiledArtifacts.program || compiledArtifacts, null, 2)
     );
     
-    // Sign or process the RDF data based on mode (suppress verbose output)
-    suppressLogs();
-    let signedData;
-    try {
-      signedData = skipSigning 
-        ? await processRdfDataWithoutSigning(inputDataPath)
-        : await signRdfData(inputDataPath);
-    } finally {
-      restoreLogs();
+    // Sign or process the RDF data based on mode (use cache if available)
+    let signedData = getCachedSignedData(dataContent, skipSigning);
+    if (!signedData) {
+      suppressLogs();
+      try {
+        signedData = skipSigning 
+          ? await processRdfDataWithoutSigning(inputDataPath)
+          : await signRdfData(inputDataPath);
+        cacheSignedData(dataContent, skipSigning, signedData);
+      } finally {
+        restoreLogs();
+      }
     }
     
     // Generate proofs or witness only based on CLI option (suppress verbose output)
