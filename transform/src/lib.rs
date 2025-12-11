@@ -1191,12 +1191,47 @@ fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
             Ok(info)
         }
 
+        // Post-processing modifiers - we accept them but don't enforce in circuit
+        // These should be handled by the verifier/prover outside the ZK circuit
+        GraphPattern::Distinct { inner } => {
+            // DISTINCT: uniqueness can be verified by the verifier
+            process_graph_pattern(inner)
+        }
+
+        GraphPattern::Reduced { inner } => {
+            // REDUCED: similar to DISTINCT but allows duplicates
+            process_graph_pattern(inner)
+        }
+
+        GraphPattern::OrderBy { inner, .. } => {
+            // ORDER BY: sorting can be done after proof verification
+            process_graph_pattern(inner)
+        }
+
+        GraphPattern::Slice { inner, .. } => {
+            // LIMIT/OFFSET: can be applied to verified results
+            process_graph_pattern(inner)
+        }
+
         _ => Err(format!("Unsupported graph pattern: {:?}", gp)),
     }
 }
 
 fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
-    match gp {
+    // Unwrap post-processing modifiers (DISTINCT, ORDER BY, LIMIT/OFFSET)
+    // These are accepted but not enforced in the circuit
+    let mut inner = gp;
+    loop {
+        inner = match inner {
+            GraphPattern::Distinct { inner: i } => i,
+            GraphPattern::Reduced { inner: i } => i,
+            GraphPattern::OrderBy { inner: i, .. } => i,
+            GraphPattern::Slice { inner: i, .. } => i,
+            _ => break,
+        };
+    }
+    
+    match inner {
         GraphPattern::Project { inner, variables } => {
             let vars: Vec<String> = variables.iter().map(|v| v.as_str().to_string()).collect();
             let pattern = process_graph_pattern(inner)?;
@@ -1205,7 +1240,7 @@ fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
         // ASK queries don't have PROJECT - they just check if a pattern matches
         // For ASK, we treat it as projecting all variables in the pattern
         _ => {
-            let pattern = process_graph_pattern(gp)?;
+            let pattern = process_graph_pattern(inner)?;
             // Collect all variables from bindings
             let mut vars: Vec<String> = pattern.bindings.iter()
                 .map(|b| b.variable.clone())
