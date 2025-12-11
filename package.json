@@ -52,8 +52,8 @@
   "dependencies": {
     "@aztec/bb.js": "^1.2.1",
     "@aztec/foundation": "^2.1.7",
-    "@noir-lang/noir_js": "^1.0.0-beta.11",
-    "@noir-lang/noir_wasm": "^1.0.0-beta.16",
+    "@noir-lang/noir_js": "^1.0.0-beta.16",
+    "@noir-lang/noir_wasm": "file:../../noir/noir/compiler/wasm",
     "@noir-lang/noirc_abi": "^1.0.0-beta.15",
     "@zk-kit/baby-jubjub": "^1.0.3",
     "@zk-kit/eddsa-poseidon": "^1.1.0",
