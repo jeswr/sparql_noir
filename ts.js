@@ -335,7 +335,7 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       // 'orderby',  // ORDER BY - now accepted (post-processing)
       // 'distinct', // DISTINCT - now accepted (post-processing)
       // 'leftjoin', // OPTIONAL - now implemented as UNION of (left) and (left+right)
-      'graph',    // GRAPH - incomplete support with UNION
+      // 'graph',    // GRAPH - implemented, handles named graph patterns
 
       // Want to include
       'ZeroOrMorePath',
