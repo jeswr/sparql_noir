@@ -48,3 +48,4 @@ test/circuits/edge-cases/
 
 legacy/
 *.log
+libs/

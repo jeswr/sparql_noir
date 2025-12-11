@@ -8,6 +8,7 @@ import { signRdfData, processRdfDataWithoutSigning } from './dist/scripts/sign.j
 import { generateProofs } from './dist/scripts/prove.js';
 import { verifyProofs } from './dist/scripts/verify.js';
 import { transform as wasmTransform, transform_with_options as wasmTransformWithOptions } from './transform/pkg/transform.js';
+import os from 'os';
 
 const __dirname = new URL('.', import.meta.url).pathname;
 
@@ -17,22 +18,28 @@ console.log('Using WASM transform module');
 const args = process.argv.slice(2);
 const witnessOnly = args.includes('--witness-only') || args.includes('-w');
 const skipSigning = args.includes('--skip-signing') || args.includes('-s');
+const concurrencyArg = args.find(a => a.startsWith('--concurrency=') || a.startsWith('-j'));
+const concurrency = concurrencyArg 
+  ? parseInt(concurrencyArg.split('=')[1] || concurrencyArg.slice(2), 10) 
+  : os.cpus().length;
 
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`
 Usage: node ts.js [options]
 
 Options:
-  -w, --witness-only  Only generate witness, skip proof generation and verification (faster)
-  -s, --skip-signing  Skip signature verification (use simplified circuit, much faster)
-  -h, --help          Show this help message
+  -w, --witness-only      Only generate witness, skip proof generation and verification (faster)
+  -s, --skip-signing      Skip signature verification (use simplified circuit, much faster)
+  -j<N>, --concurrency=N  Number of parallel tests (default: number of CPUs)
+  -h, --help              Show this help message
 
 By default, full proof generation and verification is performed.
 `);
   process.exit(0);
 }
 
-console.log(`Mode: ${witnessOnly ? 'witness-only' : 'full proof + verification'}${skipSigning ? ' (skip-signing)' : ''}\n`);
+console.log(`Mode: ${witnessOnly ? 'witness-only' : 'full proof + verification'}${skipSigning ? ' (skip-signing)' : ''}`);
+console.log(`Concurrency: ${concurrency} parallel tests\n`);
 
 const loader = new ManifestLoader();
 
@@ -152,23 +159,41 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
     return supported;
   });
 
-for (const test of evaluationTests) {
-  console.log(`\n=== Running test: ${test.name || test.uri} ===`);
-  
+// Create temp directory for test artifacts
+const tempBaseDir = path.join(__dirname, 'temp', 'test-runs');
+if (fs.existsSync(tempBaseDir)) {
+  fs.rmSync(tempBaseDir, { recursive: true });
+}
+fs.mkdirSync(tempBaseDir, { recursive: true });
+
+// Test results tracking
+const results = {
+  passed: 0,
+  failed: 0,
+  skipped: 0,
+  failures: [],
+};
+
+/**
+ * Run a single test in an isolated directory
+ */
+async function runTest(test, testIndex) {
+  const testName = test.name || test.uri;
   const writer = new Writer({ format: 'Turtle' });
   const dataContent = writer.quadsToString(test.queryData);
   
   // Skip tests with empty data
   if (!dataContent || dataContent.trim() === '') {
-    console.log(`  Skipping: empty data`);
-    continue;
+    return { status: 'skipped', name: testName, reason: 'empty data' };
   }
   
-  console.log(`  Query: ${test.queryString}`);
+  // Create isolated directory for this test
+  const testDir = path.join(tempBaseDir, `test-${testIndex}`);
+  const circuitDir = path.join(testDir, 'circuit');
+  const circuitSrcDir = path.join(circuitDir, 'src');
+  fs.mkdirSync(circuitSrcDir, { recursive: true });
   
-  const inputDataPath = path.join(__dirname, 'inputs', 'data', 'data.ttl');
-  const circuitDir = path.join(__dirname, 'noir_prove');
-  
+  const inputDataPath = path.join(testDir, 'data.ttl');
   fs.writeFileSync(inputDataPath, dataContent);
 
   try {
@@ -184,23 +209,21 @@ for (const test of evaluationTests) {
     }
     
     // Write the generated circuit files
-    const circuitSrcDir = path.join(circuitDir, 'src');
-    if (!fs.existsSync(circuitSrcDir)) {
-      fs.mkdirSync(circuitSrcDir, { recursive: true });
-    }
-    
     fs.writeFileSync(path.join(circuitSrcDir, 'sparql.nr'), transformResult.sparql_nr);
     fs.writeFileSync(path.join(circuitSrcDir, 'main.nr'), transformResult.main_nr);
-    fs.writeFileSync(path.join(circuitDir, 'Nargo.toml'), transformResult.nargo_toml);
+    
+    // Adjust Nargo.toml paths to use absolute paths from the workspace
+    const libPath = path.join(__dirname, 'noir/lib/').replace(/\\/g, '/');
+    const nargoToml = transformResult.nargo_toml.replace(
+      /path = "\.\.\/noir\/lib\//g, 
+      `path = "${libPath}`);
+    fs.writeFileSync(path.join(circuitDir, 'Nargo.toml'), nargoToml);
     fs.writeFileSync(path.join(circuitDir, 'metadata.json'), JSON.stringify(transformResult.metadata, null, 2));
     
-    console.log(`  Transform: Generated circuit files`);
-    
-    // Compile the circuit (still needs CLI as it's nargo)
-    execSync('cd noir_prove && nargo compile', { stdio: 'inherit' });
+    // Compile the circuit
+    execSync(`nargo compile`, { cwd: circuitDir, stdio: 'pipe' });
     
     // Sign or process the RDF data based on mode
-    console.log(skipSigning ? '  Processing RDF data (no signing)...' : '  Signing RDF data...');
     const signedData = skipSigning 
       ? await processRdfDataWithoutSigning(inputDataPath)
       : await signRdfData(inputDataPath);
@@ -213,13 +236,8 @@ for (const test of evaluationTests) {
       skipSigning,
     });
     
-    if (witnessOnly) {
-      console.log(`  Witness generated successfully (${proveResult.witnesses?.length || 0} witness(es))`);
-    } else {
-      console.log(`  Proofs generated successfully (${proveResult.proofs?.length || 0} proof(s))`);
-      
+    if (!witnessOnly) {
       // Verify proofs
-      console.log('  Verifying proofs...');
       const verifyResult = await verifyProofs({
         circuitDir,
         proofData: proveResult,
@@ -228,16 +246,105 @@ for (const test of evaluationTests) {
       if (!verifyResult.success) {
         throw new Error('Verification failed');
       }
-      console.log('  Verification successful!');
     }
 
-    console.log(fs.readFileSync(path.join(circuitDir, 'src', 'sparql.nr'), 'utf-8'));
+    // Clean up test directory on success
+    fs.rmSync(testDir, { recursive: true });
+    
+    return { status: 'passed', name: testName };
   } catch (err) {
-    console.error(`  Test failed: ${err.message}`);
-    continue;
+    const sparqlNrPath = path.join(circuitSrcDir, 'sparql.nr');
+    const sparqlNr = fs.existsSync(sparqlNrPath) 
+      ? fs.readFileSync(sparqlNrPath, 'utf-8')
+      : null;
+    
+    // Clean up test directory on failure too
+    fs.rmSync(testDir, { recursive: true });
+    
+    return {
+      status: 'failed',
+      name: testName,
+      query: test.queryString,
+      error: err.message,
+      sparqlNr,
+    };
   }
 }
 
-console.log(evaluationTests.length);
+/**
+ * Run tests with controlled concurrency
+ */
+async function runTestsWithConcurrency(tests, maxConcurrency) {
+  const testResults = [];
+  let nextIndex = 0;
+  let completedCount = 0;
+  
+  async function runNext() {
+    while (nextIndex < tests.length) {
+      const currentIndex = nextIndex++;
+      const test = tests[currentIndex];
+      const result = await runTest(test, currentIndex);
+      testResults[currentIndex] = result;
+      completedCount++;
+      
+      // Print progress
+      const symbol = result.status === 'passed' ? '✓' : result.status === 'skipped' ? '○' : '✗';
+      const suffix = result.status === 'skipped' ? ` (skipped: ${result.reason})` : '';
+      console.log(`  ${symbol} ${result.name}${suffix}`);
+    }
+  }
+  
+  // Start concurrent workers
+  const workers = [];
+  for (let i = 0; i < Math.min(maxConcurrency, tests.length); i++) {
+    workers.push(runNext());
+  }
+  
+  await Promise.all(workers);
+  return testResults;
+}
 
-// Further processing of tests...
+// Run all tests in parallel
+console.log(`Running ${evaluationTests.length} tests...\n`);
+const testResults = await runTestsWithConcurrency(evaluationTests, concurrency);
+
+// Aggregate results
+for (const result of testResults) {
+  if (result.status === 'passed') {
+    results.passed++;
+  } else if (result.status === 'skipped') {
+    results.skipped++;
+  } else {
+    results.failed++;
+    results.failures.push(result);
+  }
+}
+
+// Print summary
+console.log('\n' + '─'.repeat(60));
+console.log('\nTest Results:');
+console.log(`  ${results.passed} passed`);
+console.log(`  ${results.failed} failed`);
+console.log(`  ${results.skipped} skipped`);
+console.log(`  ${evaluationTests.length} total\n`);
+
+// Print failure details
+if (results.failures.length > 0) {
+  console.log('─'.repeat(60));
+  console.log('\nFailure Details:\n');
+  
+  for (const failure of results.failures) {
+    console.log(`✗ ${failure.name}`);
+    console.log(`  Error: ${failure.error}`);
+    console.log(`  Query:\n    ${failure.query.split('\n').join('\n    ')}`);
+    if (failure.sparqlNr) {
+      console.log(`  Generated sparql.nr:\n    ${failure.sparqlNr.split('\n').join('\n    ')}`);
+    }
+    console.log('');
+  }
+}
+
+// Exit with error code if any tests failed
+if (results.failed > 0) {
+  process.exit(1);
+}

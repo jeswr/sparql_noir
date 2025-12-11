@@ -3,6 +3,9 @@
 //! This library provides the core transformation functionality that can be
 //! compiled to WebAssembly for use in JavaScript/TypeScript environments.
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::wasm_bindgen;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
@@ -10,9 +13,6 @@ use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, 
 use spargebra::{Query, SparqlParser};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
 
 // Embed the template at compile time for WASM compatibility
 const MAIN_TEMPLATE: &str = include_str!("../template/main-verify.template.nr");
@@ -620,6 +620,10 @@ fn process_patterns_with_graph(patterns: &[TriplePattern], graph: GraphContext) 
                 let name = v.as_str().to_string();
                 if seen_vars.contains(&name) {
                     // Already seen - add equality assertion
+                    info.assertions.push(Assertion(
+                        Term::Variable(name),
+                        Term::Input(i, 0),
+                    ));
                 } else {
                     seen_vars.insert(name.clone());
                     info.bindings.push(Binding {
@@ -628,7 +632,24 @@ fn process_patterns_with_graph(patterns: &[TriplePattern], graph: GraphContext) 
                     });
                 }
             }
-            TermPattern::BlankNode(_) => return Err("Blank nodes not supported".into()),
+            TermPattern::BlankNode(bn) => {
+                // Treat blank nodes as internal variables (not projected)
+                // Use a special prefix to distinguish from user variables
+                let name = format!("__blank_{}", bn.as_str());
+                if seen_vars.contains(&name) {
+                    // Already seen - need to assert this position equals the first binding
+                    info.assertions.push(Assertion(
+                        Term::Variable(name),
+                        Term::Input(i, 0),
+                    ));
+                } else {
+                    seen_vars.insert(name.clone());
+                    info.bindings.push(Binding {
+                        variable: name,
+                        term: Term::Input(i, 0),
+                    });
+                }
+            }
             TermPattern::Literal(_) => return Err("Literal in subject position".into()),
         }
 
@@ -668,7 +689,13 @@ fn process_patterns_with_graph(patterns: &[TriplePattern], graph: GraphContext) 
             }
             TermPattern::Variable(v) => {
                 let name = v.as_str().to_string();
-                if !seen_vars.contains(&name) {
+                if seen_vars.contains(&name) {
+                    // Already seen - add equality assertion
+                    info.assertions.push(Assertion(
+                        Term::Variable(name),
+                        Term::Input(i, 2),
+                    ));
+                } else {
                     seen_vars.insert(name.clone());
                     info.bindings.push(Binding {
                         variable: name,
@@ -676,7 +703,23 @@ fn process_patterns_with_graph(patterns: &[TriplePattern], graph: GraphContext) 
                     });
                 }
             }
-            _ => return Err("Unsupported object term type".into()),
+            TermPattern::BlankNode(bn) => {
+                // Treat blank nodes as internal variables (not projected)
+                let name = format!("__blank_{}", bn.as_str());
+                if seen_vars.contains(&name) {
+                    // Already seen - need to assert this position equals the first binding
+                    info.assertions.push(Assertion(
+                        Term::Variable(name),
+                        Term::Input(i, 2),
+                    ));
+                } else {
+                    seen_vars.insert(name.clone());
+                    info.bindings.push(Binding {
+                        variable: name,
+                        term: Term::Input(i, 2),
+                    });
+                }
+            }
         }
     }
 
