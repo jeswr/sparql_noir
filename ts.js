@@ -83,6 +83,9 @@ const testIndex = indexArg ? parseInt(indexArg.split('=')[1], 10) : null;
 const rangeArg = args.find(a => a.startsWith('--range=') || a.startsWith('-r='));
 const testRange = rangeArg ? rangeArg.split('=')[1].split('-').map(n => parseInt(n, 10)) : null;
 const rerunFailed = args.includes('--failed') || args.includes('--rerun-failed') || args.includes('-F');
+const singleBinding = args.includes('--single-binding') || args.includes('-1');
+const maxBindingsArg = args.find(a => a.startsWith('--max-bindings=') || a.startsWith('-b='));
+const maxBindings = singleBinding ? 1 : (maxBindingsArg ? parseInt(maxBindingsArg.split('=')[1], 10) : undefined);
 
 // Path to store failing test names
 const failedTestsFile = path.join(__dirname, 'temp', 'failed-tests.json');
@@ -100,6 +103,8 @@ Options:
   -i=N, --index=N         Only run test at index N
   -r=START-END, --range=START-END  Only run tests from index START to END (inclusive)
   -F, --failed, --rerun-failed  Only run tests that failed in the previous run
+  -1, --single-binding    Only generate witness for one binding per test (faster)
+  -b=N, --max-bindings=N  Maximum number of bindings to process per test
   -h, --help              Show this help message
 
 Examples:
@@ -108,6 +113,7 @@ Examples:
   node ts.js -r=10-20               Run tests from index 10 to 20
   node ts.js -s -w -f="equality"    Run equality tests with skip-signing and witness-only
   node ts.js -s -w --failed         Re-run only tests that failed last time
+  node ts.js -s -w -1               Run all tests with only one binding each (fastest)
 
 By default, full proof generation and verification is performed.
 
@@ -364,6 +370,7 @@ async function runTest(test, testIndex) {
         signedData,
         witnessOnly,
         skipSigning,
+        maxBindings,
       });
     } finally {
       restoreLogs();
