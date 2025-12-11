@@ -334,6 +334,83 @@ fn determine_comparison_type(a: &Expression, b: &Expression) -> ComparisonType {
     }
 }
 
+/// Handle equality comparisons involving SPARQL accessor functions (LANG, STR, DATATYPE).
+/// Returns Some(noir_code) if the comparison was handled, None otherwise.
+fn handle_function_equality(
+    func_expr: &Expression,
+    other_expr: &Expression,
+    _query: &QueryInfo,
+    _bindings: &BTreeMap<String, Term>,
+    hidden: &mut Vec<serde_json::Value>,
+) -> Result<Option<String>, String> {
+    if let Expression::FunctionCall(func, args) = func_expr {
+        match func {
+            Function::Lang => {
+                // LANG(?x) = "en" -> compare language tag
+                if args.len() != 1 {
+                    return Err("LANG requires 1 argument".into());
+                }
+                let term = expr_to_term(&args[0])?;
+                let idx = push_hidden(hidden, "lang", &term);
+                
+                // Get the comparison value
+                let cmp_value = match other_expr {
+                    Expression::Literal(lit) => lit.value().to_string(),
+                    _ => return Err("LANG comparison requires a string literal".into()),
+                };
+                
+                Ok(Some(format!(
+                    "hidden[{}] == consts::encode_string(\"{}\")",
+                    idx, cmp_value
+                )))
+            }
+            Function::Str => {
+                // STR(?x) = "hello" -> compare lexical form
+                if args.len() != 1 {
+                    return Err("STR requires 1 argument".into());
+                }
+                let term = expr_to_term(&args[0])?;
+                let idx = push_hidden(hidden, "str", &term);
+                
+                // Get the comparison value
+                let cmp_value = match other_expr {
+                    Expression::Literal(lit) => lit.value().to_string(),
+                    Expression::NamedNode(nn) => nn.as_str().to_string(),
+                    _ => return Err("STR comparison requires a literal or IRI".into()),
+                };
+                
+                Ok(Some(format!(
+                    "hidden[{}] == consts::encode_string(\"{}\")",
+                    idx, cmp_value.replace('\\', "\\\\").replace('"', "\\\"")
+                )))
+            }
+            Function::Datatype => {
+                // DATATYPE(?x) = xsd:integer -> compare datatype IRI
+                if args.len() != 1 {
+                    return Err("DATATYPE requires 1 argument".into());
+                }
+                let term = expr_to_term(&args[0])?;
+                let idx = push_hidden(hidden, "datatype", &term);
+                
+                // Get the comparison value (should be a named node / IRI)
+                let cmp_value = match other_expr {
+                    Expression::NamedNode(nn) => nn.as_str().to_string(),
+                    Expression::Literal(lit) => lit.value().to_string(), // Allow string literal with IRI
+                    _ => return Err("DATATYPE comparison requires an IRI".into()),
+                };
+                
+                Ok(Some(format!(
+                    "hidden[{}] == consts::encode_string(\"{}\")",
+                    idx, cmp_value.replace('\\', "\\\\").replace('"', "\\\"")
+                )))
+            }
+            _ => Ok(None), // Not a handled function
+        }
+    } else {
+        Ok(None) // Not a function call
+    }
+}
+
 fn filter_to_noir(
     expr: &Expression,
     query: &QueryInfo,
@@ -342,6 +419,14 @@ fn filter_to_noir(
 ) -> Result<String, String> {
     match expr {
         Expression::Equal(a, b) => {
+            // Handle function call comparisons (e.g., LANG(?x) = "en")
+            if let Some(result) = handle_function_equality(a, b, query, bindings, hidden)? {
+                return Ok(result);
+            }
+            if let Some(result) = handle_function_equality(b, a, query, bindings, hidden)? {
+                return Ok(result);
+            }
+            
             let left = expr_to_term(a)?;
             let right = expr_to_term(b)?;
             
@@ -429,6 +514,47 @@ fn filter_to_noir(
                 Function::IsLiteral => {
                     if args.len() != 1 { return Err("isLiteral requires 1 argument".into()); }
                     type_check(&args[0], 2, query, bindings, hidden)
+                }
+                Function::LangMatches => {
+                    // LANGMATCHES(LANG(?x), "en") or LANGMATCHES(?lang, "*")
+                    if args.len() != 2 {
+                        return Err("LANGMATCHES requires 2 arguments".into());
+                    }
+                    
+                    // First arg is usually LANG(?x), extract the variable
+                    let lang_term = if let Expression::FunctionCall(Function::Lang, lang_args) = &args[0] {
+                        if lang_args.len() != 1 {
+                            return Err("LANG requires 1 argument".into());
+                        }
+                        expr_to_term(&lang_args[0])?
+                    } else {
+                        expr_to_term(&args[0])?
+                    };
+                    
+                    // Second arg is the language pattern
+                    let pattern = match &args[1] {
+                        Expression::Literal(lit) => lit.value().to_string(),
+                        _ => return Err("LANGMATCHES requires a string pattern".into()),
+                    };
+                    
+                    let idx = push_hidden(hidden, "lang", &lang_term);
+                    
+                    // Handle the "*" wildcard (matches any non-empty language tag)
+                    if pattern == "*" {
+                        // Language tag is non-empty (not the empty string)
+                        Ok(format!(
+                            "hidden[{}] != consts::encode_string(\"\")",
+                            idx
+                        ))
+                    } else {
+                        // Exact match or prefix match for primary subtag
+                        // For simplicity, we do exact match on the primary subtag
+                        let primary = pattern.split('-').next().unwrap_or(&pattern).to_lowercase();
+                        Ok(format!(
+                            "hidden[{}] == consts::encode_string(\"{}\")",
+                            idx, primary
+                        ))
+                    }
                 }
                 _ => Err(format!("Unsupported function: {:?}", func)),
             }

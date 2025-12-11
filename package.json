@@ -44,7 +44,7 @@
     "benchmark:all": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark",
     "benchmark:list": "npx tsx src/scripts/benchmarks/noir-benchmark.ts list-circuits",
     "benchmark:help": "npx tsx src/scripts/benchmarks/noir-benchmark.ts --help",
-    "test:sparql10": "node ts.js -s -w -q"
+    "test:sparql10": "node ts.js"
   },
   "keywords": [],
   "author": "",

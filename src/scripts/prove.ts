@@ -358,6 +358,88 @@ function computeHiddenInputs(
         console.warn(`Unknown hidden input type for term_to_field: ${input.type}`);
         return null;
       }
+    } else if (hidden.type === 'customComputed' && hidden.computedType === 'lang') {
+      // Handle LANG() function - extract language tag from literal
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      if (!input) {
+        console.warn('Hidden input missing input field for lang');
+        return null;
+      }
+
+      if (input.type === 'variable') {
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for hidden lang input`);
+          return null;
+        }
+        // Get the language tag (empty string if none)
+        const langTag = boundTerm.termType === 'Literal' ? ((boundTerm as Literal).language || '') : '';
+        hiddenValues.push(langTag);
+      } else if (input.type === 'static') {
+        const termJson = input.value as TermJson;
+        const langTag = termJson?.language || '';
+        hiddenValues.push(langTag);
+      } else {
+        console.warn(`Unknown hidden input type for lang: ${input.type}`);
+        return null;
+      }
+    } else if (hidden.type === 'customComputed' && hidden.computedType === 'str') {
+      // Handle STR() function - extract lexical form
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      if (!input) {
+        console.warn('Hidden input missing input field for str');
+        return null;
+      }
+
+      if (input.type === 'variable') {
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for hidden str input`);
+          return null;
+        }
+        // STR returns the lexical form for literals, the IRI for named nodes
+        const strValue = boundTerm.value;
+        hiddenValues.push(strValue);
+      } else if (input.type === 'static') {
+        const termJson = input.value as TermJson;
+        hiddenValues.push(termJson?.value || '');
+      } else {
+        console.warn(`Unknown hidden input type for str: ${input.type}`);
+        return null;
+      }
+    } else if (hidden.type === 'customComputed' && hidden.computedType === 'datatype') {
+      // Handle DATATYPE() function - extract datatype IRI from literal
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      if (!input) {
+        console.warn('Hidden input missing input field for datatype');
+        return null;
+      }
+
+      if (input.type === 'variable') {
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for hidden datatype input`);
+          return null;
+        }
+        if (boundTerm.termType !== 'Literal') {
+          console.warn(`Variable ${varName} is not a literal for DATATYPE`);
+          return null;
+        }
+        // Get the datatype IRI
+        const lit = boundTerm as Literal;
+        const datatypeIri = lit.datatype?.value || 'http://www.w3.org/2001/XMLSchema#string';
+        hiddenValues.push(datatypeIri);
+      } else if (input.type === 'static') {
+        const termJson = input.value as TermJson;
+        const datatypeIri = termJson?.datatype?.value || 'http://www.w3.org/2001/XMLSchema#string';
+        hiddenValues.push(datatypeIri);
+      } else {
+        console.warn(`Unknown hidden input type for datatype: ${input.type}`);
+        return null;
+      }
     } else if (hidden.type === 'variable') {
       // Direct variable reference
       const varName = (hidden.value as unknown) as string;
@@ -551,13 +633,26 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     graph: termJsonToRdfTerm(p.graph),
   }));
 
+  // Helper: Check if a term acts as a variable in SPARQL pattern matching
+  // Per SPARQL 1.1 spec section 4.1.4: "Blank nodes in graph patterns act as variables"
+  function isPatternVariable(term: Term): boolean {
+    return term.termType === 'Variable' || term.termType === 'BlankNode';
+  }
+
+  // Helper: Get the binding key for a pattern term (variable name or blank node label)
+  function getPatternKey(term: Term): string {
+    if (term.termType === 'Variable') return term.value;
+    if (term.termType === 'BlankNode') return `__blank_${term.value}`;
+    throw new Error(`Cannot get pattern key for term type: ${term.termType}`);
+  }
+
   // Find matching quads for first pattern
   const firstPattern = patternQuads[0]!;
   const matchingQuads = store.getQuads(
-    firstPattern.subject.termType === 'Variable' ? null : firstPattern.subject,
-    firstPattern.predicate.termType === 'Variable' ? null : firstPattern.predicate,
-    firstPattern.object.termType === 'Variable' ? null : firstPattern.object,
-    firstPattern.graph.termType === 'Variable' || firstPattern.graph.termType === 'DefaultGraph' ? null : firstPattern.graph
+    isPatternVariable(firstPattern.subject) ? null : firstPattern.subject,
+    isPatternVariable(firstPattern.predicate) ? null : firstPattern.predicate,
+    isPatternVariable(firstPattern.object) ? null : firstPattern.object,
+    isPatternVariable(firstPattern.graph) || firstPattern.graph.termType === 'DefaultGraph' ? null : firstPattern.graph
   );
 
   console.log(`Found ${matchingQuads.length} matching quad(s) for first pattern`);
@@ -572,19 +667,20 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
   }
 
   // Helper function to extract binding from a quad given a pattern
+  // Handles both Variables and BlankNodes (which act as variables per SPARQL 1.1)
   function extractBinding(quad: Quad, pattern: typeof firstPattern): Map<string, Term> {
     const binding = new Map<string, Term>();
-    if (pattern.subject.termType === 'Variable') {
-      binding.set(pattern.subject.value, quad.subject);
+    if (isPatternVariable(pattern.subject)) {
+      binding.set(getPatternKey(pattern.subject), quad.subject);
     }
-    if (pattern.predicate.termType === 'Variable') {
-      binding.set(pattern.predicate.value, quad.predicate);
+    if (isPatternVariable(pattern.predicate)) {
+      binding.set(getPatternKey(pattern.predicate), quad.predicate);
     }
-    if (pattern.object.termType === 'Variable') {
-      binding.set(pattern.object.value, quad.object);
+    if (isPatternVariable(pattern.object)) {
+      binding.set(getPatternKey(pattern.object), quad.object);
     }
-    if (pattern.graph.termType === 'Variable') {
-      binding.set(pattern.graph.value, quad.graph);
+    if (isPatternVariable(pattern.graph)) {
+      binding.set(getPatternKey(pattern.graph), quad.graph);
     }
     return binding;
   }
@@ -637,18 +733,18 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       const newBindings: BindingWithQuads[] = [];
 
       for (const { binding, quads } of currentBindings) {
-        // Find matching quads for this pattern, substituting bound variables
-        const subjectMatch = pattern.subject.termType === 'Variable' 
-          ? binding.get(pattern.subject.value) || null 
+        // Find matching quads for this pattern, substituting bound variables/blank nodes
+        const subjectMatch = isPatternVariable(pattern.subject)
+          ? binding.get(getPatternKey(pattern.subject)) || null 
           : pattern.subject;
-        const predicateMatch = pattern.predicate.termType === 'Variable'
-          ? binding.get(pattern.predicate.value) || null
+        const predicateMatch = isPatternVariable(pattern.predicate)
+          ? binding.get(getPatternKey(pattern.predicate)) || null
           : pattern.predicate;
-        const objectMatch = pattern.object.termType === 'Variable'
-          ? binding.get(pattern.object.value) || null
+        const objectMatch = isPatternVariable(pattern.object)
+          ? binding.get(getPatternKey(pattern.object)) || null
           : pattern.object;
-        const graphMatch = pattern.graph.termType === 'Variable'
-          ? binding.get(pattern.graph.value) || null
+        const graphMatch = isPatternVariable(pattern.graph)
+          ? binding.get(getPatternKey(pattern.graph)) || null
           : (pattern.graph.termType === 'DefaultGraph' ? null : pattern.graph);
 
         const matchingForPattern = store.getQuads(subjectMatch, predicateMatch, objectMatch, graphMatch);
