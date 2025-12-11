@@ -303,11 +303,10 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       /"INF"/,
       /"-INF"/,
       /"NaN"/,
-      // REDUCED keyword
-      /\bREDUCED\b/i,
-      // LIMIT/OFFSET (uses Slice which we don't support)
-      /\bLIMIT\b/i,
-      /\bOFFSET\b/i,
+      // REDUCED, LIMIT/OFFSET now accepted (post-processing handled outside circuit)
+      // /\bREDUCED\b/i,
+      // /\bLIMIT\b/i,
+      // /\bOFFSET\b/i,
       // Arithmetic operations in FILTER (not supported in transform)
       /\?\w+\s*\*\s*\?/i,  // multiplication: ?var * ?var
       /\?\w+\s*\+\s*\?/i,  // addition: ?var + ?var
@@ -333,8 +332,8 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       'minus',
       // 'ask',  // ASK queries are supported by transform
       'construct',
-      'orderby',  // lowercase - this is what sparqlalgebrajs uses
-      'distinct',
+      // 'orderby',  // ORDER BY - now accepted (post-processing)
+      // 'distinct', // DISTINCT - now accepted (post-processing)
       // 'leftjoin', // OPTIONAL - now implemented as UNION of (left) and (left+right)
       'graph',    // GRAPH - incomplete support with UNION
 
