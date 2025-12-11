@@ -188,6 +188,18 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       // LIMIT/OFFSET (uses Slice which we don't support)
       /\bLIMIT\b/i,
       /\bOFFSET\b/i,
+      // Arithmetic operations in FILTER (not supported in transform)
+      /\?\w+\s*\*\s*\?/i,  // multiplication: ?var * ?var
+      /\?\w+\s*\+\s*\?/i,  // addition: ?var + ?var
+      /\?\w+\s*-\s*\?/i,   // subtraction: ?var - ?var
+      /[=<>]\s*\+\d/,      // unary plus: = +3
+      /[=<>]\s*-\?/,       // unary minus: = -?var
+      /-\?\w+\s*=/,        // unary minus on left: -?var =
+      // Boolean effective value tests - bare variable in FILTER not supported
+      /FILTER\s*\(\s*\?\w+\s*\)/i,         // FILTER(?v)
+      /FILTER\s*\(\s*!\s*\?\w+\s*\)/i,     // FILTER(!?v)
+      /FILTER\s*\(\s*"[^"]*"\^\^[^)]*&&\s*\?\w+\s*\)/i,  // FILTER("..."^^type && ?v)
+      /FILTER\s*\(\s*"[^"]*"\^\^[^)]*\|\|\s*\?\w+\s*\)/i, // FILTER("..."^^type || ?v)
     ];
 
     for (const pattern of unsupportedPatterns) {
@@ -203,7 +215,7 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       'construct',
       'orderby',  // lowercase - this is what sparqlalgebrajs uses
       'distinct',
-      'leftJoin', // OPTIONAL - not fully implemented
+      'leftjoin', // OPTIONAL - not fully implemented (lowercase per sparqlalgebrajs)
 
       // Want to include
       'ZeroOrMorePath',

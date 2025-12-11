@@ -124,6 +124,27 @@ function parseDatetimeValue(value: string): number | null {
   return null;
 }
 
+// Helper function to parse numeric values (integer, decimal, double)
+function parseNumericValue(value: string): number | null {
+  // Remove leading/trailing whitespace
+  const trimmed = value.trim();
+  
+  // Try parsing as number
+  const num = Number(trimmed);
+  if (!Number.isNaN(num) && Number.isFinite(num)) {
+    // For circuit comparisons, convert to integer (e.g., by truncating or rounding)
+    // Most comparisons will be on integers, but we can handle decimals
+    if (Number.isInteger(num)) {
+      return num;
+    }
+    // For non-integers, multiply by a scale factor or just use the integer part
+    // For now, just return the integer part
+    return Math.floor(num);
+  }
+  
+  return null;
+}
+
 // Helper function to compute hidden input values based on metadata
 function computeHiddenInputs(
   hiddenInputs: HiddenInput[],
@@ -178,6 +199,50 @@ function computeHiddenInputs(
         hiddenValues.push(ms.toString());
       } else {
         console.warn(`Unknown hidden input type: ${input.type}`);
+        return null;
+      }
+    } else if (hidden.type === 'customComputed' && hidden.computedType === 'literal_value') {
+      // Handle numeric literal comparison hidden inputs
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      if (!input) {
+        console.warn('Hidden input missing input field for literal_value');
+        return null;
+      }
+
+      if (input.type === 'variable') {
+        // Get the bound value for this variable
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for hidden literal_value input`);
+          return null;
+        }
+        if (boundTerm.termType !== 'Literal') {
+          console.warn(`Variable ${varName} is not a literal for numeric comparison`);
+          return null;
+        }
+        // Parse numeric value
+        const numValue = parseNumericValue(boundTerm.value);
+        if (numValue === null) {
+          console.warn(`Could not parse numeric value: ${boundTerm.value}`);
+          return null;
+        }
+        hiddenValues.push(numValue.toString());
+      } else if (input.type === 'static') {
+        // Static value from metadata
+        const termJson = input.value as TermJson;
+        if (!termJson || termJson.termType !== 'Literal') {
+          console.warn('Static hidden input is not a literal for literal_value');
+          return null;
+        }
+        const numValue = parseNumericValue(termJson.value || '');
+        if (numValue === null) {
+          console.warn(`Could not parse static numeric value: ${termJson.value}`);
+          return null;
+        }
+        hiddenValues.push(numValue.toString());
+      } else {
+        console.warn(`Unknown hidden input type for literal_value: ${input.type}`);
         return null;
       }
     } else if (hidden.type === 'variable') {
