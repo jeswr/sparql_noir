@@ -632,13 +632,9 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     console.log(`  Successfully generated ${proofs.length}/${successfulWitnesses.length} proofs`);
   }
 
-  // Cleanup
+  // Cleanup - properly destroy the backend to release worker threads
   if (backend) {
-    try {
-      if (typeof (backend as unknown as { destroy: () => void }).destroy === 'function') {
-        await (backend as unknown as { destroy: () => Promise<void> }).destroy();
-      }
-    } catch { /* ignore cleanup errors */ }
+    await backend.destroy();
   }
 
   const successCount = witnessOnly ? witnesses.length : proofs.length;
@@ -747,6 +743,8 @@ The script will:
       fs.writeFileSync(outputPath, JSON.stringify(output, null, 2));
 
       console.log(`Output saved to: ${outputPath}`);
+      // Explicitly exit to ensure worker threads from bb.js are terminated
+      process.exit(0);
     } catch (err) {
       console.error('Error:', (err as Error).message);
       process.exit(1);
