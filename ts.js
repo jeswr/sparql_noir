@@ -14,10 +14,62 @@ const __dirname = new URL('.', import.meta.url).pathname;
 
 console.log('Using WASM transform module');
 
+// Shared cache directory for noir dependencies (archives and libs)
+const noirCacheDir = path.join(__dirname, 'temp', 'noir-cache');
+
+/**
+ * Initialize the shared noir dependency cache by copying from noir_prove
+ * which already has pre-downloaded dependencies
+ */
+function initializeNoirCache() {
+  if (!fs.existsSync(noirCacheDir)) {
+    fs.mkdirSync(noirCacheDir, { recursive: true });
+  }
+  
+  // Source directories with cached dependencies
+  const sourceArchives = path.join(__dirname, 'noir_prove', 'archives');
+  const sourceLibs = path.join(__dirname, 'noir_prove', 'libs');
+  const cacheArchives = path.join(noirCacheDir, 'archives');
+  const cacheLibs = path.join(noirCacheDir, 'libs');
+  
+  // Copy archives if source exists and cache doesn't
+  if (fs.existsSync(sourceArchives) && !fs.existsSync(cacheArchives)) {
+    fs.cpSync(sourceArchives, cacheArchives, { recursive: true });
+    console.log('Cached noir dependency archives');
+  }
+  
+  // Copy libs if source exists and cache doesn't
+  if (fs.existsSync(sourceLibs) && !fs.existsSync(cacheLibs)) {
+    fs.cpSync(sourceLibs, cacheLibs, { recursive: true });
+    console.log('Cached noir dependency libraries');
+  }
+}
+
+/**
+ * Link cached dependencies to a circuit directory
+ */
+function linkCachedDependencies(circuitDir) {
+  const cacheArchives = path.join(noirCacheDir, 'archives');
+  const cacheLibs = path.join(noirCacheDir, 'libs');
+  const targetArchives = path.join(circuitDir, 'archives');
+  const targetLibs = path.join(circuitDir, 'libs');
+  
+  // Symlink archives directory if cache exists
+  if (fs.existsSync(cacheArchives) && !fs.existsSync(targetArchives)) {
+    fs.symlinkSync(cacheArchives, targetArchives, 'dir');
+  }
+  
+  // Symlink libs directory if cache exists
+  if (fs.existsSync(cacheLibs) && !fs.existsSync(targetLibs)) {
+    fs.symlinkSync(cacheLibs, targetLibs, 'dir');
+  }
+}
+
 // Parse CLI arguments
 const args = process.argv.slice(2);
 const witnessOnly = args.includes('--witness-only') || args.includes('-w');
 const skipSigning = args.includes('--skip-signing') || args.includes('-s');
+const quietMode = args.includes('--quiet') || args.includes('-q');
 const concurrencyArg = args.find(a => a.startsWith('--concurrency=') || a.startsWith('-j'));
 const concurrency = concurrencyArg 
   ? parseInt(concurrencyArg.split('=')[1] || concurrencyArg.slice(2), 10) 
@@ -30,15 +82,30 @@ Usage: node ts.js [options]
 Options:
   -w, --witness-only      Only generate witness, skip proof generation and verification (faster)
   -s, --skip-signing      Skip signature verification (use simplified circuit, much faster)
+  -q, --quiet             Suppress verbose logging (only show test results)
   -j<N>, --concurrency=N  Number of parallel tests (default: number of CPUs)
   -h, --help              Show this help message
 
 By default, full proof generation and verification is performed.
+
+Noir dependencies are cached in temp/noir-cache/ and shared across all tests
+via symlinks to avoid re-downloading for each test compilation.
 `);
   process.exit(0);
 }
 
-console.log(`Mode: ${witnessOnly ? 'witness-only' : 'full proof + verification'}${skipSigning ? ' (skip-signing)' : ''}`);
+// Helper to suppress console.log in quiet mode
+const originalConsoleLog = console.log;
+function suppressLogs() {
+  if (quietMode) {
+    console.log = () => {};
+  }
+}
+function restoreLogs() {
+  console.log = originalConsoleLog;
+}
+
+console.log(`Mode: ${witnessOnly ? 'witness-only' : 'full proof + verification'}${skipSigning ? ' (skip-signing)' : ''}${quietMode ? ' (quiet)' : ''}`);
 console.log(`Concurrency: ${concurrency} parallel tests\n`);
 
 const loader = new ManifestLoader();
@@ -168,6 +235,9 @@ if (fs.existsSync(tempBaseDir)) {
 }
 fs.mkdirSync(tempBaseDir, { recursive: true });
 
+// Initialize shared noir dependency cache
+initializeNoirCache();
+
 // Test results tracking
 const results = {
   passed: 0,
@@ -222,9 +292,18 @@ async function runTest(test, testIndex) {
     fs.writeFileSync(path.join(circuitDir, 'Nargo.toml'), nargoToml);
     fs.writeFileSync(path.join(circuitDir, 'metadata.json'), JSON.stringify(transformResult.metadata, null, 2));
     
-    // Compile the circuit using WASM (with silent logging)
+    // Link cached noir dependencies to avoid re-downloading for each test
+    linkCachedDependencies(circuitDir);
+    
+    // Compile the circuit using WASM (suppress noisy console output)
     const fm = createFileManager(circuitDir);
-    const compiledArtifacts = await compile_program(fm, undefined, () => {}, () => {});
+    suppressLogs();
+    let compiledArtifacts;
+    try {
+      compiledArtifacts = await compile_program(fm, undefined, () => {}, () => {});
+    } finally {
+      restoreLogs();
+    }
     
     // Save the compiled artifacts
     const targetDir = path.join(circuitDir, 'target');
@@ -234,25 +313,43 @@ async function runTest(test, testIndex) {
       JSON.stringify(compiledArtifacts.program || compiledArtifacts, null, 2)
     );
     
-    // Sign or process the RDF data based on mode
-    const signedData = skipSigning 
-      ? await processRdfDataWithoutSigning(inputDataPath)
-      : await signRdfData(inputDataPath);
+    // Sign or process the RDF data based on mode (suppress verbose output)
+    suppressLogs();
+    let signedData;
+    try {
+      signedData = skipSigning 
+        ? await processRdfDataWithoutSigning(inputDataPath)
+        : await signRdfData(inputDataPath);
+    } finally {
+      restoreLogs();
+    }
     
-    // Generate proofs or witness only based on CLI option
-    const proveResult = await generateProofs({
-      circuitDir,
-      signedData,
-      witnessOnly,
-      skipSigning,
-    });
+    // Generate proofs or witness only based on CLI option (suppress verbose output)
+    suppressLogs();
+    let proveResult;
+    try {
+      proveResult = await generateProofs({
+        circuitDir,
+        signedData,
+        witnessOnly,
+        skipSigning,
+      });
+    } finally {
+      restoreLogs();
+    }
     
     if (!witnessOnly) {
-      // Verify proofs
-      const verifyResult = await verifyProofs({
-        circuitDir,
-        proofData: proveResult,
-      });
+      // Verify proofs (suppress verbose output)
+      suppressLogs();
+      let verifyResult;
+      try {
+        verifyResult = await verifyProofs({
+          circuitDir,
+          proofData: proveResult,
+        });
+      } finally {
+        restoreLogs();
+      }
       
       if (!verifyResult.success) {
         throw new Error('Verification failed');
