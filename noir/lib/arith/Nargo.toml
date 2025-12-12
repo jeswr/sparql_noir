@@ -1,0 +1,7 @@
+[package]
+name = "arith"
+type = "lib"
+authors = [""]
+
+[dependencies]
+consts = { path = "../consts" }
