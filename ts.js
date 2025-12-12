@@ -536,73 +536,19 @@ async function runTest(test, testIndex) {
       return { status: 'passed', name: testName, timing };
     }
     
-    // Write the generated circuit files
-    fs.writeFileSync(path.join(circuitSrcDir, 'sparql.nr'), transformResult.sparql_nr);
-    fs.writeFileSync(path.join(circuitSrcDir, 'main.nr'), transformResult.main_nr);
-    
     // Adjust Nargo.toml paths to use absolute paths from the workspace
     const libPath = path.join(__dirname, 'noir/lib/').replace(/\\/g, '/');
     const nargoToml = transformResult.nargo_toml.replace(
       /path = "\.\.\/noir\/lib\//g, 
       `path = "${libPath}`);
     fs.writeFileSync(path.join(circuitDir, 'Nargo.toml'), nargoToml);
-    fs.writeFileSync(path.join(circuitDir, 'metadata.json'), JSON.stringify(transformResult.metadata, null, 2));
     
     // Link cached noir dependencies to avoid re-downloading for each test
     linkCachedDependencies(circuitDir);
     
-    // Try to get compiled circuit from cache
-    startTime = Date.now();
-    let compiledArtifacts = noCacheCircuit ? null : getCachedCircuit(transformResult.sparql_nr, transformResult.main_nr, nargoToml);
-    
-    if (compiledArtifacts) {
-      // Use cached compilation
-      timing.compile = Date.now() - startTime;
-    } else {
-      // Compile the circuit using WASM (suppress noisy console output)
-      const fm = createFileManager(circuitDir);
-      const compileErrors = [];
-      suppressLogs();
-      try {
-        compiledArtifacts = await compile_program(fm, undefined, 
-          (msg) => {}, // info callback - ignore
-          (msg) => { compileErrors.push(msg); } // error callback - collect
-        );
-        
-        // Check if compilation returned valid artifacts
-        if (!compiledArtifacts || (!compiledArtifacts.program && !compiledArtifacts.abi)) {
-          const errorMsg = compileErrors.length > 0 
-            ? `Circuit compilation failed: ${compileErrors.join('; ')}`
-            : 'Circuit compilation failed: no artifacts produced';
-          throw new Error(errorMsg);
-        }
-        
-        // Cache the compilation result
-        if (!noCacheCircuit) {
-          cacheCircuit(transformResult.sparql_nr, transformResult.main_nr, nargoToml, compiledArtifacts.program || compiledArtifacts);
-        }
-      } catch (compileErr) {
-        // Re-throw with more context if it's a compilation error
-        if (compileErr.message && !compileErr.message.startsWith('Circuit compilation')) {
-          const errorMsg = compileErrors.length > 0
-            ? `Circuit compilation error: ${compileErr.message}; Details: ${compileErrors.join('; ')}`
-            : `Circuit compilation error: ${compileErr.message}`;
-          throw new Error(errorMsg);
-        }
-        throw compileErr;
-      } finally {
-        restoreLogs();
-      }
-      timing.compile = Date.now() - startTime;
-    }
-    
-    // Save the compiled artifacts
+    // Create target directory for compiled circuits
     const targetDir = path.join(circuitDir, 'target');
     fs.mkdirSync(targetDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(targetDir, 'sparql_proof.json'),
-      JSON.stringify(compiledArtifacts.program || compiledArtifacts, null, 2)
-    );
     
     // Sign or process the RDF data based on mode (use cache if available)
     startTime = Date.now();
@@ -620,7 +566,67 @@ async function runTest(test, testIndex) {
     }
     timing.sign = Date.now() - startTime;
     
-    // Generate proofs or witness only based on CLI option (use quiet mode)
+    // Build list of circuit variants to try (most optionals first, then fewer)
+    // The base circuit has all optionals matched, optional_circuits have fewer
+    const circuitVariants = [];
+    
+    // Base circuit (all optionals matched)
+    circuitVariants.push({
+      sparql_nr: transformResult.sparql_nr,
+      main_nr: transformResult.main_nr,
+      metadata: transformResult.metadata,
+      matched_optionals: Array.from({ length: transformResult.metadata?.num_optionals || 0 }, (_, i) => i),
+    });
+    
+    // Add optional circuits (sorted from most optionals to least)
+    if (transformResult.optional_circuits) {
+      const sortedOptional = [...transformResult.optional_circuits].sort(
+        (a, b) => (b.matched_optionals?.length || 0) - (a.matched_optionals?.length || 0)
+      );
+      for (const oc of sortedOptional) {
+        circuitVariants.push({
+          sparql_nr: oc.sparql_nr,
+          main_nr: transformResult.main_nr, // main.nr is shared
+          metadata: oc.metadata,
+          matched_optionals: oc.matched_optionals,
+        });
+      }
+    }
+    
+    // Helper to compile a circuit variant
+    const compileVariant = async (variant) => {
+      const fm = createFileManager(circuitDir);
+      suppressLogs();
+      try {
+        const compiled = await compile_program(fm, undefined, 
+          (msg) => {}, 
+          (msg) => {}
+        );
+        if (!compiled || (!compiled.program && !compiled.abi)) {
+          return null;
+        }
+        return compiled;
+      } catch {
+        return null;
+      } finally {
+        restoreLogs();
+      }
+    };
+    
+    // Helper to get cached circuit
+    const getCachedVariant = (variant) => {
+      if (noCacheCircuit) return null;
+      return getCachedCircuit(variant.sparql_nr, variant.main_nr, nargoToml);
+    };
+    
+    // Helper to cache circuit
+    const cacheVariant = (variant, compiled) => {
+      if (!noCacheCircuit) {
+        cacheCircuit(variant.sparql_nr, variant.main_nr, nargoToml, compiled.program || compiled);
+      }
+    };
+    
+    // Generate proofs or witness (prove.ts handles variant selection)
     startTime = Date.now();
     let proveResult;
     try {
@@ -631,6 +637,10 @@ async function runTest(test, testIndex) {
         skipSigning,
         maxBindings,
         quiet: true,
+        circuitVariants,
+        compileVariant,
+        getCachedCircuit: getCachedVariant,
+        cacheCircuit: cacheVariant,
       });
       // Collect any errors from the prove result
       if (proveResult.errors && proveResult.errors.length > 0) {

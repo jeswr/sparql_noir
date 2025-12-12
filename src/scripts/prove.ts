@@ -58,6 +58,18 @@ function stringQuadToQuad(sq: { subject: string; predicate: string; object: stri
 
 // --- Exported Types ---
 
+/** A circuit variant for OPTIONAL combinations */
+export interface CircuitVariant {
+  /** The sparql.nr content for this variant */
+  sparql_nr: string;
+  /** The main.nr content (usually shared across variants) */
+  main_nr: string;
+  /** Metadata for this variant */
+  metadata: Record<string, unknown>;
+  /** Which optional block IDs are matched in this variant */
+  matched_optionals: number[];
+}
+
 export interface ProveOptions {
   circuitDir: string;
   signedData: SignedData | null;
@@ -71,6 +83,16 @@ export interface ProveOptions {
   maxBindings?: number | undefined;
   /** If true, suppress console output (errors collected in result) */
   quiet?: boolean | undefined;
+  /** Circuit variants to try (for OPTIONAL handling). If provided, will try each until one succeeds. */
+  circuitVariants?: CircuitVariant[] | undefined;
+  /** Nargo.toml content (required when circuitVariants is provided) */
+  nargoToml?: string | undefined;
+  /** Function to compile a circuit variant. Required when circuitVariants is provided. */
+  compileVariant?: ((variant: CircuitVariant) => Promise<unknown | null>) | undefined;
+  /** Function to cache a compiled circuit. */
+  cacheCircuit?: ((variant: CircuitVariant, compiled: unknown) => void) | undefined;
+  /** Function to get a cached circuit. */
+  getCachedCircuit?: ((variant: CircuitVariant) => unknown | null) | undefined;
 }
 
 export interface ProofOutput {
@@ -543,10 +565,26 @@ export function serializeProof(obj: unknown): unknown {
 // --- Exported Prove Function ---
 
 /**
- * Generate ZK proofs for SPARQL query results
+ * Generate ZK proofs for SPARQL query results.
+ * 
+ * When `circuitVariants` is provided, tries each variant in order until one succeeds
+ * in finding bindings. This supports OPTIONAL patterns where different circuit variants
+ * match different combinations of optional patterns being present/absent.
  */
 export async function generateProofs(options: ProveOptions): Promise<ProveResult> {
-  const { circuitDir, signedData, metadataPath: metaPathOpt, threads = 6, witnessOnly = false, skipSigning = false, quiet = false } = options;
+  const { 
+    circuitDir, 
+    signedData, 
+    metadataPath: metaPathOpt, 
+    threads = 6, 
+    witnessOnly = false, 
+    skipSigning = false, 
+    quiet = false,
+    circuitVariants,
+    compileVariant,
+    getCachedCircuit: getCached,
+    cacheCircuit: cacheCompiled,
+  } = options;
 
   // Collected errors (used in quiet mode)
   const collectedErrors: string[] = [];
@@ -561,7 +599,89 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     }
   };
 
-  // Find compiled circuit JSON
+  // If circuit variants are provided, try each until one succeeds
+  if (circuitVariants && circuitVariants.length > 0) {
+    const circuitSrcDir = path.join(circuitDir, 'src');
+    const targetDir = path.join(circuitDir, 'target');
+    fs.mkdirSync(circuitSrcDir, { recursive: true });
+    fs.mkdirSync(targetDir, { recursive: true });
+
+    let lastError: Error | null = null;
+    
+    for (const variant of circuitVariants) {
+      try {
+        // Write this variant's circuit files
+        fs.writeFileSync(path.join(circuitSrcDir, 'sparql.nr'), variant.sparql_nr);
+        fs.writeFileSync(path.join(circuitSrcDir, 'main.nr'), variant.main_nr);
+        fs.writeFileSync(path.join(circuitDir, 'metadata.json'), JSON.stringify(variant.metadata, null, 2));
+
+        // Get or compile this variant
+        let compiled = getCached ? getCached(variant) : null;
+        
+        if (!compiled && compileVariant) {
+          try {
+            compiled = await compileVariant(variant);
+            if (compiled && cacheCompiled) {
+              cacheCompiled(variant, compiled);
+            }
+          } catch {
+            // Compilation error, try next variant
+            continue;
+          }
+        }
+
+        if (!compiled) {
+          // No way to compile, skip this variant
+          continue;
+        }
+
+        // Save compiled artifacts
+        const compiledArtifacts = (compiled as { program?: unknown }).program || compiled;
+        fs.writeFileSync(
+          path.join(targetDir, 'sparql_proof.json'),
+          JSON.stringify(compiledArtifacts, null, 2)
+        );
+
+        // Try proving with this variant (recursive call without variants)
+        const result = await generateProofs({
+          circuitDir,
+          signedData,
+          metadataPath: path.join(circuitDir, 'metadata.json'),
+          threads,
+          witnessOnly,
+          skipSigning,
+          quiet: true, // Suppress output for variant attempts
+        });
+
+        // Check if we got any successful results
+        const hasResults = (result.proofs && result.proofs.length > 0) ||
+          (result.witnesses && result.witnesses.length > 0) ||
+          (result.metadata && result.metadata.successfulProofs > 0);
+
+        if (hasResults) {
+          // Success! Return the result (add any collected errors)
+          if (result.errors) {
+            collectedErrors.push(...result.errors);
+          }
+          return {
+            ...result,
+            errors: collectedErrors.length > 0 ? collectedErrors : undefined,
+          };
+        } else {
+          // No bindings found, try next variant
+          lastError = new Error('No bindings found for the query.');
+        }
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        // Try next variant
+      }
+    }
+
+    // No variant succeeded
+    throw lastError || new Error('No circuit variant succeeded');
+  }
+
+  // Standard path: single circuit (no variants)
   const targetDir = path.join(circuitDir, 'target');
   if (!fs.existsSync(targetDir)) {
     throw new Error(`Circuit target directory '${targetDir}' does not exist. Run 'nargo compile' first.`);
