@@ -9,7 +9,7 @@
     "build:tsc": "tsc",
     "build:noir": "node dist/scripts/setup.js",
     "build:transform": "cargo build --manifest-path transform/Cargo.toml --release",
-    "build:wasm": "cd transform && wasm-pack build --target nodejs --release",
+    "build:wasm": "cd transform && wasm-pack build --target nodejs --release && mv pkg/transform.js pkg/transform.cjs 2>/dev/null || true",
     "build": "npm run build:tsc && npm run build:noir && npm run build:signature && npm run build:wasm",
     "setup": "node dist/scripts/setup.js",
     "sign": "node dist/scripts/sign.js",

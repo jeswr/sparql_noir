@@ -69,6 +69,8 @@ export interface ProveOptions {
   skipSigning?: boolean | undefined;
   /** Maximum number of bindings to process (undefined = all bindings) */
   maxBindings?: number | undefined;
+  /** If true, suppress console output (errors collected in result) */
+  quiet?: boolean | undefined;
 }
 
 export interface ProofOutput {
@@ -95,6 +97,8 @@ export interface ProveResult {
     circuit: string;
     witnessOnly?: boolean | undefined;
   };
+  /** Errors collected during proof/witness generation (when quiet mode is enabled) */
+  errors?: string[] | undefined;
 }
 
 // --- Internal Type Definitions ---
@@ -542,7 +546,20 @@ export function serializeProof(obj: unknown): unknown {
  * Generate ZK proofs for SPARQL query results
  */
 export async function generateProofs(options: ProveOptions): Promise<ProveResult> {
-  const { circuitDir, signedData, metadataPath: metaPathOpt, threads = 6, witnessOnly = false, skipSigning = false } = options;
+  const { circuitDir, signedData, metadataPath: metaPathOpt, threads = 6, witnessOnly = false, skipSigning = false, quiet = false } = options;
+
+  // Collected errors (used in quiet mode)
+  const collectedErrors: string[] = [];
+
+  // Helper functions for logging (respects quiet mode)
+  const log = (msg: string) => { if (!quiet) console.log(msg); };
+  const warn = (msg: string) => { 
+    if (quiet) {
+      collectedErrors.push(msg);
+    } else {
+      console.warn(msg);
+    }
+  };
 
   // Find compiled circuit JSON
   const targetDir = path.join(circuitDir, 'target');
@@ -556,7 +573,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
   }
   
   const circuitJsonPath = path.join(targetDir, circuitFiles[0]!);
-  console.log(`Loading circuit: ${circuitJsonPath}`);
+  log(`Loading circuit: ${circuitJsonPath}`);
 
   // Load circuit
   const circuit = JSON.parse(fs.readFileSync(circuitJsonPath, 'utf8')) as CompiledCircuit;
@@ -566,9 +583,9 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
   let metadata: CircuitMetadata | undefined;
   if (fs.existsSync(metadataPath)) {
     metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')) as CircuitMetadata;
-    console.log(`Loaded metadata: ${metadataPath}`);
+    log(`Loaded metadata: ${metadataPath}`);
   } else {
-    console.warn(`Warning: No metadata file found at '${metadataPath}'. Using minimal defaults.`);
+    warn(`Warning: No metadata file found at '${metadataPath}'. Using minimal defaults.`);
   }
 
   // For skip-signing mode, we need minimal data structure
@@ -582,7 +599,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
   const stringIndexMap = new Map(stringArr.map((s, i) => [s, i]));
   const store = new Store(quadArr);
 
-  console.log(`Loaded ${quadArr.length} quads from signed data`);
+  log(`Loaded ${quadArr.length} quads from signed data`);
 
   // Function to find triple index
   function findTripleIndex(q: Quad): number {
@@ -619,8 +636,8 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     throw new Error('No input patterns found in metadata.');
   }
 
-  console.log(`Query has ${inputPatterns.length} BGP pattern(s)`);
-  console.log(`Metadata patterns raw: input_patterns=${metadata?.input_patterns?.length || 0}, inputPatterns=${metadata?.inputPatterns?.length || 0}`);
+  log(`Query has ${inputPatterns.length} BGP pattern(s)`);
+  log(`Metadata patterns raw: input_patterns=${metadata?.input_patterns?.length || 0}, inputPatterns=${metadata?.inputPatterns?.length || 0}`);
 
   // Simple binding resolution: find quads that match patterns
   const bindings: Map<string, Term>[] = [];
@@ -655,15 +672,15 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     isPatternVariable(firstPattern.graph) || firstPattern.graph.termType === 'DefaultGraph' ? null : firstPattern.graph
   );
 
-  console.log(`Found ${matchingQuads.length} matching quad(s) for first pattern`);
-  console.log(`First pattern: s=${firstPattern.subject.termType}, p=${firstPattern.predicate.termType}, o=${firstPattern.object.termType}`);
+  log(`Found ${matchingQuads.length} matching quad(s) for first pattern`);
+  log(`First pattern: s=${firstPattern.subject.termType}, p=${firstPattern.predicate.termType}, o=${firstPattern.object.termType}`);
   if (firstPattern.object.termType === 'Literal') {
-    console.log(`  Object value: ${JSON.stringify((firstPattern.object as Literal).value)}`);
-    console.log(`  Object datatype: ${(firstPattern.object as Literal).datatype?.value}`);
+    log(`  Object value: ${JSON.stringify((firstPattern.object as Literal).value)}`);
+    log(`  Object datatype: ${(firstPattern.object as Literal).datatype?.value}`);
   }
   if (patternQuads.length > 1) {
     const secondPattern = patternQuads[1];
-    console.log(`Second pattern: s=${secondPattern?.subject.termType}, p=${secondPattern?.predicate.termType}, o=${secondPattern?.object.termType}`);
+    log(`Second pattern: s=${secondPattern?.subject.termType}, p=${secondPattern?.predicate.termType}, o=${secondPattern?.object.termType}`);
   }
 
   // Helper function to extract binding from a quad given a pattern
@@ -763,7 +780,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     }
 
     bindingsWithQuads = currentBindings;
-    console.log(`After join: ${bindingsWithQuads.length} bindings from ${matchingQuads.length} first pattern matches`);
+    log(`After join: ${bindingsWithQuads.length} bindings from ${matchingQuads.length} first pattern matches`);
   }
 
   // Extract just the bindings for the main loop
@@ -775,7 +792,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     throw new Error('No bindings found for the query.');
   }
 
-  console.log(`Processing ${bindings.length} binding(s)`);
+  log(`Processing ${bindings.length} binding(s)`);
 
   // Initialize Noir and backend (backend only needed if generating proofs)
   const noir = new Noir(circuit);
@@ -887,10 +904,10 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
   let bindingsToProcess = bindingInputs;
   if (maxBindings !== undefined && maxBindings > 0 && bindingInputs.length > maxBindings) {
     bindingsToProcess = bindingInputs.slice(0, maxBindings);
-    console.log(`Limiting to ${maxBindings} binding(s) (${bindingInputs.length} available)`);
+    log(`Limiting to ${maxBindings} binding(s) (${bindingInputs.length} available)`);
   }
 
-  console.log(`\nGenerating witnesses for ${bindingsToProcess.length} binding(s) in parallel...`);
+  log(`\nGenerating witnesses for ${bindingsToProcess.length} binding(s) in parallel...`);
 
   // Generate all witnesses in parallel
   const witnessStartTime = Date.now();
@@ -904,7 +921,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     })
   );
   const witnessEndTime = Date.now();
-  console.log(`  All witnesses generated in ${((witnessEndTime - witnessStartTime) / 1000).toFixed(2)}s`);
+  log(`  All witnesses generated in ${((witnessEndTime - witnessStartTime) / 1000).toFixed(2)}s`);
 
   // Process witness results
   const successfulWitnesses: { bindingIdx: number; witness: Uint8Array; timingMs: number }[] = [];
@@ -922,12 +939,12 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     } else {
       const msg = String(result.reason?.message || result.reason);
       if (!msg.includes('Cannot satisfy constraint') && !msg.includes('Cannot satisfy')) {
-        console.warn(`  Warning: witness generation failed: ${msg}`);
+        warn(`  Warning: witness generation failed: ${msg}`);
       }
     }
   }
 
-  console.log(`  Successfully generated ${successfulWitnesses.length}/${bindingsToProcess.length} witnesses`);
+  log(`  Successfully generated ${successfulWitnesses.length}/${bindingsToProcess.length} witnesses`);
 
   if (successfulWitnesses.length === 0) {
     throw new Error('No witnesses could be generated.');
@@ -935,7 +952,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
 
   // If not witness-only mode, generate proofs in parallel
   if (!witnessOnly && backend) {
-    console.log(`\nGenerating proofs for ${successfulWitnesses.length} witness(es) in parallel...`);
+    log(`\nGenerating proofs for ${successfulWitnesses.length} witness(es) in parallel...`);
     
     const proofStartTime = Date.now();
     const proofResults = await Promise.allSettled(
@@ -947,7 +964,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       })
     );
     const proofEndTime = Date.now();
-    console.log(`  All proofs generated in ${((proofEndTime - proofStartTime) / 1000).toFixed(2)}s`);
+    log(`  All proofs generated in ${((proofEndTime - proofStartTime) / 1000).toFixed(2)}s`);
 
     // Process proof results
     for (const result of proofResults) {
@@ -960,11 +977,11 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
           timingMs: result.value.timingMs,
         });
       } else {
-        console.warn(`  Warning: proof generation failed: ${result.reason?.message || result.reason}`);
+        warn(`  Warning: proof generation failed: ${result.reason?.message || result.reason}`);
       }
     }
 
-    console.log(`  Successfully generated ${proofs.length}/${successfulWitnesses.length} proofs`);
+    log(`  Successfully generated ${proofs.length}/${successfulWitnesses.length} proofs`);
   }
 
   // Cleanup - properly destroy the backend to release worker threads
@@ -978,12 +995,12 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     if (witnesses.length === 0) {
       throw new Error('No witnesses could be generated.');
     }
-    console.log(`\nSuccessfully generated ${witnesses.length} witness(es)`);
+    log(`\nSuccessfully generated ${witnesses.length} witness(es)`);
   } else {
     if (proofs.length === 0) {
       throw new Error('No proofs could be generated.');
     }
-    console.log(`\nSuccessfully generated ${proofs.length} proof(s)`);
+    log(`\nSuccessfully generated ${proofs.length} proof(s)`);
   }
 
   return {
@@ -995,6 +1012,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       circuit: path.basename(circuitDir),
       witnessOnly: witnessOnly || undefined,
     },
+    errors: collectedErrors.length > 0 ? collectedErrors : undefined,
   };
 }
 
