@@ -410,7 +410,8 @@ const evaluationTests = allTestEntries
       // /_:/,  // Explicit blank node syntax - enabled
       // /\[\s*[^\]]*\s*\]/,  // Square bracket blank node syntax [ ... ] - enabled
       // RDF list syntax (1 2 3) generates blank nodes
-      /\(\s*\??\w+(?:\s+\??\w+)*\s*\)/,  // List syntax like (1) or (?v ?w)
+      // Note: Use negative lookbehind to avoid matching FILTER(?v)
+      /(?<!FILTER\s)\(\s*\??\w+(?:\s+\??\w+)+\s*\)/,  // List syntax like (1 2) or (?v ?w) - at least 2 items
       // Special float/double values that Noir doesn't support
       /\bNaN\b/i,
       /\bINF\b/i,
@@ -428,11 +429,11 @@ const evaluationTests = allTestEntries
       /[=<>]\s*\+\d/,      // unary plus: = +3
       /[=<>]\s*-\?/,       // unary minus: = -?var
       /-\?\w+\s*=/,        // unary minus on left: -?var =
-      // Boolean effective value tests - bare variable in FILTER not supported
-      /FILTER\s*\(\s*\?\w+\s*\)/i,         // FILTER(?v)
-      /FILTER\s*\(\s*!\s*\?\w+\s*\)/i,     // FILTER(!?v)
-      /FILTER\s*\(\s*"[^"]*"\^\^[^)]*&&\s*\?\w+\s*\)/i,  // FILTER("..."^^type && ?v)
-      /FILTER\s*\(\s*"[^"]*"\^\^[^)]*\|\|\s*\?\w+\s*\)/i, // FILTER("..."^^type || ?v)
+      // Boolean effective value tests - now supported via ebv library
+      // /FILTER\s*\(\s*\?\w+\s*\)/i,         // FILTER(?v) - NOW SUPPORTED
+      // /FILTER\s*\(\s*!\s*\?\w+\s*\)/i,     // FILTER(!?v) - NOW SUPPORTED
+      /FILTER\s*\(\s*"[^"]*"\^\^[^)]*&&\s*\?\w+\s*\)/i,  // FILTER("..."^^type && ?v) - complex, may need more work
+      /FILTER\s*\(\s*"[^"]*"\^\^[^)]*\|\|\s*\?\w+\s*\)/i, // FILTER("..."^^type || ?v) - complex, may need more work
     ];
 
     for (const pattern of unsupportedPatterns) {

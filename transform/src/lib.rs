@@ -607,6 +607,60 @@ fn filter_to_noir(
             }
         }
 
+        // EBV evaluation for bare variables: FILTER(?x)
+        // This evaluates the Effective Boolean Value of the variable's binding
+        Expression::Variable(v) => {
+            let term = Term::Variable(v.as_str().to_string());
+            let value_idx = push_hidden(hidden, "ebv_value", &term);
+            let datatype_idx = push_hidden(hidden, "ebv_datatype", &term);
+            Ok(format!(
+                "ebv::ebv_unchecked(hidden[{}], hidden[{}])",
+                value_idx, datatype_idx
+            ))
+        }
+
+        // EBV evaluation for bare literals: FILTER("true"^^xsd:boolean)
+        // This evaluates the Effective Boolean Value of the literal
+        Expression::Literal(l) => {
+            let dt = l.datatype().as_str();
+            // Constant fold for boolean literals
+            if dt.ends_with("boolean") {
+                let val = match l.value() {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => return Err(format!("Invalid boolean literal: {}", l.value())),
+                };
+                return Ok(if val { "true" } else { "false" }.into());
+            }
+            // Constant fold for string literals (EBV is true for non-empty strings)
+            if dt.ends_with("string") || dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" {
+                let val = !l.value().is_empty();
+                return Ok(if val { "true" } else { "false" }.into());
+            }
+            // Constant fold for numeric literals
+            if dt.ends_with("integer") || dt.ends_with("decimal") || 
+               dt.ends_with("float") || dt.ends_with("double") ||
+               dt.ends_with("int") || dt.ends_with("long") || dt.ends_with("short") || dt.ends_with("byte") ||
+               dt.ends_with("unsignedInt") || dt.ends_with("unsignedLong") || dt.ends_with("unsignedShort") || dt.ends_with("unsignedByte") ||
+               dt.ends_with("positiveInteger") || dt.ends_with("negativeInteger") ||
+               dt.ends_with("nonPositiveInteger") || dt.ends_with("nonNegativeInteger") {
+                // For numeric types, parse and check if non-zero and non-NaN
+                if let Ok(num) = l.value().parse::<f64>() {
+                    let val = num != 0.0 && !num.is_nan();
+                    return Ok(if val { "true" } else { "false" }.into());
+                }
+            }
+            // For other datatypes, EBV is a type error - but we generate circuit code anyway
+            // that will fail at runtime with a proper assertion
+            let term = Term::Static(GroundTerm::Literal(l.clone()));
+            let value_idx = push_hidden(hidden, "ebv_value", &term);
+            let datatype_idx = push_hidden(hidden, "ebv_datatype", &term);
+            Ok(format!(
+                "ebv::ebv_unchecked(hidden[{}], hidden[{}])",
+                value_idx, datatype_idx
+            ))
+        }
+
         _ => Err(format!("Unsupported filter expression: {:?}", expr)),
     }
 }
@@ -1610,6 +1664,17 @@ fn generate_sparql_nr_from_query_info(
         sparql_nr.push_str("use dep::utils;\n");
         sparql_nr.push_str("use dep::types::Triple;\n");
     }
+    
+    // Check if EBV is used by looking for ebv_value/ebv_datatype in hidden inputs
+    let needs_ebv = hidden.iter().any(|h| {
+        h.get("computedType").and_then(|v| v.as_str())
+            .map(|t| t == "ebv_value" || t == "ebv_datatype")
+            .unwrap_or(false)
+    });
+    if needs_ebv {
+        sparql_nr.push_str("use dep::ebv;\n");
+    }
+    
     sparql_nr.push_str("\n");
     sparql_nr.push_str(&format!(
         "pub(crate) type BGP = [Triple; {}];\n",
@@ -1717,17 +1782,28 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     }
 
     // Nargo.toml - different dependencies when skip_signing is enabled
+    // Check if EBV is used by looking for ebv_value/ebv_datatype in hidden inputs
+    let needs_ebv = base_hidden.iter().any(|h| {
+        h.get("computedType").and_then(|v| v.as_str())
+            .map(|t| t == "ebv_value" || t == "ebv_datatype")
+            .unwrap_or(false)
+    });
+    
     let nargo_toml = if options.skip_signing {
-        r#"[package]
+        let mut toml = r#"[package]
 name = "sparql_proof"
 type = "bin"
 authors = [""]
 
 [dependencies]
 consts = { path = "../noir/lib/consts" }
-"#.to_string()
+"#.to_string();
+        if needs_ebv {
+            toml.push_str("ebv = { path = \"../noir/lib/ebv\" }\n");
+        }
+        toml
     } else {
-        r#"[package]
+        let mut toml = r#"[package]
 name = "sparql_proof"
 type = "bin"
 authors = [""]
@@ -1736,7 +1812,11 @@ authors = [""]
 consts = { path = "../noir/lib/consts" }
 types = { path = "../noir/lib/types" }
 utils = { path = "../noir/lib/utils" }
-"#.to_string()
+"#.to_string();
+        if needs_ebv {
+            toml.push_str("ebv = { path = \"../noir/lib/ebv\" }\n");
+        }
+        toml
     };
 
     // Calculate total patterns including all optionals
