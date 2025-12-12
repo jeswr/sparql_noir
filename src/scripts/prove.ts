@@ -17,6 +17,7 @@ import { Store, DataFactory as DF } from 'n3';
 import { stringQuadToQuad as rdfStringToQuad, termToString } from 'rdf-string-ttl';
 import type { Term, Quad, Literal } from '@rdfjs/types';
 import type { SignedData } from './sign.js';
+import { encodeString, encodeDatatypeIri, encodeNamedNode } from '../encode.js';
 
 // --- Custom stringQuadToQuad that properly handles escape sequences ---
 
@@ -248,6 +249,97 @@ function getTermTypeCodeFromJson(termJson: TermJson): number {
   }
 }
 
+// Helper function to get the special encoding value for EBV evaluation
+// This matches the encoding used in the Noir circuit for EBV
+function getEbvValue(lit: Literal): string {
+  const datatypeIri = lit.datatype?.value || 'http://www.w3.org/2001/XMLSchema#string';
+  
+  // Boolean: 0 for false, 1 for true (raw Field value)
+  if (datatypeIri.endsWith('boolean')) {
+    const val = lit.value.toLowerCase();
+    if (val === 'true' || val === '1') return '1';
+    if (val === 'false' || val === '0') return '0';
+    return '0'; // Invalid boolean defaults to false
+  }
+  
+  // Numeric types: return the numeric value (raw Field value)
+  if (datatypeIri.endsWith('integer') || datatypeIri.endsWith('int') || 
+      datatypeIri.endsWith('long') || datatypeIri.endsWith('short') || datatypeIri.endsWith('byte') ||
+      datatypeIri.endsWith('unsignedInt') || datatypeIri.endsWith('unsignedLong') ||
+      datatypeIri.endsWith('unsignedShort') || datatypeIri.endsWith('unsignedByte') ||
+      datatypeIri.endsWith('positiveInteger') || datatypeIri.endsWith('negativeInteger') ||
+      datatypeIri.endsWith('nonPositiveInteger') || datatypeIri.endsWith('nonNegativeInteger')) {
+    const num = parseInt(lit.value, 10);
+    return Number.isNaN(num) ? '0' : num.toString();
+  }
+  
+  // Float/double: return the numeric value for comparison
+  if (datatypeIri.endsWith('decimal') || datatypeIri.endsWith('float') || datatypeIri.endsWith('double')) {
+    const num = parseFloat(lit.value);
+    if (Number.isNaN(num)) return '0'; // NaN has EBV false
+    // For circuit purposes, the circuit checks if value != 0 for numeric EBV
+    // We return the floor of the absolute value as a simple numeric check
+    // (0 for zero, non-zero otherwise)
+    return num === 0 ? '0' : '1';
+  }
+  
+  // String types: return the encoded string hash
+  // The circuit compares against encode_string("") for empty check
+  if (datatypeIri.endsWith('string') || datatypeIri === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString') {
+    // Encode the string value using the same encoding as the circuit
+    return encodeString(lit.value);
+  }
+  
+  // Other datatypes - return 0 (will cause type error in circuit)
+  return '0';
+}
+
+// Helper function to get EBV value from JSON term representation
+function getEbvValueFromJson(termJson: TermJson): string {
+  const datatypeIri = termJson.datatype?.value || 'http://www.w3.org/2001/XMLSchema#string';
+  const value = termJson.value || '';
+  
+  // Boolean: 0 for false, 1 for true
+  if (datatypeIri.endsWith('boolean')) {
+    const val = value.toLowerCase();
+    if (val === 'true' || val === '1') return '1';
+    if (val === 'false' || val === '0') return '0';
+    return '0';
+  }
+  
+  // Numeric types
+  if (datatypeIri.endsWith('integer') || datatypeIri.endsWith('int') || 
+      datatypeIri.endsWith('long') || datatypeIri.endsWith('short') || datatypeIri.endsWith('byte') ||
+      datatypeIri.endsWith('unsignedInt') || datatypeIri.endsWith('unsignedLong') ||
+      datatypeIri.endsWith('unsignedShort') || datatypeIri.endsWith('unsignedByte') ||
+      datatypeIri.endsWith('positiveInteger') || datatypeIri.endsWith('negativeInteger') ||
+      datatypeIri.endsWith('nonPositiveInteger') || datatypeIri.endsWith('nonNegativeInteger')) {
+    const num = parseInt(value, 10);
+    return Number.isNaN(num) ? '0' : num.toString();
+  }
+  
+  if (datatypeIri.endsWith('decimal') || datatypeIri.endsWith('float') || datatypeIri.endsWith('double')) {
+    const num = parseFloat(value);
+    if (Number.isNaN(num)) return '0';
+    return num === 0 ? '0' : '1';
+  }
+  
+  // String types: encode the string hash (matches circuit)
+  if (datatypeIri.endsWith('string') || datatypeIri === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString') {
+    return encodeString(value);
+  }
+  
+  return '0';
+}
+
+// Helper function to encode datatype IRI for EBV evaluation
+// This should match the encoding used in the Noir ebv library:
+// consts::hash2([0, utils::encode_string(iri)])
+function encodeEbvDatatype(datatypeIri: string): string {
+  // Encode as a NamedNode: hash2([0, encode_string(iri)])
+  return encodeNamedNode(datatypeIri);
+}
+
 // Helper function to compute hidden input values based on metadata
 function computeHiddenInputs(
   hiddenInputs: HiddenInput[],
@@ -399,13 +491,15 @@ function computeHiddenInputs(
           console.warn(`Variable ${varName} not found in binding for hidden lang input`);
           return null;
         }
-        // Get the language tag (empty string if none)
+        // Get the language tag (empty string if none) and encode it
         const langTag = boundTerm.termType === 'Literal' ? ((boundTerm as Literal).language || '') : '';
-        hiddenValues.push(langTag);
+        const encodedLang = encodeString(langTag);
+        hiddenValues.push(encodedLang);
       } else if (input.type === 'static') {
         const termJson = input.value as TermJson;
         const langTag = termJson?.language || '';
-        hiddenValues.push(langTag);
+        const encodedLang = encodeString(langTag);
+        hiddenValues.push(encodedLang);
       } else {
         console.warn(`Unknown hidden input type for lang: ${input.type}`);
         return null;
@@ -425,12 +519,14 @@ function computeHiddenInputs(
           console.warn(`Variable ${varName} not found in binding for hidden str input`);
           return null;
         }
-        // STR returns the lexical form for literals, the IRI for named nodes
+        // STR returns the lexical form for literals, the IRI for named nodes, encoded
         const strValue = boundTerm.value;
-        hiddenValues.push(strValue);
+        const encodedStr = encodeString(strValue);
+        hiddenValues.push(encodedStr);
       } else if (input.type === 'static') {
         const termJson = input.value as TermJson;
-        hiddenValues.push(termJson?.value || '');
+        const encodedStr = encodeString(termJson?.value || '');
+        hiddenValues.push(encodedStr);
       } else {
         console.warn(`Unknown hidden input type for str: ${input.type}`);
         return null;
@@ -454,16 +550,90 @@ function computeHiddenInputs(
           console.warn(`Variable ${varName} is not a literal for DATATYPE`);
           return null;
         }
-        // Get the datatype IRI
+        // Get the datatype IRI and encode it
         const lit = boundTerm as Literal;
         const datatypeIri = lit.datatype?.value || 'http://www.w3.org/2001/XMLSchema#string';
-        hiddenValues.push(datatypeIri);
+        const encodedDatatype = encodeString(datatypeIri);
+        hiddenValues.push(encodedDatatype);
       } else if (input.type === 'static') {
         const termJson = input.value as TermJson;
         const datatypeIri = termJson?.datatype?.value || 'http://www.w3.org/2001/XMLSchema#string';
-        hiddenValues.push(datatypeIri);
+        const encodedDatatype = encodeString(datatypeIri);
+        hiddenValues.push(encodedDatatype);
       } else {
         console.warn(`Unknown hidden input type for datatype: ${input.type}`);
+        return null;
+      }
+    } else if (hidden.type === 'customComputed' && hidden.computedType === 'ebv_value') {
+      // Handle EBV value extraction - get the special encoding value for a literal
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      if (!input) {
+        console.warn('Hidden input missing input field for ebv_value');
+        return null;
+      }
+
+      if (input.type === 'variable') {
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for hidden ebv_value input`);
+          return null;
+        }
+        if (boundTerm.termType !== 'Literal') {
+          console.warn(`Variable ${varName} is not a literal for EBV`);
+          return null;
+        }
+        // Get the special encoding value for EBV evaluation
+        const lit = boundTerm as Literal;
+        const ebvValue = getEbvValue(lit);
+        hiddenValues.push(ebvValue);
+      } else if (input.type === 'static') {
+        const termJson = input.value as TermJson;
+        if (!termJson || termJson.termType !== 'Literal') {
+          console.warn('Static hidden input is not a literal for ebv_value');
+          return null;
+        }
+        const ebvValue = getEbvValueFromJson(termJson);
+        hiddenValues.push(ebvValue);
+      } else {
+        console.warn(`Unknown hidden input type for ebv_value: ${input.type}`);
+        return null;
+      }
+    } else if (hidden.type === 'customComputed' && hidden.computedType === 'ebv_datatype') {
+      // Handle EBV datatype extraction - get the encoded datatype IRI
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      if (!input) {
+        console.warn('Hidden input missing input field for ebv_datatype');
+        return null;
+      }
+
+      if (input.type === 'variable') {
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for hidden ebv_datatype input`);
+          return null;
+        }
+        if (boundTerm.termType !== 'Literal') {
+          console.warn(`Variable ${varName} is not a literal for EBV datatype`);
+          return null;
+        }
+        // Get the encoded datatype for EBV evaluation
+        const lit = boundTerm as Literal;
+        const datatypeIri = lit.datatype?.value || 'http://www.w3.org/2001/XMLSchema#string';
+        const encodedDatatype = encodeEbvDatatype(datatypeIri);
+        hiddenValues.push(encodedDatatype);
+      } else if (input.type === 'static') {
+        const termJson = input.value as TermJson;
+        if (!termJson || termJson.termType !== 'Literal') {
+          console.warn('Static hidden input is not a literal for ebv_datatype');
+          return null;
+        }
+        const datatypeIri = termJson.datatype?.value || 'http://www.w3.org/2001/XMLSchema#string';
+        const encodedDatatype = encodeEbvDatatype(datatypeIri);
+        hiddenValues.push(encodedDatatype);
+      } else {
+        console.warn(`Unknown hidden input type for ebv_datatype: ${input.type}`);
         return null;
       }
     } else if (hidden.type === 'variable') {

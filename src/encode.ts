@@ -112,3 +112,38 @@ export function getTermField(term: Term[]): string[] {
 export function getTermEncodings(term: Term[]): BigInt[] {
   return getTermEncodingsStrings(term).map((triple: string) => BigInt(triple));
 }
+
+// Encode a single string using utils::encode_string
+export function encodeString(str: string): string {
+  const escaped = str.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+  return run(`utils::encode_string("${escaped}")`).replaceAll('"', '');
+}
+
+// Batch encode multiple strings
+export function encodeStrings(strs: string[]): string[] {
+  if (strs.length === 0) return [];
+  const noirExprs = strs.map(s => {
+    const escaped = s.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+    return `utils::encode_string("${escaped}")`;
+  });
+  return runJson(`[${noirExprs.join(', ')}]`);
+}
+
+// Encode a datatype IRI as a NamedNode: hash2([0, encode_string(iri)])
+export function encodeDatatypeIri(iri: string): string {
+  const escaped = iri.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+  return run(`consts::hash2([0, utils::encode_string("${escaped}")])`).replaceAll('"', '');
+}
+
+// Alias for encoding any NamedNode (same as encodeDatatypeIri)
+export const encodeNamedNode = encodeDatatypeIri;
+
+// Batch encode multiple datatype IRIs
+export function encodeDatatypeIris(iris: string[]): string[] {
+  if (iris.length === 0) return [];
+  const noirExprs = iris.map(iri => {
+    const escaped = iri.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+    return `consts::hash2([0, utils::encode_string("${escaped}")])`;
+  });
+  return runJson(`[${noirExprs.join(', ')}]`);
+}
