@@ -18,6 +18,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const MAIN_TEMPLATE: &str = include_str!("../template/main-verify.template.nr");
 const MAIN_TEMPLATE_SIMPLE: &str = include_str!("../template/main-simple.template.nr");
 
+// Global counter for unique optional block IDs
+static OPTIONAL_BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn next_optional_id() -> usize {
+    OPTIONAL_BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
+
+fn reset_optional_counter() {
+    OPTIONAL_BLOCK_COUNTER.store(0, Ordering::SeqCst);
+}
+
 // =============================================================================
 // DATA TYPES
 // =============================================================================
@@ -52,13 +63,33 @@ pub struct ContextualizedTriple {
     graph: GraphContext,
 }
 
+/// Represents an OPTIONAL block with its patterns, bindings, assertions, and filters
+#[derive(Clone, Debug)]
+pub struct OptionalBlock {
+    /// Unique identifier for this optional block
+    pub id: usize,
+    /// Patterns in this optional block
+    pub patterns: Vec<ContextualizedTriple>,
+    /// Bindings in this optional block  
+    pub bindings: Vec<Binding>,
+    /// Assertions in this optional block
+    pub assertions: Vec<Assertion>,
+    /// Filters that apply when this optional is matched
+    pub filters: Vec<Expression>,
+    /// Nested optional blocks within this one
+    pub nested_optionals: Vec<OptionalBlock>,
+}
+
 #[derive(Clone, Debug)]
 pub struct PatternInfo {
+    /// Required patterns (always present)
     patterns: Vec<ContextualizedTriple>,
     bindings: Vec<Binding>,
     assertions: Vec<Assertion>,
     filters: Vec<Expression>,
     union_branches: Option<Vec<PatternInfo>>,
+    /// Optional blocks that may or may not be matched
+    optional_blocks: Vec<OptionalBlock>,
 }
 
 impl PatternInfo {
@@ -69,6 +100,7 @@ impl PatternInfo {
             assertions: Vec::new(),
             filters: Vec::new(),
             union_branches: None,
+            optional_blocks: Vec::new(),
         }
     }
 }
@@ -89,6 +121,21 @@ pub struct TransformResult {
     pub sparql_nr: String,
     pub main_nr: String,
     pub nargo_toml: String,
+    pub metadata: serde_json::Value,
+    /// Additional circuits for OPTIONAL combinations (if any)
+    /// Each entry represents a different combination of optional patterns being matched
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub optional_circuits: Vec<OptionalCircuit>,
+}
+
+/// A circuit variant for a specific OPTIONAL combination
+#[derive(serde::Serialize, Clone)]
+pub struct OptionalCircuit {
+    /// Which optional block IDs are matched in this variant
+    pub matched_optionals: Vec<usize>,
+    /// The sparql.nr content for this variant
+    pub sparql_nr: String,
+    /// Metadata for this variant
     pub metadata: serde_json::Value,
 }
 
@@ -990,6 +1037,31 @@ fn expand_path(
     }
 }
 
+/// Helper to adjust input indices in an optional block by an offset
+fn adjust_optional_block_indices(block: &mut OptionalBlock, offset: usize) {
+    // Adjust bindings
+    for binding in &mut block.bindings {
+        if let Term::Input(i, j) = &binding.term {
+            binding.term = Term::Input(*i + offset, *j);
+        }
+    }
+    
+    // Adjust assertions
+    for assertion in &mut block.assertions {
+        if let Term::Input(i, j) = &assertion.0 {
+            assertion.0 = Term::Input(*i + offset, *j);
+        }
+        if let Term::Input(i, j) = &assertion.1 {
+            assertion.1 = Term::Input(*i + offset, *j);
+        }
+    }
+    
+    // Recursively adjust nested optionals
+    for nested in &mut block.nested_optionals {
+        adjust_optional_block_indices(nested, offset);
+    }
+}
+
 fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
     match gp {
         GraphPattern::Bgp { patterns } => process_patterns(patterns),
@@ -1041,6 +1113,13 @@ fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
                 merged.union_branches = left_info.union_branches.or(right_info.union_branches);
             }
             
+            // Merge optional blocks, adjusting indices for the right side's blocks
+            merged.optional_blocks.extend(left_info.optional_blocks);
+            for mut opt_block in right_info.optional_blocks {
+                adjust_optional_block_indices(&mut opt_block, offset);
+                merged.optional_blocks.push(opt_block);
+            }
+            
             Ok(merged)
         }
 
@@ -1066,56 +1145,68 @@ fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
         }
 
         GraphPattern::LeftJoin { left, right, expression } => {
-            // Process both left (required) and right (optional) sides
-            let left_info = process_graph_pattern(left)?;
+            // Process the left (required) side
+            let mut left_info = process_graph_pattern(left)?;
+            // Process the right (optional) side
             let right_info = process_graph_pattern(right)?;
             
-            // For now, treat OPTIONAL as UNION of (left alone) and (left + right)
-            // This is a simplification but allows basic OPTIONAL queries to work
+            // Calculate the offset for adjusting input indices in the optional block
+            let offset = left_info.patterns.len();
             
-            // Branch 1: Just the left side (when optional doesn't match)
-            let branch1 = left_info.clone();
+            // Create an OptionalBlock for the right side
+            let optional_id = next_optional_id();
             
-            // Branch 2: Left + right together (when optional matches)
-            let mut branch2 = PatternInfo {
-                patterns: Vec::new(),
-                bindings: Vec::new(),
-                assertions: Vec::new(),
-                filters: Vec::new(),
-                union_branches: None,
-            };
+            // Adjust input indices in the right side's bindings and assertions
+            let adjusted_bindings: Vec<Binding> = right_info.bindings.into_iter().map(|b| {
+                Binding {
+                    variable: b.variable,
+                    term: match b.term {
+                        Term::Input(i, j) => Term::Input(i + offset, j),
+                        other => other,
+                    },
+                }
+            }).collect();
             
-            // Merge patterns from both sides
-            branch2.patterns.extend(left_info.patterns.clone());
-            branch2.patterns.extend(right_info.patterns);
+            let adjusted_assertions: Vec<Assertion> = right_info.assertions.into_iter().map(|a| {
+                let adj_l = match a.0 {
+                    Term::Input(i, j) => Term::Input(i + offset, j),
+                    other => other,
+                };
+                let adj_r = match a.1 {
+                    Term::Input(i, j) => Term::Input(i + offset, j),
+                    other => other,
+                };
+                Assertion(adj_l, adj_r)
+            }).collect();
             
-            // Merge bindings and assertions
-            branch2.bindings.extend(left_info.bindings.clone());
-            branch2.bindings.extend(right_info.bindings);
-            branch2.assertions.extend(left_info.assertions.clone());
-            branch2.assertions.extend(right_info.assertions);
-            
-            // Add filter expression if present
+            // Include the optional filter expression if present
+            let mut optional_filters = right_info.filters;
             if let Some(expr) = expression {
-                branch2.filters.push(expr.clone());
+                optional_filters.push(expr.clone());
             }
-            branch2.filters.extend(left_info.filters.clone());
-            branch2.filters.extend(right_info.filters);
             
-            // Return as a UNION of the two branches
-            let patterns = if branch1.patterns.len() >= branch2.patterns.len() {
-                branch1.patterns.clone()
-            } else {
-                branch2.patterns.clone()
+            // Adjust nested optional blocks from the right side
+            let adjusted_nested = right_info.optional_blocks.into_iter().map(|mut ob| {
+                adjust_optional_block_indices(&mut ob, offset);
+                ob
+            }).collect();
+            
+            let optional_block = OptionalBlock {
+                id: optional_id,
+                patterns: right_info.patterns,
+                bindings: adjusted_bindings,
+                assertions: adjusted_assertions,
+                filters: optional_filters,
+                nested_optionals: adjusted_nested,
             };
             
-            Ok(PatternInfo {
-                patterns,
-                bindings: Vec::new(),
-                assertions: Vec::new(),
-                filters: Vec::new(),
-                union_branches: Some(vec![branch1, branch2]),
-            })
+            // Add the optional block to the left side's info
+            left_info.optional_blocks.push(optional_block);
+            
+            // Also inherit any optional blocks from the left side
+            // (they're already at the right indices)
+            
+            Ok(left_info)
         }
 
         GraphPattern::Union { left, right } => {
@@ -1148,6 +1239,7 @@ fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
                 assertions: Vec::new(),
                 filters: Vec::new(),
                 union_branches: Some(branches),
+                optional_blocks: Vec::new(),
             })
         }
 
@@ -1340,32 +1432,102 @@ pub struct TransformOptions {
     pub skip_signing: bool,
 }
 
-/// Transform a SPARQL query into Noir circuit files.
-/// 
-/// Returns a TransformResult containing:
-/// - sparql_nr: The query-specific constraint checking code
-/// - main_nr: The circuit entry point
-/// - nargo_toml: The Nargo package manifest
-/// - metadata: JSON metadata about the query patterns
-pub fn transform_query(query_str: &str) -> Result<TransformResult, String> {
-    transform_query_with_options(query_str, TransformOptions::default())
+/// Recursively collect all optional blocks from a pattern, flattening nested optionals.
+fn collect_all_optional_blocks(optionals: &[OptionalBlock]) -> Vec<OptionalBlock> {
+    let mut result = Vec::new();
+    for opt in optionals {
+        // Add this optional
+        result.push(OptionalBlock {
+            id: opt.id,
+            patterns: opt.patterns.clone(),
+            bindings: opt.bindings.clone(),
+            assertions: opt.assertions.clone(),
+            filters: opt.filters.clone(),
+            nested_optionals: Vec::new(), // Flatten - don't recurse into children here
+        });
+        // Recursively collect nested optionals
+        result.extend(collect_all_optional_blocks(&opt.nested_optionals));
+    }
+    result
 }
 
-/// Transform a SPARQL query into Noir circuit files with options.
-pub fn transform_query_with_options(query_str: &str, options: TransformOptions) -> Result<TransformResult, String> {
-    let query = SparqlParser::new()
-        .parse_query(query_str)
-        .map_err(|e| format!("Parse error: {}", e))?;
-
-    let root = match &query {
-        Query::Select { pattern, .. }
-        | Query::Construct { pattern, .. }
-        | Query::Describe { pattern, .. }
-        | Query::Ask { pattern, .. } => pattern,
+/// Generate the sparql.nr content for a specific optional combination.
+/// 
+/// This creates a synthetic QueryInfo with the base patterns plus the matched optional patterns,
+/// then uses the same code path as the main transform to generate the circuit.
+fn generate_circuit_for_optional_combination(
+    base_info: &QueryInfo,
+    all_optionals: &[OptionalBlock],
+    matched_indices: &[usize],
+    options: &TransformOptions,
+) -> Result<(String, Vec<serde_json::Value>, bool), String> {
+    // Build a combined PatternInfo with base + matched optional patterns
+    let mut combined = PatternInfo {
+        patterns: base_info.pattern.patterns.clone(),
+        bindings: base_info.pattern.bindings.clone(),
+        assertions: base_info.pattern.assertions.clone(),
+        filters: base_info.pattern.filters.clone(),
+        union_branches: base_info.pattern.union_branches.clone(),
+        optional_blocks: Vec::new(), // Flatten - no nested optionals in the combined version
     };
+    
+    // Collect variables that only appear in unmatched optionals
+    let mut optional_only_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (idx, opt) in all_optionals.iter().enumerate() {
+        if !matched_indices.contains(&idx) {
+            // This optional is not matched - collect its variables
+            for b in &opt.bindings {
+                optional_only_vars.insert(b.variable.clone());
+            }
+        }
+    }
+    
+    // Remove variables that appear in base patterns
+    for b in &base_info.pattern.bindings {
+        optional_only_vars.remove(&b.variable);
+    }
+    // Remove variables that appear in matched optionals
+    for &idx in matched_indices {
+        if idx < all_optionals.len() {
+            let opt = &all_optionals[idx];
+            for b in &opt.bindings {
+                optional_only_vars.remove(&b.variable);
+            }
+        }
+    }
+    
+    for &idx in matched_indices {
+        if idx < all_optionals.len() {
+            let opt = &all_optionals[idx];
+            combined.patterns.extend(opt.patterns.clone());
+            combined.bindings.extend(opt.bindings.clone());
+            combined.assertions.extend(opt.assertions.clone());
+            combined.filters.extend(opt.filters.clone());
+        }
+    }
+    
+    // Filter out variables that only appear in unmatched optionals
+    let filtered_variables: Vec<String> = base_info.variables.iter()
+        .filter(|v| !optional_only_vars.contains(*v))
+        .cloned()
+        .collect();
+    
+    // Create a synthetic QueryInfo for this combination
+    let combo_info = QueryInfo {
+        variables: filtered_variables,
+        pattern: combined,
+    };
+    
+    // Use the same circuit generation logic as the main transform
+    generate_sparql_nr_from_query_info(&combo_info, options)
+}
 
-    let info = process_query(root)?;
-
+/// Generate sparql.nr content from a QueryInfo.
+/// This is the core circuit generation logic, extracted to be reusable.
+fn generate_sparql_nr_from_query_info(
+    info: &QueryInfo,
+    options: &TransformOptions,
+) -> Result<(String, Vec<serde_json::Value>, bool), String> {
     // Build bindings map for non-projected variables
     let mut binding_map: BTreeMap<String, Term> = BTreeMap::new();
     for b in &info.pattern.bindings {
@@ -1394,21 +1556,21 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
                 let left = Term::Variable(b.variable.clone());
                 branch_asserts.push(format!(
                     "{} == {}",
-                    serialize_term(&left, &info, &branch_bindings),
-                    serialize_term(&b.term, &info, &branch_bindings)
+                    serialize_term(&left, info, &branch_bindings),
+                    serialize_term(&b.term, info, &branch_bindings)
                 ));
             }
 
             for Assertion(l, r) in &branch.assertions {
                 branch_asserts.push(format!(
                     "{} == {}",
-                    serialize_term(l, &info, &branch_bindings),
-                    serialize_term(r, &info, &branch_bindings)
+                    serialize_term(l, info, &branch_bindings),
+                    serialize_term(r, info, &branch_bindings)
                 ));
             }
 
             for f in &branch.filters {
-                let expr = filter_to_noir(f, &info, &branch_bindings, &mut hidden)?;
+                let expr = filter_to_noir(f, info, &branch_bindings, &mut hidden)?;
                 branch_asserts.push(expr);
             }
 
@@ -1419,21 +1581,21 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
             let left = Term::Variable(b.variable.clone());
             assertions.push(format!(
                 "{} == {}",
-                serialize_term(&left, &info, &binding_map),
-                serialize_term(&b.term, &info, &binding_map)
+                serialize_term(&left, info, &binding_map),
+                serialize_term(&b.term, info, &binding_map)
             ));
         }
 
         for Assertion(l, r) in &info.pattern.assertions {
             assertions.push(format!(
                 "{} == {}",
-                serialize_term(l, &info, &binding_map),
-                serialize_term(r, &info, &binding_map)
+                serialize_term(l, info, &binding_map),
+                serialize_term(r, info, &binding_map)
             ));
         }
 
         for f in &info.pattern.filters {
-            let expr = filter_to_noir(f, &info, &binding_map, &mut hidden)?;
+            let expr = filter_to_noir(f, info, &binding_map, &mut hidden)?;
             assertions.push(expr);
         }
     }
@@ -1443,8 +1605,6 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     sparql_nr.push_str("// Generated by sparql_noir transform\n");
     sparql_nr.push_str("use dep::consts;\n");
     if options.skip_signing {
-        // In skip-signing mode, Triple is defined in main.nr, import from parent
-        // Also use consts::encode_string directly since utils isn't included
         sparql_nr.push_str("use super::Triple;\n");
     } else {
         sparql_nr.push_str("use dep::utils;\n");
@@ -1496,8 +1656,52 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     }
     sparql_nr.push_str("}\n");
 
+    Ok((sparql_nr, hidden, has_hidden))
+}
+
+/// Transform a SPARQL query into Noir circuit files.
+/// 
+/// Returns a TransformResult containing:
+/// - sparql_nr: The query-specific constraint checking code
+/// - main_nr: The circuit entry point
+/// - nargo_toml: The Nargo package manifest
+/// - metadata: JSON metadata about the query patterns
+pub fn transform_query(query_str: &str) -> Result<TransformResult, String> {
+    transform_query_with_options(query_str, TransformOptions::default())
+}
+
+/// Transform a SPARQL query into Noir circuit files with options.
+pub fn transform_query_with_options(query_str: &str, options: TransformOptions) -> Result<TransformResult, String> {
+    // Reset the optional block counter for each new query
+    reset_optional_counter();
+    
+    let query = SparqlParser::new()
+        .parse_query(query_str)
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    let root = match &query {
+        Query::Select { pattern, .. }
+        | Query::Construct { pattern, .. }
+        | Query::Describe { pattern, .. }
+        | Query::Ask { pattern, .. } => pattern,
+    };
+
+    let info = process_query(root)?;
+
+    // Collect all optional blocks (flatten nested optionals for now)
+    let all_optionals = collect_all_optional_blocks(&info.pattern.optional_blocks);
+    let num_optionals = all_optionals.len();
+    
+    // Generate the base circuit (no optionals or all optionals matched based on strategy)
+    // We'll generate the "all optionals matched" case as the primary circuit
+    let (base_sparql_nr, base_hidden, has_hidden) = generate_circuit_for_optional_combination(
+        &info,
+        &all_optionals,
+        &(0..num_optionals).collect::<Vec<_>>(), // All optionals matched
+        &options,
+    )?;
+
     // Generate main.nr from embedded template
-    // Use simple template (no signature/merkle) when skip_signing is enabled
     let template = if options.skip_signing { MAIN_TEMPLATE_SIMPLE } else { MAIN_TEMPLATE };
     let mut main_nr = template.to_string();
     if has_hidden {
@@ -1535,29 +1739,123 @@ utils = { path = "../noir/lib/utils" }
 "#.to_string()
     };
 
-    // Metadata
+    // Calculate total patterns including all optionals
+    let total_patterns: usize = info.pattern.patterns.len() 
+        + all_optionals.iter().map(|o| o.patterns.len()).sum::<usize>();
+
+    // Metadata for the base circuit
+    let mut all_patterns: Vec<serde_json::Value> = info.pattern.patterns.iter()
+        .map(contextualized_pattern_to_json)
+        .collect();
+    for opt in &all_optionals {
+        all_patterns.extend(opt.patterns.iter().map(contextualized_pattern_to_json));
+    }
+
     let metadata = serde_json::json!({
         "variables": info.variables,
         "skip_signing": options.skip_signing,
-        "inputPatterns": info.pattern.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>(),
-        "optionalPatterns": [],
+        "inputPatterns": all_patterns,
+        "optionalPatterns": all_optionals.iter().map(|o| {
+            serde_json::json!({
+                "id": o.id,
+                "patterns": o.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>()
+            })
+        }).collect::<Vec<_>>(),
         "unionBranches": info.pattern.union_branches.as_ref().map(|bs| {
             bs.iter().map(|b| b.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>()).collect::<Vec<_>>()
         }).unwrap_or_default(),
-        "hiddenInputs": hidden,
-        "input_patterns": info.pattern.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>(),
-        "optional_patterns": [],
+        "hiddenInputs": base_hidden.clone(),
+        "input_patterns": all_patterns,
+        "optional_patterns": all_optionals.iter().map(|o| {
+            serde_json::json!({
+                "id": o.id,
+                "patterns": o.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>()
+            })
+        }).collect::<Vec<_>>(),
         "union_branches": info.pattern.union_branches.as_ref().map(|bs| {
             bs.iter().map(|b| b.patterns.iter().map(contextualized_pattern_to_json).collect::<Vec<_>>()).collect::<Vec<_>>()
         }).unwrap_or_default(),
-        "hidden_inputs": hidden,
+        "hidden_inputs": base_hidden.clone(),
+        "num_optionals": num_optionals,
+        "total_patterns": total_patterns,
     });
 
+    // Generate additional circuits for other optional combinations (if any optionals exist)
+    let mut optional_circuits = Vec::new();
+    
+    if num_optionals > 0 {
+        // Generate circuits for all 2^n combinations except the "all matched" case
+        // (which is the base circuit)
+        let num_combinations = 1 << num_optionals; // 2^n
+        
+        for combo in 0..(num_combinations - 1) {
+            // combo represents which optionals are matched (as a bit mask)
+            let matched_indices: Vec<usize> = (0..num_optionals)
+                .filter(|i| (combo >> i) & 1 == 1)
+                .collect();
+            
+            let (circuit_sparql_nr, circuit_hidden, _) = generate_circuit_for_optional_combination(
+                &info,
+                &all_optionals,
+                &matched_indices,
+                &options,
+            )?;
+            
+            // Compute filtered variables for this combination
+            // Variables that only appear in unmatched optionals should be excluded
+            let mut optional_only_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (idx, opt) in all_optionals.iter().enumerate() {
+                if !matched_indices.contains(&idx) {
+                    for b in &opt.bindings {
+                        optional_only_vars.insert(b.variable.clone());
+                    }
+                }
+            }
+            for b in &info.pattern.bindings {
+                optional_only_vars.remove(&b.variable);
+            }
+            for &idx in &matched_indices {
+                if idx < all_optionals.len() {
+                    for b in &all_optionals[idx].bindings {
+                        optional_only_vars.remove(&b.variable);
+                    }
+                }
+            }
+            let combo_variables: Vec<String> = info.variables.iter()
+                .filter(|v| !optional_only_vars.contains(*v))
+                .cloned()
+                .collect();
+            
+            // Calculate patterns for this combination
+            let mut combo_patterns: Vec<serde_json::Value> = info.pattern.patterns.iter()
+                .map(contextualized_pattern_to_json)
+                .collect();
+            for idx in &matched_indices {
+                combo_patterns.extend(all_optionals[*idx].patterns.iter().map(contextualized_pattern_to_json));
+            }
+            
+            let circuit_metadata = serde_json::json!({
+                "variables": combo_variables,
+                "skip_signing": options.skip_signing,
+                "inputPatterns": combo_patterns,
+                "matchedOptionals": matched_indices,
+                "hiddenInputs": circuit_hidden,
+            });
+            
+            optional_circuits.push(OptionalCircuit {
+                matched_optionals: matched_indices,
+                sparql_nr: circuit_sparql_nr,
+                metadata: circuit_metadata,
+            });
+        }
+    }
+
     Ok(TransformResult {
-        sparql_nr,
+        sparql_nr: base_sparql_nr,
         main_nr,
         nargo_toml,
         metadata,
+        optional_circuits,
     })
 }
 
