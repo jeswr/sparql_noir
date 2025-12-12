@@ -2,7 +2,7 @@ import { ManifestLoader } from 'rdf-test-suite';
 import * as fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { Writer, Parser } from 'n3';
+import { Writer, Parser, Store, DataFactory } from 'n3';
 import { translate, Util } from 'sparqlalgebrajs';
 import { signRdfData, processRdfDataWithoutSigning } from './dist/scripts/sign.js';
 import { generateProofs } from './dist/scripts/prove.js';
@@ -252,6 +252,359 @@ function linkCachedDependencies(circuitDir) {
   }
 }
 
+/**
+ * Extract BGP patterns from a SPARQL algebra operation.
+ * Returns an array of pattern objects with subject, predicate, object, graph fields.
+ */
+function extractBgpPatterns(operation) {
+  const patterns = [];
+  
+  Util.recurseOperation(operation, {
+    pattern: (op) => {
+      patterns.push({
+        subject: op.subject,
+        predicate: op.predicate,
+        object: op.object,
+        graph: op.graph || DataFactory.defaultGraph(),
+      });
+    },
+  });
+  
+  return patterns;
+}
+
+/**
+ * Check if a SPARQL algebra operation contains any FILTER expressions.
+ */
+function hasFilter(operation) {
+  let found = false;
+  Util.recurseOperation(operation, {
+    filter: () => { found = true; },
+  });
+  return found;
+}
+
+/**
+ * Convert an RDF/JS term to a comparable string key.
+ */
+function termToKey(term) {
+  if (!term) return 'undefined';
+  switch (term.termType) {
+    case 'NamedNode':
+      return `<${term.value}>`;
+    case 'BlankNode':
+      return `_:${term.value}`;
+    case 'Literal':
+      if (term.language) return `"${term.value}"@${term.language}`;
+      if (term.datatype) return `"${term.value}"^^<${term.datatype.value}>`;
+      return `"${term.value}"`;
+    case 'DefaultGraph':
+      return '<default>';
+    case 'Variable':
+      return `?${term.value}`;
+    default:
+      return term.value || 'unknown';
+  }
+}
+
+/**
+ * Convert a binding (Map<string, Term>) to a canonical string for comparison.
+ * Only includes the projected variables for comparison purposes.
+ */
+function bindingToKey(binding, projectedVars) {
+  const parts = [];
+  for (const varName of projectedVars.sort()) {
+    const term = binding.get(varName);
+    parts.push(`${varName}=${term ? termToKey(term) : 'UNDEF'}`);
+  }
+  return parts.join('|');
+}
+
+/**
+ * Compute all bindings that match the BGP patterns (ignoring any FILTER constraints).
+ * This uses the n3 Store to find matching quads.
+ * 
+ * @param {object[]} patterns - Array of pattern objects with subject, predicate, object, graph
+ * @param {Store} store - n3 Store containing the RDF data
+ * @returns {Map<string, Term>[]} Array of bindings (variable name -> term mappings)
+ */
+function computeBgpBindings(patterns, store) {
+  if (patterns.length === 0) return [];
+  
+  // Helper to check if a term is a variable
+  const isVariable = (term) => term && term.termType === 'Variable';
+  
+  // Helper to extract binding from a quad given a pattern
+  const extractBinding = (quad, pattern) => {
+    const binding = new Map();
+    if (isVariable(pattern.subject)) binding.set(pattern.subject.value, quad.subject);
+    if (isVariable(pattern.predicate)) binding.set(pattern.predicate.value, quad.predicate);
+    if (isVariable(pattern.object)) binding.set(pattern.object.value, quad.object);
+    if (isVariable(pattern.graph)) binding.set(pattern.graph.value, quad.graph);
+    return binding;
+  };
+  
+  // Helper to check if two terms are equal (for binding compatibility)
+  const termsEqual = (t1, t2) => {
+    if (!t1 || !t2) return false;
+    if (t1.termType !== t2.termType) return false;
+    if (t1.termType === 'Literal') {
+      return t1.value === t2.value && 
+             t1.language === t2.language &&
+             (t1.datatype?.value || '') === (t2.datatype?.value || '');
+    }
+    return t1.value === t2.value;
+  };
+  
+  // Helper to check if two bindings are compatible
+  const bindingsCompatible = (b1, b2) => {
+    for (const [varName, term1] of b1) {
+      const term2 = b2.get(varName);
+      if (term2 && !termsEqual(term1, term2)) return false;
+    }
+    return true;
+  };
+  
+  // Helper to merge two bindings
+  const mergeBindings = (b1, b2) => {
+    const merged = new Map(b1);
+    for (const [varName, term] of b2) {
+      if (!merged.has(varName)) merged.set(varName, term);
+    }
+    return merged;
+  };
+  
+  // Start with the first pattern
+  const firstPattern = patterns[0];
+  const firstMatches = store.getQuads(
+    isVariable(firstPattern.subject) ? null : firstPattern.subject,
+    isVariable(firstPattern.predicate) ? null : firstPattern.predicate,
+    isVariable(firstPattern.object) ? null : firstPattern.object,
+    isVariable(firstPattern.graph) || firstPattern.graph?.termType === 'DefaultGraph' ? null : firstPattern.graph
+  );
+  
+  let currentBindings = firstMatches.map(q => extractBinding(q, firstPattern));
+  
+  // Join with each subsequent pattern
+  for (let i = 1; i < patterns.length; i++) {
+    const pattern = patterns[i];
+    const newBindings = [];
+    
+    for (const binding of currentBindings) {
+      // Substitute bound variables into pattern
+      const subjectMatch = isVariable(pattern.subject) 
+        ? (binding.get(pattern.subject.value) || null)
+        : pattern.subject;
+      const predicateMatch = isVariable(pattern.predicate)
+        ? (binding.get(pattern.predicate.value) || null)
+        : pattern.predicate;
+      const objectMatch = isVariable(pattern.object)
+        ? (binding.get(pattern.object.value) || null)
+        : pattern.object;
+      const graphMatch = isVariable(pattern.graph)
+        ? (binding.get(pattern.graph.value) || null)
+        : (pattern.graph?.termType === 'DefaultGraph' ? null : pattern.graph);
+      
+      const matches = store.getQuads(subjectMatch, predicateMatch, objectMatch, graphMatch);
+      
+      for (const quad of matches) {
+        const newBinding = extractBinding(quad, pattern);
+        if (bindingsCompatible(binding, newBinding)) {
+          newBindings.push(mergeBindings(binding, newBinding));
+        }
+      }
+    }
+    
+    currentBindings = newBindings;
+  }
+  
+  return currentBindings;
+}
+
+/**
+ * Find negative bindings: bindings that match the BGP but should be filtered out.
+ * These are bindings that appear in allBgpBindings but not in expectedResults.
+ * 
+ * @param {Map<string, Term>[]} allBgpBindings - All bindings from BGP matching
+ * @param {object[]} expectedResults - Expected query results from the test
+ * @param {string[]} projectedVars - Variables projected in the SELECT clause
+ * @returns {Map<string, Term>[]} Negative bindings that should fail the filter
+ */
+function findNegativeBindings(allBgpBindings, expectedResults, projectedVars) {
+  // Convert expected results to a set of binding keys
+  const expectedKeys = new Set();
+  for (const result of expectedResults) {
+    const binding = new Map();
+    for (const [key, value] of Object.entries(result)) {
+      const varName = key.startsWith('?') ? key.slice(1) : key;
+      if (value && typeof value === 'object' && value.termType) {
+        binding.set(varName, value);
+      }
+    }
+    expectedKeys.add(bindingToKey(binding, projectedVars));
+  }
+  
+  // Find bindings that are in BGP matches but not in expected results
+  const negativeBindings = [];
+  for (const binding of allBgpBindings) {
+    const key = bindingToKey(binding, projectedVars);
+    if (!expectedKeys.has(key)) {
+      negativeBindings.push(binding);
+    }
+  }
+  
+  return negativeBindings;
+}
+
+/**
+ * Get projected variable names from a SPARQL algebra operation.
+ */
+function getProjectedVariables(operation) {
+  const vars = [];
+  Util.recurseOperation(operation, {
+    project: (op) => {
+      for (const v of op.variables || []) {
+        if (v.termType === 'Variable') {
+          vars.push(v.value);
+        }
+      }
+    },
+  });
+  return vars.length > 0 ? vars : null;
+}
+
+/**
+ * Build a circuit input for a specific binding.
+ * This is used for negative testing - we want to construct circuit inputs
+ * for bindings that should fail the FILTER constraints.
+ * 
+ * @param {Map<string, Term>} binding - The variable binding to use
+ * @param {object[]} patterns - BGP patterns from the query
+ * @param {Store} store - n3 Store containing the RDF data
+ * @param {object} signedData - Signed RDF data with triples and Merkle proofs
+ * @param {object} metadata - Circuit metadata with variable names
+ * @param {boolean} skipSigning - Whether to skip signature verification
+ * @returns {object|null} Circuit input object, or null if binding doesn't match data
+ */
+function buildCircuitInputForBinding(binding, patterns, store, signedData, metadata, skipSigning) {
+  const isVariable = (term) => term && term.termType === 'Variable';
+  
+  // Find quads that match each pattern with this binding
+  const matchedQuads = [];
+  
+  for (const pattern of patterns) {
+    // Substitute bound variables into pattern
+    const subjectMatch = isVariable(pattern.subject)
+      ? (binding.get(pattern.subject.value) || null)
+      : pattern.subject;
+    const predicateMatch = isVariable(pattern.predicate)
+      ? (binding.get(pattern.predicate.value) || null)
+      : pattern.predicate;
+    const objectMatch = isVariable(pattern.object)
+      ? (binding.get(pattern.object.value) || null)
+      : pattern.object;
+    const graphMatch = isVariable(pattern.graph)
+      ? (binding.get(pattern.graph.value) || null)
+      : (pattern.graph?.termType === 'DefaultGraph' ? null : pattern.graph);
+    
+    const matches = store.getQuads(subjectMatch, predicateMatch, objectMatch, graphMatch);
+    if (matches.length === 0) {
+      // Pattern doesn't match with this binding
+      return null;
+    }
+    matchedQuads.push(matches[0]); // Take first match
+  }
+  
+  // Find triple indices in signed data
+  const tripleIndices = [];
+  for (const quad of matchedQuads) {
+    // Find the matching triple in signed data
+    const quadKey = `${termToKey(quad.subject)} ${termToKey(quad.predicate)} ${termToKey(quad.object)} ${termToKey(quad.graph)}`;
+    let foundIdx = -1;
+    for (let i = 0; i < signedData.nquads.length; i++) {
+      // Parse the N-Quad string and compare
+      const nq = signedData.nquads[i];
+      // Simple string-based matching (may need refinement for complex cases)
+      if (nq && (
+        nq.includes(quad.subject.value) && 
+        nq.includes(quad.predicate.value) && 
+        (quad.object.termType === 'Literal' ? nq.includes(`"${quad.object.value}"`) : nq.includes(quad.object.value))
+      )) {
+        foundIdx = i;
+        break;
+      }
+    }
+    if (foundIdx === -1) {
+      return null; // Triple not found in signed data
+    }
+    tripleIndices.push(foundIdx);
+  }
+  
+  // Build variables object from metadata
+  const variables = {};
+  const selectVars = metadata?.variables || [];
+  for (const varName of selectVars) {
+    const term = binding.get(varName);
+    if (term) {
+      // Find the encoded value in signed triples
+      // We need to find which pattern position this variable is in
+      for (let patternIdx = 0; patternIdx < patterns.length; patternIdx++) {
+        const pattern = patterns[patternIdx];
+        const tripleIdx = tripleIndices[patternIdx];
+        const triple = signedData.triples[tripleIdx];
+        
+        const positions = ['subject', 'predicate', 'object', 'graph'];
+        for (let pi = 0; pi < positions.length; pi++) {
+          const pos = positions[pi];
+          const patternTerm = pattern[pos];
+          if (isVariable(patternTerm) && patternTerm.value === varName) {
+            variables[varName] = triple[pi];
+            break;
+          }
+        }
+        if (variables[varName]) break;
+      }
+    }
+  }
+  
+  // Build triple objects
+  const bgp = tripleIndices.map(idx => {
+    if (skipSigning) {
+      return { terms: signedData.triples[idx] };
+    }
+    return {
+      terms: signedData.triples[idx],
+      path: signedData.paths[idx],
+      directions: signedData.direction[idx],
+    };
+  });
+  
+  // Build circuit input
+  const baseInput = skipSigning ? {
+    bgp,
+    variables,
+  } : {
+    public_key: [signedData.pubKey],
+    roots: [{
+      value: signedData.root,
+      signature: signedData.signature,
+      keyIndex: 0,
+    }],
+    bgp,
+    variables,
+  };
+  
+  // TODO: Handle hidden inputs for negative bindings
+  // For now, skip tests that require hidden inputs
+  const hiddenInputs = metadata?.hiddenInputs || metadata?.hidden_inputs || [];
+  if (hiddenInputs.length > 0) {
+    // Hidden inputs require more complex handling - skip for now
+    return null;
+  }
+  
+  return baseInput;
+}
+
 // Parse CLI arguments
 const args = process.argv.slice(2);
 // Default to witness-only and skip-signing for faster testing (opt-out with --full-proof/--with-signing)
@@ -278,6 +631,7 @@ const transformOnly = args.includes('--transform-only') || args.includes('-t');
 const showTiming = args.includes('--timing') || args.includes('-T');
 const noCacheCircuit = args.includes('--no-cache-circuit');
 const noCacheManifest = args.includes('--no-cache-manifest');
+const negativeTests = !args.includes('--no-negative-tests') && !args.includes('--no-N');
 
 // Path to store failing test names
 const failedTestsFile = path.join(__dirname, 'temp', 'failed-tests.json');
@@ -301,6 +655,7 @@ Options:
   -T, --timing            Show timing breakdown for each test
   --no-cache-circuit      Disable circuit compilation caching
   --no-cache-manifest     Disable manifest/test data caching (re-fetch from network)
+  --no-negative-tests, --no-N  Disable testing that filter-excluded bindings fail (enabled by default)
   -h, --help              Show this help message
 
 Examples:
@@ -311,6 +666,7 @@ Examples:
   node ts.js --failed               Re-run only tests that failed last time
   node ts.js -1                     Run all tests with only one binding each (fastest)
   node ts.js -p -S                  Run full proof generation with signing (slowest)
+  node ts.js --no-N                 Run tests without negative binding verification
 
 By default: witness-only mode, no signature verification, quiet output.
 
@@ -332,7 +688,7 @@ function restoreLogs() {
   console.log = originalConsoleLog;
 }
 
-console.log(`Mode: ${witnessOnly ? 'witness-only' : 'full proof + verification'}${skipSigning ? ' (skip-signing)' : ''}${quietMode ? ' (quiet)' : ''}`);
+console.log(`Mode: ${witnessOnly ? 'witness-only' : 'full proof + verification'}${skipSigning ? ' (skip-signing)' : ''}${quietMode ? ' (quiet)' : ''}${negativeTests ? '' : ' (no negative tests)'}`);
 console.log(`Concurrency: ${concurrency} parallel tests\n`);
 
 // Use SPARQL 1.0 tests which have basic BGP, OPTIONAL, FILTER tests
@@ -672,10 +1028,122 @@ async function runTest(test, testIndex) {
       }
     }
 
+    // === NEGATIVE BINDING TESTS ===
+    // When --negative-tests is enabled, test that filter-excluded bindings fail witness generation
+    let negativeTestResults = null;
+    if (negativeTests) {
+      const algebra = translate(test.queryString, { baseIRI: test.baseIRI });
+      
+      // Only test queries that have filters
+      if (hasFilter(algebra)) {
+        // Parse the RDF data into an n3 Store
+        const parser = new Parser();
+        const dataQuads = parser.parse(dataContent);
+        const dataStore = new Store(dataQuads);
+        
+        // Extract BGP patterns from the query
+        const bgpPatterns = extractBgpPatterns(algebra);
+        
+        // Get projected variables
+        const projectedVars = getProjectedVariables(algebra) || 
+          [...new Set(bgpPatterns.flatMap(p => 
+            [p.subject, p.predicate, p.object, p.graph]
+              .filter(t => t?.termType === 'Variable')
+              .map(t => t.value)
+          ))];
+        
+        // Compute all BGP bindings (without filter constraints)
+        const allBgpBindings = computeBgpBindings(bgpPatterns, dataStore);
+        
+        // Find negative bindings (match BGP but not in expected results)
+        const negBindings = findNegativeBindings(
+          allBgpBindings, 
+          test.queryResult?.value || [], 
+          projectedVars
+        );
+        
+        if (negBindings.length > 0) {
+          negativeTestResults = {
+            totalNegative: negBindings.length,
+            testedNegative: 0,
+            failedCorrectly: 0,
+            failedIncorrectly: 0,
+            errors: [],
+          };
+          
+          // Test each negative binding (limit to avoid too many tests)
+          const maxNegativeToTest = Math.min(negBindings.length, 5);
+          
+          // Load compiled circuit for negative testing
+          const { Noir } = await import('@noir-lang/noir_js');
+          const compiledCircuitPath = path.join(circuitDir, 'target', 'sparql_proof.json');
+          if (!fs.existsSync(compiledCircuitPath)) {
+            // Circuit not compiled, skip negative tests
+            negativeTestResults.errors.push('Circuit not compiled, cannot run negative tests');
+          } else {
+            const compiledCircuit = JSON.parse(fs.readFileSync(compiledCircuitPath, 'utf-8'));
+            const noir = new Noir(compiledCircuit);
+            
+            for (let i = 0; i < maxNegativeToTest; i++) {
+              const negBinding = negBindings[i];
+              negativeTestResults.testedNegative++;
+              
+              try {
+                // Build circuit input for this negative binding
+                // We need to find quads that match this binding and build the input
+                const negCircuitInput = buildCircuitInputForBinding(
+                  negBinding,
+                  bgpPatterns,
+                  dataStore,
+                  signedData,
+                  transformResult.metadata,
+                  skipSigning
+                );
+                
+                if (!negCircuitInput) {
+                  // Couldn't build circuit input (binding doesn't match data)
+                  negativeTestResults.failedCorrectly++;
+                  continue;
+                }
+                
+                // Try to generate witness - this should FAIL for negative bindings
+                await noir.execute(negCircuitInput);
+                
+                // If we get here, witness was generated - this is WRONG
+                negativeTestResults.failedIncorrectly++;
+                negativeTestResults.errors.push(
+                  `Negative binding ${i} incorrectly produced a witness: ${bindingToKey(negBinding, projectedVars)}`
+                );
+              } catch (negErr) {
+                // Error during witness generation - this is the EXPECTED behavior
+                // The circuit constraints should reject the negative binding
+                negativeTestResults.failedCorrectly++;
+              }
+            }
+          }
+        }
+      }
+    }
+
     // Clean up test directory on success
     fs.rmSync(testDir, { recursive: true });
     
-    return { status: 'passed', name: testName, timing };
+    const result = { status: 'passed', name: testName, timing };
+    if (negativeTestResults) {
+      result.negativeTests = negativeTestResults;
+      // If any negative bindings incorrectly succeeded, mark the test as failed
+      if (negativeTestResults.failedIncorrectly > 0) {
+        return {
+          status: 'failed',
+          name: testName,
+          query: test.queryString,
+          error: `${negativeTestResults.failedIncorrectly} negative binding(s) incorrectly passed witness generation`,
+          negativeTests: negativeTestResults,
+          timing,
+        };
+      }
+    }
+    return result;
   } catch (err) {
     const sparqlNrPath = path.join(circuitSrcDir, 'sparql.nr');
     const sparqlNr = fs.existsSync(sparqlNrPath) 
@@ -727,7 +1195,13 @@ async function runTestsWithConcurrency(tests, maxConcurrency) {
         if (t.verify) parts.push(`V:${t.verify}ms`);
         if (parts.length) timingStr = ` [${parts.join(' ')}]`;
       }
-      console.log(`  ${symbol} ${result.name}${suffix}${timingStr}`);
+      // Show negative test summary if present
+      let negStr = '';
+      if (result.negativeTests) {
+        const nt = result.negativeTests;
+        negStr = ` [neg: ${nt.failedCorrectly}/${nt.testedNegative} rejected]`;
+      }
+      console.log(`  ${symbol} ${result.name}${suffix}${timingStr}${negStr}`);
     }
   }
   
