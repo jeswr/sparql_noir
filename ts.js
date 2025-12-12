@@ -2,12 +2,14 @@ import { ManifestLoader } from 'rdf-test-suite';
 import * as fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { Writer } from 'n3';
+import { Writer, Parser } from 'n3';
 import { translate, Util } from 'sparqlalgebrajs';
 import { signRdfData, processRdfDataWithoutSigning } from './dist/scripts/sign.js';
 import { generateProofs } from './dist/scripts/prove.js';
 import { verifyProofs } from './dist/scripts/verify.js';
-import { transform as wasmTransform, transform_with_options as wasmTransformWithOptions } from './transform/pkg/transform.js';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { transform: wasmTransform, transform_with_options: wasmTransformWithOptions } = require('./transform/pkg/transform.cjs');
 import { compile_program, createFileManager } from '@noir-lang/noir_wasm';
 import os from 'os';
 
@@ -23,6 +25,9 @@ const signedDataCacheDir = path.join(__dirname, 'temp', 'signed-cache');
 
 // Cache directory for compiled circuits
 const circuitCacheDir = path.join(__dirname, 'temp', 'circuit-cache');
+
+// Cache directory for manifest/test data
+const manifestCacheDir = path.join(__dirname, 'temp', 'manifest-cache');
 
 /**
  * Get a cache key for the data content (MD5 hash of content + signing mode)
@@ -90,6 +95,113 @@ function cacheCircuit(sparqlNr, mainNr, nargoToml, compiled) {
   const cacheKey = getCircuitCacheKey(sparqlNr, mainNr, nargoToml);
   const cachePath = path.join(circuitCacheDir, cacheKey);
   fs.writeFileSync(cachePath, JSON.stringify(compiled));
+}
+
+/**
+ * Get cache key for manifest URL
+ */
+function getManifestCacheKey(manifestUrl) {
+  const hash = crypto.createHash('md5').update(manifestUrl).digest('hex');
+  return `manifest-${hash}.json`;
+}
+
+/**
+ * Serialize test entry for caching (extract serializable data)
+ */
+function serializeTestEntry(test) {
+  const writer = new Writer({ format: 'Turtle' });
+  return {
+    name: test.name,
+    uri: test.uri,
+    types: test.types,
+    approval: test.approval,
+    queryString: test.queryString,
+    baseIRI: test.baseIRI,
+    queryDataSerialized: writer.quadsToString(test.queryData || []),
+    queryResultValue: test.queryResult?.value || [],
+  };
+}
+
+/**
+ * Deserialize test entry from cache
+ */
+function deserializeTestEntry(cached) {
+  // Parse the serialized turtle back to quads
+  const parser = new Parser();
+  let queryData = [];
+  try {
+    queryData = parser.parse(cached.queryDataSerialized || '');
+  } catch (e) {
+    // If parsing fails, use empty array
+  }
+  
+  return {
+    name: cached.name,
+    uri: cached.uri,
+    types: cached.types,
+    approval: cached.approval,
+    queryString: cached.queryString,
+    baseIRI: cached.baseIRI,
+    queryData,
+    queryResult: { value: cached.queryResultValue || [] },
+  };
+}
+
+/**
+ * Try to get manifest tests from cache
+ */
+function getCachedManifest(manifestUrl) {
+  const cacheKey = getManifestCacheKey(manifestUrl);
+  const cachePath = path.join(manifestCacheDir, cacheKey);
+  if (fs.existsSync(cachePath)) {
+    try {
+      const cached = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+      console.log(`Loading ${cached.length} tests from manifest cache`);
+      return cached.map(deserializeTestEntry);
+    } catch (e) {
+      console.log('Manifest cache corrupted, will re-fetch');
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Save manifest tests to cache
+ */
+function cacheManifest(manifestUrl, testEntries) {
+  fs.mkdirSync(manifestCacheDir, { recursive: true });
+  const cacheKey = getManifestCacheKey(manifestUrl);
+  const cachePath = path.join(manifestCacheDir, cacheKey);
+  const serialized = testEntries.map(serializeTestEntry);
+  fs.writeFileSync(cachePath, JSON.stringify(serialized));
+  console.log(`Cached ${testEntries.length} tests from manifest`);
+}
+
+/**
+ * Load manifest tests, using cache if available
+ */
+async function loadManifestWithCache(manifestUrl, skipCache = false) {
+  // Try cache first (unless disabled)
+  if (!skipCache) {
+    const cached = getCachedManifest(manifestUrl);
+    if (cached) {
+      return cached;
+    }
+  }
+  
+  // Fetch from network
+  console.log('Fetching manifest from network...');
+  const loader = new ManifestLoader();
+  const tests = await loader.from(manifestUrl);
+  const testEntries = tests.subManifests.flatMap(test => test.testEntries);
+  
+  // Cache for next run (unless disabled)
+  if (!skipCache) {
+    cacheManifest(manifestUrl, testEntries);
+  }
+  
+  return testEntries;
 }
 
 /**
@@ -165,6 +277,7 @@ const maxBindings = singleBinding ? 1 : (maxBindingsArg ? parseInt(maxBindingsAr
 const transformOnly = args.includes('--transform-only') || args.includes('-t');
 const showTiming = args.includes('--timing') || args.includes('-T');
 const noCacheCircuit = args.includes('--no-cache-circuit');
+const noCacheManifest = args.includes('--no-cache-manifest');
 
 // Path to store failing test names
 const failedTestsFile = path.join(__dirname, 'temp', 'failed-tests.json');
@@ -187,6 +300,7 @@ Options:
   -t, --transform-only    Only test SPARQL->Noir transform, skip compile/prove (fastest)
   -T, --timing            Show timing breakdown for each test
   --no-cache-circuit      Disable circuit compilation caching
+  --no-cache-manifest     Disable manifest/test data caching (re-fetch from network)
   -h, --help              Show this help message
 
 Examples:
@@ -200,6 +314,7 @@ Examples:
 
 By default: witness-only mode, no signature verification, quiet output.
 
+Manifest and test data are cached in temp/manifest-cache/ after first fetch.
 Noir dependencies are cached in temp/noir-cache/ and shared across all tests
 via symlinks to avoid re-downloading for each test compilation.
 `);
@@ -220,11 +335,10 @@ function restoreLogs() {
 console.log(`Mode: ${witnessOnly ? 'witness-only' : 'full proof + verification'}${skipSigning ? ' (skip-signing)' : ''}${quietMode ? ' (quiet)' : ''}`);
 console.log(`Concurrency: ${concurrency} parallel tests\n`);
 
-const loader = new ManifestLoader();
-
 // Use SPARQL 1.0 tests which have basic BGP, OPTIONAL, FILTER tests
-const tests = await loader.from("https://w3c.github.io/rdf-tests/sparql/sparql10/manifest.ttl");
-const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
+const manifestUrl = "https://w3c.github.io/rdf-tests/sparql/sparql10/manifest.ttl";
+const allTestEntries = await loadManifestWithCache(manifestUrl, noCacheManifest);
+const evaluationTests = allTestEntries
   .filter(test => {
     if (
       !test.types.includes('http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#QueryEvaluationTest') ||
@@ -276,7 +390,7 @@ const evaluationTests = tests.subManifests.flatMap(test => test.testEntries)
       /\bTZ\s*\(/i,
       /\bMD5\s*\(/i,
       /\bSHA1\s*\(/i,
-      /\bSHA256\s*\(/i,
+      // /\bSHA256\s*\(/i,
       /\bSHA384\s*\(/i,
       /\bSHA512\s*\(/i,
       /\bCOALESCE\s*\(/i,
@@ -386,6 +500,7 @@ async function runTest(test, testIndex) {
   const writer = new Writer({ format: 'Turtle' });
   const dataContent = writer.quadsToString(test.queryData);
   const timing = { transform: 0, compile: 0, sign: 0, prove: 0, verify: 0 };
+  let proveErrors = []; // Errors collected from proof generation (quiet mode)
   
   // Skip tests with empty data
   if (!dataContent || dataContent.trim() === '') {
@@ -446,13 +561,35 @@ async function runTest(test, testIndex) {
     } else {
       // Compile the circuit using WASM (suppress noisy console output)
       const fm = createFileManager(circuitDir);
+      const compileErrors = [];
       suppressLogs();
       try {
-        compiledArtifacts = await compile_program(fm, undefined, () => {}, () => {});
+        compiledArtifacts = await compile_program(fm, undefined, 
+          (msg) => {}, // info callback - ignore
+          (msg) => { compileErrors.push(msg); } // error callback - collect
+        );
+        
+        // Check if compilation returned valid artifacts
+        if (!compiledArtifacts || (!compiledArtifacts.program && !compiledArtifacts.abi)) {
+          const errorMsg = compileErrors.length > 0 
+            ? `Circuit compilation failed: ${compileErrors.join('; ')}`
+            : 'Circuit compilation failed: no artifacts produced';
+          throw new Error(errorMsg);
+        }
+        
         // Cache the compilation result
         if (!noCacheCircuit) {
           cacheCircuit(transformResult.sparql_nr, transformResult.main_nr, nargoToml, compiledArtifacts.program || compiledArtifacts);
         }
+      } catch (compileErr) {
+        // Re-throw with more context if it's a compilation error
+        if (compileErr.message && !compileErr.message.startsWith('Circuit compilation')) {
+          const errorMsg = compileErrors.length > 0
+            ? `Circuit compilation error: ${compileErr.message}; Details: ${compileErrors.join('; ')}`
+            : `Circuit compilation error: ${compileErr.message}`;
+          throw new Error(errorMsg);
+        }
+        throw compileErr;
       } finally {
         restoreLogs();
       }
@@ -483,9 +620,8 @@ async function runTest(test, testIndex) {
     }
     timing.sign = Date.now() - startTime;
     
-    // Generate proofs or witness only based on CLI option (suppress verbose output)
+    // Generate proofs or witness only based on CLI option (use quiet mode)
     startTime = Date.now();
-    suppressLogs();
     let proveResult;
     try {
       proveResult = await generateProofs({
@@ -494,9 +630,14 @@ async function runTest(test, testIndex) {
         witnessOnly,
         skipSigning,
         maxBindings,
+        quiet: true,
       });
-    } finally {
-      restoreLogs();
+      // Collect any errors from the prove result
+      if (proveResult.errors && proveResult.errors.length > 0) {
+        proveErrors = proveResult.errors;
+      }
+    } catch (err) {
+      throw err;
     }
     timing.prove = Date.now() - startTime;
     
@@ -540,6 +681,7 @@ async function runTest(test, testIndex) {
       error: err.message,
       sparqlNr,
       timing,
+      proveErrors: proveErrors.length > 0 ? proveErrors : undefined,
     };
   }
 }
@@ -662,6 +804,9 @@ for (const result of testResults) {
 fs.mkdirSync(path.dirname(failedTestsFile), { recursive: true });
 fs.writeFileSync(failedTestsFile, JSON.stringify(failedTestNames, null, 2));
 
+// Path for detailed error log
+const errorLogFile = path.join(__dirname, 'temp', 'error-log.txt');
+
 // Print summary
 console.log('\n' + '─'.repeat(60));
 console.log('\nTest Results:');
@@ -670,20 +815,34 @@ console.log(`  ${results.failed} failed`);
 console.log(`  ${results.skipped} skipped`);
 console.log(`  ${testsToRun.length} run (${evaluationTests.length} total available)\n`);
 
-// Print failure details
+// Write failure details to error log file
 if (results.failures.length > 0) {
-  console.log('─'.repeat(60));
-  console.log('\nFailure Details:\n');
+  const errorLogLines = [];
+  errorLogLines.push(`Test Run: ${new Date().toISOString()}`);
+  errorLogLines.push(`Mode: ${witnessOnly ? 'witness-only' : 'full proof'}${skipSigning ? ' (skip-signing)' : ''}`);
+  errorLogLines.push('─'.repeat(60));
+  errorLogLines.push('');
   
   for (const failure of results.failures) {
-    console.log(`✗ ${failure.name}`);
-    console.log(`  Error: ${failure.error}`);
-    console.log(`  Query:\n    ${failure.query.split('\n').join('\n    ')}`);
+    errorLogLines.push(`✗ ${failure.name}`);
+    errorLogLines.push(`  Error: ${failure.error}`);
+    errorLogLines.push(`  Query:`);
+    errorLogLines.push(`    ${failure.query.split('\n').join('\n    ')}`);
     if (failure.sparqlNr) {
-      console.log(`  Generated sparql.nr:\n    ${failure.sparqlNr.split('\n').join('\n    ')}`);
+      errorLogLines.push(`  Generated sparql.nr:`);
+      errorLogLines.push(`    ${failure.sparqlNr.split('\n').join('\n    ')}`);
     }
-    console.log('');
+    if (failure.proveErrors && failure.proveErrors.length > 0) {
+      errorLogLines.push(`  Proof generation warnings:`);
+      for (const proveErr of failure.proveErrors) {
+        errorLogLines.push(`    ${proveErr}`);
+      }
+    }
+    errorLogLines.push('');
   }
+  
+  fs.writeFileSync(errorLogFile, errorLogLines.join('\n'));
+  console.log(`Error details written to: ${errorLogFile}\n`);
 }
 
 // Exit with error code if any tests failed
