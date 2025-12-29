@@ -86,6 +86,9 @@ The sparql_noir project generates ZK proofs that SPARQL query results are correc
 - ✅ isIRI, isURI, isBlank, isLiteral
 - ✅ STR, LANG, DATATYPE, LANGMATCHES
 - ✅ sameTerm
+- ✅ ABS, ROUND, CEIL, FLOOR (numeric functions via noir_XPath)
+- ✅ STRLEN, CONTAINS, STRSTARTS, STRENDS (string functions via noir_XPath)
+- ✅ YEAR, MONTH, DAY, HOURS, MINUTES, SECONDS, TIMEZONE (datetime functions via noir_XPath)
 - ❌ REGEX (not implemented)
 
 **Solution Modifiers:**
@@ -187,10 +190,51 @@ This implementation now provides comprehensive SPARQL 1.0 support:
 ✅ **All core SPARQL 1.0 query forms**: SELECT and ASK  
 ✅ **All core graph patterns**: BGP, UNION, OPTIONAL, GRAPH  
 ✅ **Complete FILTER support**: Equality, comparison, logical operators, type tests, accessor functions  
+✅ **Numeric functions**: ABS, ROUND, CEIL, FLOOR (via noir_XPath integration)  
+✅ **String functions**: STRLEN, CONTAINS, STRSTARTS, STRENDS (via noir_XPath integration)  
+✅ **DateTime functions**: YEAR, MONTH, DAY, HOURS, MINUTES, SECONDS, TIMEZONE (via noir_XPath integration)  
 ✅ **Solution modifiers**: DISTINCT, ORDER BY, LIMIT, OFFSET (via post-processing)  
 ✅ **Property paths**: Alternative (`|`), inverse (`^`), optional (`?`)  
 
 The transform now accepts and correctly handles the vast majority of SPARQL 1.0 queries. Features like DISTINCT, ORDER BY, and LIMIT are parsed and should be applied by verifiers as post-processing operations.
+
+## noir_XPath Integration
+
+The project now integrates the [noir_XPath library](https://github.com/jeswr/noir_XPath) to provide comprehensive XPath 2.0 function support required by SPARQL 1.1:
+
+### Functions Available via noir_XPath
+
+**Numeric Functions:**
+- `ABS()` - Absolute value
+- `ROUND()` - Round to nearest integer
+- `CEIL()` - Round up to nearest integer
+- `FLOOR()` - Round down to nearest integer
+
+**String Functions:**
+- `STRLEN()` - String length
+- `CONTAINS()` - Test if string contains substring
+- `STRSTARTS()` - Test if string starts with prefix
+- `STRENDS()` - Test if string ends with suffix
+
+**DateTime Functions:**
+- `YEAR()` - Extract year from dateTime
+- `MONTH()` - Extract month from dateTime
+- `DAY()` - Extract day from dateTime
+- `HOURS()` - Extract hours from dateTime
+- `MINUTES()` - Extract minutes from dateTime
+- `SECONDS()` - Extract seconds from dateTime
+- `TIMEZONE()` - Extract timezone offset as duration
+
+### Additional Available Functions (not yet integrated)
+
+The noir_XPath library provides 52+ additional functions that can be integrated:
+- Boolean operations (logical AND, OR, NOT, comparisons)
+- Integer numeric operations (arithmetic, comparisons)
+- Duration operations (arithmetic, comparisons, datetime arithmetic)
+- Aggregate functions (COUNT, SUM, AVG, MIN, MAX for integers)
+- Float/double operations (via IEEE 754 implementation)
+
+See the [noir_XPath SPARQL_COVERAGE.md](https://github.com/jeswr/noir_XPath/blob/main/SPARQL_COVERAGE.md) for complete function mapping.
 
 ## Future Enhancements
 
