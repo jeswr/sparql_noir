@@ -10,7 +10,8 @@ import { verifyProofs } from './dist/scripts/verify.js';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { transform: wasmTransform, transform_with_options: wasmTransformWithOptions } = require('./transform/pkg/transform.cjs');
-import { compile_program, createFileManager } from '@noir-lang/noir_wasm';
+import noir_wasm from '@noir-lang/noir_wasm';
+const { compile_program, createFileManager } = noir_wasm;
 import os from 'os';
 
 const __dirname = new URL('.', import.meta.url).pathname;
