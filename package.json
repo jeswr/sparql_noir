@@ -1,9 +1,27 @@
 {
-  "name": "ts",
-  "version": "1.0.0",
-  "main": "index.js",
+  "name": "@jeswr/sparql-noir",
+  "version": "0.0.0-development",
+  "description": "Zero-knowledge proofs for SPARQL query results over signed RDF datasets",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "noir",
+    "transform",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "prepare": "npm run build:tsc",
     "postinstall": "node scripts/postinstall.js",
     "build:signature": "cd noir/bin/signature && nargo build",
     "build:tsc": "tsc",
@@ -44,12 +62,29 @@
     "benchmark:all": "npx tsx src/scripts/benchmarks/noir-benchmark.ts benchmark",
     "benchmark:list": "npx tsx src/scripts/benchmarks/noir-benchmark.ts list-circuits",
     "benchmark:help": "npx tsx src/scripts/benchmarks/noir-benchmark.ts --help",
-    "test:sparql10": "node ts.js"
+    "test:sparql10": "node ts.js",
+    "semantic-release": "semantic-release"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "keywords": [
+    "sparql",
+    "zero-knowledge",
+    "zk-proof",
+    "rdf",
+    "noir",
+    "privacy",
+    "blockchain",
+    "cryptography"
+  ],
+  "author": "Jesse Wright <jesse.wright@anu.edu.au>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jeswr/sparql_noir.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jeswr/sparql_noir/issues"
+  },
+  "homepage": "https://github.com/jeswr/sparql_noir#readme",
   "dependencies": {
     "@aztec/bb.js": "^1.2.1",
     "@aztec/foundation": "^2.1.7",
@@ -70,11 +105,22 @@
   },
   "devDependencies": {
     "@rdfjs/types": "^2.0.1",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/github": "^11.0.6",
+    "@semantic-release/npm": "^12.0.2",
+    "@semantic-release/release-notes-generator": "^14.1.0",
     "@types/jest": "^30.0.0",
     "@types/node": "^24.10.1",
     "@types/secp256k1": "^4.0.7",
+    "conventional-changelog-conventionalcommits": "^9.1.0",
     "rdf-test-suite": "^2.1.3",
+    "semantic-release": "^24.2.9",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

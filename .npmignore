@@ -1,0 +1,60 @@
+# Source files (only publish built dist)
+src/
+tsconfig.json
+
+# Tests
+test/
+*.test.ts
+*.test.js
+
+# Build artifacts
+target/
+generated/
+temp/
+noir_prove/
+benchmark-results/
+benchmark-*.json
+simple-benchmark-*.json
+
+# Development
+.vscode/
+.github/
+.git/
+.gitignore
+
+# Temporary files
+*.log
+Prover.toml
+proof
+vk
+vk.bin
+verification_key
+bb_proof/
+bb_vk/
+temp_data.ttl
+temp_output.json
+
+# Noir installation
+.noirup/
+.nargo/
+.rdf-test-suite-cache/
+
+# Legacy and examples
+legacy/
+libs/
+inputs/
+NOTES.md
+analyze-*.mjs
+check-tests.mjs
+test-wasm-compile.mjs
+ts.js
+
+# Documentation that's not needed in package
+ARCHITECTURE.md
+IMPLEMENTATION_SUMMARY.md
+SPARQL_COVERAGE.md
+XPATH_INTEGRATION_SUMMARY.md
+spec/
+
+# Keep only what's needed
+node_modules/
