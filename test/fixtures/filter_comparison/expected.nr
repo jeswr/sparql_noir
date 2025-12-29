@@ -9,10 +9,10 @@ pub(crate) struct Variables {
   pub(crate) o: Field,
 }
 
-pub(crate) type Hidden = [Field; 2];
+pub(crate) type Hidden = [Field; 4];
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables, hidden: Hidden) {
   assert(variables.s == bgp[0].terms[0]);
   assert(variables.o == bgp[0].terms[2]);
-  assert(consts::hash2([0, utils::encode_string("http://example.org/knows")]) == bgp[0].terms[1]);
-  assert(((variables.s == variables.o) == false) & ((consts::hash2([2, consts::hash4([hidden[0], hidden[1], utils::encode_string(""), utils::encode_string("http://www.w3.org/2001/XMLSchema#integer")])]) == variables.o) & ((hidden[1] as i128) > 3i128)));
+  assert(consts::hash2([0, consts::encode_string("http://example.org/knows")]) == bgp[0].terms[1]);
+  assert((!(hidden[0] == hidden[1])) & ((hidden[2] as i64) > (hidden[3] as i64)));
 }
