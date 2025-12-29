@@ -338,6 +338,97 @@ fn expr_to_term(expr: &Expression) -> Result<Term, String> {
     }
 }
 
+/// Convert an expression to Noir code string
+/// This handles function calls and other complex expressions that cannot be converted to terms
+fn expr_to_noir_code(
+    expr: &Expression,
+    query: &QueryInfo,
+    bindings: &BTreeMap<String, Term>,
+    hidden: &mut Vec<serde_json::Value>,
+) -> Result<String, String> {
+    match expr {
+        // Simple cases that can be converted to terms
+        Expression::Variable(v) => {
+            let term = Term::Variable(v.as_str().to_string());
+            let idx = push_hidden(hidden, "expr_value", &term);
+            Ok(format!("hidden[{}]", idx))
+        }
+        Expression::Literal(l) => {
+            let term = Term::Static(GroundTerm::Literal(l.clone()));
+            let idx = push_hidden(hidden, "expr_value", &term);
+            Ok(format!("hidden[{}]", idx))
+        }
+        Expression::NamedNode(nn) => {
+            let term = Term::Static(GroundTerm::NamedNode(nn.clone()));
+            let idx = push_hidden(hidden, "expr_value", &term);
+            Ok(format!("hidden[{}]", idx))
+        }
+        
+        // Function calls
+        Expression::FunctionCall(func, args) => {
+            match func {
+                // Numeric functions
+                Function::Abs => {
+                    if args.len() != 1 { return Err("ABS requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::abs_int({} as i64) as Field", arg_code))
+                }
+                Function::Round => {
+                    if args.len() != 1 { return Err("ROUND requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::round_int({} as i64) as Field", arg_code))
+                }
+                Function::Ceil => {
+                    if args.len() != 1 { return Err("CEIL requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::ceil_int({} as i64) as Field", arg_code))
+                }
+                Function::Floor => {
+                    if args.len() != 1 { return Err("FLOOR requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::floor_int({} as i64) as Field", arg_code))
+                }
+                
+                // DateTime functions
+                Function::Year => {
+                    if args.len() != 1 { return Err("YEAR requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::year_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                }
+                Function::Month => {
+                    if args.len() != 1 { return Err("MONTH requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::month_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                }
+                Function::Day => {
+                    if args.len() != 1 { return Err("DAY requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::day_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                }
+                Function::Hours => {
+                    if args.len() != 1 { return Err("HOURS requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::hours_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                }
+                Function::Minutes => {
+                    if args.len() != 1 { return Err("MINUTES requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::minutes_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                }
+                Function::Seconds => {
+                    if args.len() != 1 { return Err("SECONDS requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    Ok(format!("xpath::seconds_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                }
+                
+                _ => Err(format!("Unsupported function in expression: {:?}", func)),
+            }
+        }
+        
+        _ => Err(format!("Cannot convert complex expression to Noir code: {:?}", expr)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ComparisonType {
     Numeric,
@@ -474,8 +565,26 @@ fn filter_to_noir(
                 return Ok(result);
             }
             
-            let left = expr_to_term(a)?;
-            let right = expr_to_term(b)?;
+            // Try to use expr_to_noir_code for complex expressions (like function calls)
+            let left_code = match expr_to_noir_code(a, query, bindings, hidden) {
+                Ok(code) => code,
+                Err(_) => {
+                    // Fallback to term-based approach
+                    let left = expr_to_term(a)?;
+                    let idx = push_hidden(hidden, "expr_value", &left);
+                    format!("hidden[{}]", idx)
+                }
+            };
+            
+            let right_code = match expr_to_noir_code(b, query, bindings, hidden) {
+                Ok(code) => code,
+                Err(_) => {
+                    // Fallback to term-based approach
+                    let right = expr_to_term(b)?;
+                    let idx = push_hidden(hidden, "expr_value", &right);
+                    format!("hidden[{}]", idx)
+                }
+            };
             
             // IEEE 754 constant folding for float/double literals
             if let (Expression::Literal(lit_a), Expression::Literal(lit_b)) = (a.as_ref(), b.as_ref()) {
@@ -491,11 +600,7 @@ fn filter_to_noir(
                 }
             }
             
-            Ok(format!(
-                "{} == {}",
-                serialize_term(&left, query, bindings),
-                serialize_term(&right, query, bindings)
-            ))
+            Ok(format!("{} == {}", left_code, right_code))
         }
 
         // Note: spargebra doesn't have NotEqual, inequality is typically !(a = b)
@@ -796,8 +901,8 @@ fn numeric_comparison(
     expr: &Expression,
     a: &Expression,
     b: &Expression,
-    _query: &QueryInfo,
-    _bindings: &BTreeMap<String, Term>,
+    query: &QueryInfo,
+    bindings: &BTreeMap<String, Term>,
     hidden: &mut Vec<serde_json::Value>,
 ) -> Result<String, String> {
     // IEEE 754 constant folding for float/double literals
@@ -833,18 +938,15 @@ fn numeric_comparison(
         }
     }
 
-    // Dynamic comparison with hidden inputs
-    let left = expr_to_term(a)?;
-    let right = expr_to_term(b)?;
-    
-    let left_idx = push_hidden(hidden, "literal_value", &left);
-    let right_idx = push_hidden(hidden, "literal_value", &right);
+    // Try to convert to Noir code (handles function calls)
+    let left_code = expr_to_noir_code(a, query, bindings, hidden)?;
+    let right_code = expr_to_noir_code(b, query, bindings, hidden)?;
 
     let cmp = match expr {
-        Expression::Greater(_, _) => format!("(hidden[{}] as i64) > (hidden[{}] as i64)", left_idx, right_idx),
-        Expression::GreaterOrEqual(_, _) => format!("(hidden[{}] as i64) >= (hidden[{}] as i64)", left_idx, right_idx),
-        Expression::Less(_, _) => format!("(hidden[{}] as i64) < (hidden[{}] as i64)", left_idx, right_idx),
-        Expression::LessOrEqual(_, _) => format!("(hidden[{}] as i64) <= (hidden[{}] as i64)", left_idx, right_idx),
+        Expression::Greater(_, _) => format!("({} as i64) > ({} as i64)", left_code, right_code),
+        Expression::GreaterOrEqual(_, _) => format!("({} as i64) >= ({} as i64)", left_code, right_code),
+        Expression::Less(_, _) => format!("({} as i64) < ({} as i64)", left_code, right_code),
+        Expression::LessOrEqual(_, _) => format!("({} as i64) <= ({} as i64)", left_code, right_code),
         _ => return Err("Invalid comparison operator".into()),
     };
 
