@@ -6,40 +6,92 @@ Zero-knowledge proofs for SPARQL query results over signed RDF datasets.
 
 sparql_noir generates ZK proofs that SPARQL query results are correct, without revealing the underlying signed RDF datasets. This enables privacy-preserving querying of sensitive linked data.
 
-## SPARQL 1.0 Support
-
-✅ **Comprehensive SPARQL 1.0 coverage achieved!**
-
-All core SPARQL 1.0 features are now supported:
-
-- **Query Forms**: SELECT, ASK
-- **Graph Patterns**: BGP, UNION, OPTIONAL, GRAPH
-- **Filters**: All comparison, equality, and logical operators
-- **Functions**: isIRI, isBlank, isLiteral, STR, LANG, DATATYPE, LANGMATCHES, BOUND, sameTerm
-- **Solution Modifiers**: DISTINCT, ORDER BY, LIMIT, OFFSET (via post-processing)
-
-See [SPARQL_COVERAGE.md](./SPARQL_COVERAGE.md) for complete feature documentation.
-
-## Quick Start
-
-### Prerequisites
+## Installation
 
 ```bash
-# Check Noir version (requires 1.0.0-beta.12 or later)
-% nargo --version
-nargo version = 1.0.0-beta.12
-noirc version = 1.0.0-beta.12+9a5b3695b42e391fa27c48e87b9bbb07523d664d
-(git version hash: 9a5b3695b42e391fa27c48e87b9bbb07523d664d, is dirty: false)
+npm install @jeswr/sparql-noir
 ```
 
-### Installation
+## API Usage
 
-```bash
-npm install
-npm run build
+### Quick Start
+
+```typescript
+import { sign, prove, verify, info } from '@jeswr/sparql-noir';
+
+// 1. Sign your RDF dataset
+const signed = await sign('data.ttl');
+
+// 2. Get disclosure information for your query
+const query = 'SELECT ?name WHERE { ?person foaf:name ?name }';
+const disclosure = info(query);
+console.log('Disclosed variables:', disclosure.disclosedVariables);
+
+// 3. Generate a proof (requires compiled circuit)
+const proof = await prove('circuit/', signed);
+
+// 4. Verify the proof
+const result = await verify('circuit/', proof);
+console.log('Valid:', result.success);
 ```
 
-### Example Usage
+### API Reference
+
+#### `sign(dataset: string, config?: Config): Promise<SignedData>`
+
+Signs an RDF dataset, producing a signed dataset with Merkle root and signature.
+
+**Parameters:**
+- `dataset` - Path to the RDF dataset file (Turtle/N-Quads)
+- `config` - Optional configuration (hash functions, signature scheme, merkle depth)
+
+**Returns:** Signed dataset with Merkle root, signature, and encoded triples
+
+#### `prove(circuitDir: string, signedData: SignedData | null, config?: Config): Promise<ProveResult>`
+
+Generates a zero-knowledge proof that a SPARQL query holds over signed datasets.
+
+**Parameters:**
+- `circuitDir` - Path to the compiled circuit directory
+- `signedData` - Signed dataset(s) to query over
+- `config` - Optional configuration
+
+**Returns:** Proof object with proof bytes, verification key, and metadata
+
+#### `verify(circuitDir: string, proof: ProveResult, config?: Config): Promise<VerifyResult>`
+
+Verifies a proof is valid.
+
+**Parameters:**
+- `circuitDir` - Path to the compiled circuit directory
+- `proof` - Proof object to verify
+- `config` - Optional configuration
+
+**Returns:** Verification result indicating if the proof is valid
+
+#### `info(query: string, config?: Config): DisclosureInfo`
+
+Returns disclosure information for a query and configuration.
+
+**Parameters:**
+- `query` - SPARQL SELECT query string
+- `config` - Optional configuration
+
+**Returns:** Information about what will be disclosed vs. hidden in the proof
+
+### Exported Types
+
+- `SignedData` - Signed RDF dataset structure
+- `ProveResult` - Proof generation result
+- `VerifyResult` - Verification result
+- `Config` - Configuration options
+- `DisclosureInfo` - Disclosure information
+
+For complete API documentation, see [spec/proofs.md](./spec/proofs.md).
+
+## CLI Usage
+
+For development and advanced usage, you can also use the CLI tools:
 
 ```bash
 # Sign an RDF dataset
@@ -55,7 +107,40 @@ npm run prove -- --circuit output --signed signed.json --out proof.json
 npm run verify -- --proof proof.json
 ```
 
-## Architecture
+## Development Setup
+
+### Prerequisites
+
+```bash
+# Check Noir version (requires 1.0.0-beta.12 or later)
+% nargo --version
+nargo version = 1.0.0-beta.12
+noirc version = 1.0.0-beta.12+9a5b3695b42e391fa27c48e87b9bbb07523d664d
+(git version hash: 9a5b3695b42e391fa27c48e87b9bbb07523d664d, is dirty: false)
+```
+
+### Installation
+
+```bash
+git clone https://github.com/jeswr/sparql_noir
+cd sparql_noir
+npm install
+npm run build
+```
+
+## SPARQL 1.0 Support
+
+✅ **Comprehensive SPARQL 1.0 coverage achieved!**
+
+All core SPARQL 1.0 features are now supported:
+
+- **Query Forms**: SELECT, ASK
+- **Graph Patterns**: BGP, UNION, OPTIONAL, GRAPH
+- **Filters**: All comparison, equality, and logical operators
+- **Functions**: isIRI, isBlank, isLiteral, STR, LANG, DATATYPE, LANGMATCHES, BOUND, sameTerm
+- **Solution Modifiers**: DISTINCT, ORDER BY, LIMIT, OFFSET (via post-processing)
+
+See [SPARQL_COVERAGE.md](./SPARQL_COVERAGE.md) for complete feature documentation.
 
 The system consists of four main components:
 
