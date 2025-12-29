@@ -17,7 +17,11 @@
 
 import { execSync, spawnSync } from 'child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const FIXTURES_DIR = resolve(__dirname, 'fixtures');
 const TRANSFORM_MANIFEST = resolve(__dirname, '../transform/Cargo.toml');
