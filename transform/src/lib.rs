@@ -326,6 +326,187 @@ fn serialize_ground_term(gt: &GroundTerm) -> String {
 }
 
 // =============================================================================
+// XSD TYPE CASTING
+// =============================================================================
+
+/// Handle XSD type casting functions like xsd:integer(?v), xsd:float(?v), etc.
+/// These map to xpath casting functions from noir_xpath library.
+fn handle_xsd_cast(
+    target_type: &str,
+    args: &[Expression],
+    query: &QueryInfo,
+    bindings: &BTreeMap<String, Term>,
+    hidden: &mut Vec<serde_json::Value>,
+) -> Result<String, String> {
+    if args.len() != 1 {
+        return Err(format!("xsd:{} cast requires exactly 1 argument", target_type));
+    }
+    
+    // Get the source expression value
+    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+    
+    // Determine source type if we can (for choosing the right cast function)
+    let source_type = infer_expression_type(&args[0]);
+    
+    match target_type {
+        // Cast to xsd:integer
+        "integer" | "int" | "long" | "short" | "byte" |
+        "unsignedInt" | "unsignedLong" | "unsignedShort" | "unsignedByte" |
+        "positiveInteger" | "negativeInteger" | "nonPositiveInteger" | "nonNegativeInteger" => {
+            match source_type {
+                Some(NumericSourceType::Float) => {
+                    // cast_float_to_integer returns Option<i64>, unwrap with assertion
+                    Ok(format!("xpath::cast_float_to_integer(xpath::XsdFloat::from_bits({} as u32)).unwrap() as Field", arg_code))
+                }
+                Some(NumericSourceType::Double) => {
+                    // cast_double_to_integer returns Option<i64>, unwrap with assertion
+                    Ok(format!("xpath::cast_double_to_integer(xpath::XsdDouble::from_bits({} as u64)).unwrap() as Field", arg_code))
+                }
+                Some(NumericSourceType::Integer) | None => {
+                    // Already integer or unknown - just pass through as Field
+                    Ok(format!("{} as Field", arg_code))
+                }
+            }
+        }
+        
+        // Cast to xsd:float
+        "float" => {
+            match source_type {
+                Some(NumericSourceType::Integer) => {
+                    // cast_integer_to_float takes i8, returns XsdFloat
+                    // Convert to bits for Field representation
+                    Ok(format!("xpath::cast_integer_to_float(({}) as i8).to_bits() as Field", arg_code))
+                }
+                Some(NumericSourceType::Double) => {
+                    // cast_double_to_float
+                    Ok(format!("xpath::cast_double_to_float(xpath::XsdDouble::from_bits({} as u64)).to_bits() as Field", arg_code))
+                }
+                Some(NumericSourceType::Float) | None => {
+                    // Already float or unknown - pass through
+                    Ok(format!("{}", arg_code))
+                }
+            }
+        }
+        
+        // Cast to xsd:double
+        "double" => {
+            match source_type {
+                Some(NumericSourceType::Integer) => {
+                    // cast_integer_to_double takes i8, returns XsdDouble
+                    Ok(format!("xpath::cast_integer_to_double(({}) as i8).to_bits() as Field", arg_code))
+                }
+                Some(NumericSourceType::Float) => {
+                    // XsdDouble::from_float for float to double
+                    Ok(format!("xpath::XsdDouble::from_float(xpath::XsdFloat::from_bits({} as u32)).to_bits() as Field", arg_code))
+                }
+                Some(NumericSourceType::Double) | None => {
+                    // Already double or unknown - pass through
+                    Ok(format!("{}", arg_code))
+                }
+            }
+        }
+        
+        // Cast to xsd:decimal - treat like double for now
+        "decimal" => {
+            match source_type {
+                Some(NumericSourceType::Integer) => {
+                    Ok(format!("xpath::cast_integer_to_double(({}) as i8).to_bits() as Field", arg_code))
+                }
+                _ => Ok(format!("{}", arg_code))
+            }
+        }
+        
+        // Cast to xsd:boolean
+        "boolean" => {
+            // Boolean cast: 0 -> false, non-zero -> true for numerics
+            // For strings: "" -> false, non-empty -> true (but we can't handle strings properly)
+            // For now, treat as EBV-like: 0 = false, non-zero = true
+            Ok(format!("({} != 0)", arg_code))
+        }
+        
+        // Cast to xsd:string - returns the encoded string representation
+        // Note: This is a simplified implementation that returns the value field
+        "string" | "normalizedString" | "token" => {
+            // String cast preserves the lexical value
+            // For numeric types, this would need actual string conversion
+            // which isn't fully supported in ZK circuits
+            // For now, just return the value as-is
+            Ok(format!("{}", arg_code))
+        }
+        
+        // Cast to xsd:dateTime
+        "dateTime" => {
+            // DateTime values are typically epoch milliseconds
+            // Assuming input is already in correct format
+            Ok(format!("{}", arg_code))
+        }
+        
+        // Cast to xsd:date
+        "date" => {
+            Ok(format!("{}", arg_code))
+        }
+        
+        // Cast to xsd:time
+        "time" => {
+            Ok(format!("{}", arg_code))
+        }
+        
+        // Unsupported cast target
+        _ => Err(format!("Unsupported XSD cast target type: xsd:{}", target_type))
+    }
+}
+
+/// Source type for determining which cast function to use
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NumericSourceType {
+    Integer,
+    Float,
+    Double,
+}
+
+/// Infer the numeric type of an expression based on its structure
+fn infer_expression_type(expr: &Expression) -> Option<NumericSourceType> {
+    match expr {
+        Expression::Literal(l) => {
+            let dt = l.datatype().as_str();
+            if dt.ends_with("float") {
+                Some(NumericSourceType::Float)
+            } else if dt.ends_with("double") {
+                Some(NumericSourceType::Double)
+            } else if dt.ends_with("decimal") {
+                // SPARQL treats decimal as double for comparisons
+                Some(NumericSourceType::Double)
+            } else if dt.ends_with("integer") || dt.ends_with("int") || 
+                      dt.ends_with("long") || dt.ends_with("short") || dt.ends_with("byte") {
+                Some(NumericSourceType::Integer)
+            } else {
+                None
+            }
+        }
+        // Handle XSD cast functions - they return the target type
+        Expression::FunctionCall(Function::Custom(iri), _) => {
+            let iri_str = iri.as_str();
+            if iri_str.starts_with(XSD) {
+                let local = &iri_str[XSD.len()..];
+                match local {
+                    "float" => Some(NumericSourceType::Float),
+                    "double" | "decimal" => Some(NumericSourceType::Double),
+                    "integer" | "int" | "long" | "short" | "byte" |
+                    "unsignedInt" | "unsignedLong" | "unsignedShort" | "unsignedByte" |
+                    "positiveInteger" | "negativeInteger" | "nonPositiveInteger" | "nonNegativeInteger" => {
+                        Some(NumericSourceType::Integer)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        _ => None
+    }
+}
+
+// =============================================================================
 // EXPRESSION CONVERSION
 // =============================================================================
 
@@ -428,6 +609,17 @@ fn expr_to_noir_code(
                     Ok(format!("xpath::duration_to_microseconds(xpath::timezone_from_datetime(xpath::datetime_from_epoch_microseconds(({} as i128) * 1000)))", arg_code))
                 }
                 
+                // XSD type casting functions (Custom functions with XSD namespace)
+                Function::Custom(iri) => {
+                    let iri_str = iri.as_str();
+                    if iri_str.starts_with(XSD) {
+                        let local_name = &iri_str[XSD.len()..];
+                        handle_xsd_cast(local_name, args, query, bindings, hidden)
+                    } else {
+                        Err(format!("Unsupported custom function: {}", iri_str))
+                    }
+                }
+                
                 _ => Err(format!("Unsupported function in expression: {:?}", func)),
             }
         }
@@ -465,6 +657,24 @@ fn datatype_to_comparison_type(datatype: &str) -> ComparisonType {
 fn expr_comparison_type(expr: &Expression) -> ComparisonType {
     match expr {
         Expression::Literal(l) => datatype_to_comparison_type(l.datatype().as_str()),
+        // Handle XSD cast functions - they return the target type
+        Expression::FunctionCall(Function::Custom(iri), _) => {
+            let iri_str = iri.as_str();
+            if iri_str.starts_with(XSD) {
+                let local = &iri_str[XSD.len()..];
+                match local {
+                    "integer" | "decimal" | "float" | "double" | "int" | "long" | "short" | "byte"
+                    | "nonNegativeInteger" | "positiveInteger" | "negativeInteger" | "nonPositiveInteger"
+                    | "unsignedInt" | "unsignedLong" | "unsignedShort" | "unsignedByte" => ComparisonType::Numeric,
+                    "string" | "normalizedString" | "token" => ComparisonType::String,
+                    "boolean" => ComparisonType::Boolean,
+                    "dateTime" | "date" | "time" => ComparisonType::DateTime,
+                    _ => ComparisonType::Unknown,
+                }
+            } else {
+                ComparisonType::Unknown
+            }
+        }
         _ => ComparisonType::Unknown,
     }
 }
@@ -787,6 +997,17 @@ fn filter_to_noir(
                     expr_to_noir_code(&expr, query, bindings, hidden)
                 }
                 
+                // XSD type casting functions (Custom functions with XSD namespace)
+                Function::Custom(iri) => {
+                    let iri_str = iri.as_str();
+                    if iri_str.starts_with(XSD) {
+                        let local_name = &iri_str[XSD.len()..];
+                        handle_xsd_cast(local_name, args, query, bindings, hidden)
+                    } else {
+                        Err(format!("Unsupported custom function: {}", iri_str))
+                    }
+                }
+                
                 _ => Err(format!("Unsupported function: {:?}", func)),
             }
         }
@@ -872,12 +1093,16 @@ fn numeric_comparison(
     bindings: &BTreeMap<String, Term>,
     hidden: &mut Vec<serde_json::Value>,
 ) -> Result<String, String> {
+    // Determine the types of operands
+    let type_a = infer_expression_type(a);
+    let type_b = infer_expression_type(b);
+    
     // IEEE 754 constant folding for float/double literals
     if let (Expression::Literal(lit_a), Expression::Literal(lit_b)) = (a, b) {
         let dt_a = lit_a.datatype().as_str();
         let dt_b = lit_b.datatype().as_str();
-        if (dt_a.ends_with("float") || dt_a.ends_with("double")) &&
-           (dt_b.ends_with("float") || dt_b.ends_with("double")) {
+        if (dt_a.ends_with("float") || dt_a.ends_with("double") || dt_a.ends_with("decimal")) &&
+           (dt_b.ends_with("float") || dt_b.ends_with("double") || dt_b.ends_with("decimal")) {
             let fa = parse_float_special(lit_a.value(), dt_a);
             let fb = parse_float_special(lit_b.value(), dt_b);
             
@@ -909,15 +1134,93 @@ fn numeric_comparison(
     let left_code = expr_to_noir_code(a, query, bindings, hidden)?;
     let right_code = expr_to_noir_code(b, query, bindings, hidden)?;
 
-    let cmp = match expr {
-        Expression::Greater(_, _) => format!("({} as i64) > ({} as i64)", left_code, right_code),
-        Expression::GreaterOrEqual(_, _) => format!("({} as i64) >= ({} as i64)", left_code, right_code),
-        Expression::Less(_, _) => format!("({} as i64) < ({} as i64)", left_code, right_code),
-        Expression::LessOrEqual(_, _) => format!("({} as i64) <= ({} as i64)", left_code, right_code),
-        _ => return Err("Invalid comparison operator".into()),
-    };
+    // Determine if we need float/double comparisons
+    // Promote to the widest type: double > float > integer
+    let use_double = matches!(type_a, Some(NumericSourceType::Double)) || 
+                     matches!(type_b, Some(NumericSourceType::Double));
+    let use_float = !use_double && 
+                    (matches!(type_a, Some(NumericSourceType::Float)) || 
+                     matches!(type_b, Some(NumericSourceType::Float)));
 
-    Ok(cmp)
+    if use_double {
+        // Use double comparison functions
+        let left_double = match type_a {
+            Some(NumericSourceType::Double) => left_code.clone(),
+            Some(NumericSourceType::Float) => {
+                format!("xpath::XsdDouble::from_float(xpath::XsdFloat::from_bits({} as u32))", left_code)
+            }
+            Some(NumericSourceType::Integer) | None => {
+                format!("xpath::cast_integer_to_double(({}) as i8)", left_code)
+            }
+        };
+        let right_double = match type_b {
+            Some(NumericSourceType::Double) => right_code.clone(),
+            Some(NumericSourceType::Float) => {
+                format!("xpath::XsdDouble::from_float(xpath::XsdFloat::from_bits({} as u32))", right_code)
+            }
+            Some(NumericSourceType::Integer) | None => {
+                format!("xpath::cast_integer_to_double(({}) as i8)", right_code)
+            }
+        };
+        
+        let cmp_func = match expr {
+            Expression::Greater(_, _) => "xpath::numeric_greater_than_double",
+            Expression::GreaterOrEqual(_, _) => "xpath::numeric_ge_double",
+            Expression::Less(_, _) => "xpath::numeric_less_than_double",
+            Expression::LessOrEqual(_, _) => "xpath::numeric_le_double",
+            _ => return Err("Invalid comparison operator".into()),
+        };
+        
+        // Need to extract XsdDouble from cast results for comparison
+        let left_as_double = if matches!(type_a, Some(NumericSourceType::Double)) {
+            format!("xpath::XsdDouble::from_bits({} as u64)", left_code)
+        } else {
+            left_double
+        };
+        let right_as_double = if matches!(type_b, Some(NumericSourceType::Double)) {
+            format!("xpath::XsdDouble::from_bits({} as u64)", right_code)
+        } else {
+            right_double
+        };
+        
+        Ok(format!("{}({}, {})", cmp_func, left_as_double, right_as_double))
+    } else if use_float {
+        // Use float comparison functions
+        let left_float = match type_a {
+            Some(NumericSourceType::Float) => format!("xpath::XsdFloat::from_bits({} as u32)", left_code),
+            Some(NumericSourceType::Integer) | None => {
+                format!("xpath::cast_integer_to_float(({}) as i8)", left_code)
+            }
+            Some(NumericSourceType::Double) => unreachable!("Double handled above"),
+        };
+        let right_float = match type_b {
+            Some(NumericSourceType::Float) => format!("xpath::XsdFloat::from_bits({} as u32)", right_code),
+            Some(NumericSourceType::Integer) | None => {
+                format!("xpath::cast_integer_to_float(({}) as i8)", right_code)
+            }
+            Some(NumericSourceType::Double) => unreachable!("Double handled above"),
+        };
+        
+        let cmp_func = match expr {
+            Expression::Greater(_, _) => "xpath::numeric_greater_than_float",
+            Expression::GreaterOrEqual(_, _) => "xpath::numeric_ge_float",
+            Expression::Less(_, _) => "xpath::numeric_less_than_float",
+            Expression::LessOrEqual(_, _) => "xpath::numeric_le_float",
+            _ => return Err("Invalid comparison operator".into()),
+        };
+        
+        Ok(format!("{}({}, {})", cmp_func, left_float, right_float))
+    } else {
+        // Integer comparison
+        let cmp = match expr {
+            Expression::Greater(_, _) => format!("({} as i64) > ({} as i64)", left_code, right_code),
+            Expression::GreaterOrEqual(_, _) => format!("({} as i64) >= ({} as i64)", left_code, right_code),
+            Expression::Less(_, _) => format!("({} as i64) < ({} as i64)", left_code, right_code),
+            Expression::LessOrEqual(_, _) => format!("({} as i64) <= ({} as i64)", left_code, right_code),
+            _ => return Err("Invalid comparison operator".into()),
+        };
+        Ok(cmp)
+    }
 }
 
 fn string_comparison(
@@ -1695,7 +1998,7 @@ fn generate_circuit_for_optional_combination(
     all_optionals: &[OptionalBlock],
     matched_indices: &[usize],
     options: &TransformOptions,
-) -> Result<(String, Vec<serde_json::Value>, bool), String> {
+) -> Result<(String, Vec<serde_json::Value>, bool, bool), String> {
     // Build a combined PatternInfo with base + matched optional patterns
     let mut combined = PatternInfo {
         patterns: base_info.pattern.patterns.clone(),
@@ -1759,10 +2062,11 @@ fn generate_circuit_for_optional_combination(
 
 /// Generate sparql.nr content from a QueryInfo.
 /// This is the core circuit generation logic, extracted to be reusable.
+/// Returns (sparql_nr content, hidden inputs, has_hidden, needs_xpath)
 fn generate_sparql_nr_from_query_info(
     info: &QueryInfo,
     options: &TransformOptions,
-) -> Result<(String, Vec<serde_json::Value>, bool), String> {
+) -> Result<(String, Vec<serde_json::Value>, bool, bool), String> {
     // Build bindings map for non-projected variables
     let mut binding_map: BTreeMap<String, Term> = BTreeMap::new();
     for b in &info.pattern.bindings {
@@ -1856,6 +2160,13 @@ fn generate_sparql_nr_from_query_info(
         sparql_nr.push_str("use dep::ebv;\n");
     }
     
+    // Check if xpath functions are used in any assertions
+    let needs_xpath = assertions.iter().any(|a| a.contains("xpath::")) ||
+        union_assertions.iter().any(|branch| branch.iter().any(|a| a.contains("xpath::")));
+    if needs_xpath {
+        sparql_nr.push_str("use dep::xpath;\n");
+    }
+    
     sparql_nr.push_str("\n");
     sparql_nr.push_str(&format!(
         "pub(crate) type BGP = [Triple; {}];\n",
@@ -1902,7 +2213,7 @@ fn generate_sparql_nr_from_query_info(
     }
     sparql_nr.push_str("}\n");
 
-    Ok((sparql_nr, hidden, has_hidden))
+    Ok((sparql_nr, hidden, has_hidden, needs_xpath))
 }
 
 /// Transform a SPARQL query into Noir circuit files.
@@ -1940,7 +2251,7 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     
     // Generate the base circuit (no optionals or all optionals matched based on strategy)
     // We'll generate the "all optionals matched" case as the primary circuit
-    let (base_sparql_nr, base_hidden, has_hidden) = generate_circuit_for_optional_combination(
+    let (base_sparql_nr, base_hidden, has_hidden, needs_xpath) = generate_circuit_for_optional_combination(
         &info,
         &all_optionals,
         &(0..num_optionals).collect::<Vec<_>>(), // All optionals matched
@@ -1982,6 +2293,9 @@ consts = { path = "../noir/lib/consts" }
         if needs_ebv {
             toml.push_str("ebv = { path = \"../noir/lib/ebv\" }\n");
         }
+        if needs_xpath {
+            toml.push_str("xpath = { path = \"../noir/lib/xpath\" }\n");
+        }
         toml
     } else {
         let mut toml = r#"[package]
@@ -1996,6 +2310,9 @@ utils = { path = "../noir/lib/utils" }
 "#.to_string();
         if needs_ebv {
             toml.push_str("ebv = { path = \"../noir/lib/ebv\" }\n");
+        }
+        if needs_xpath {
+            toml.push_str("xpath = { path = \"../noir/lib/xpath\" }\n");
         }
         toml
     };
@@ -2055,7 +2372,7 @@ utils = { path = "../noir/lib/utils" }
                 .filter(|i| (combo >> i) & 1 == 1)
                 .collect();
             
-            let (circuit_sparql_nr, circuit_hidden, _) = generate_circuit_for_optional_combination(
+            let (circuit_sparql_nr, circuit_hidden, _, _) = generate_circuit_for_optional_combination(
                 &info,
                 &all_optionals,
                 &matched_indices,

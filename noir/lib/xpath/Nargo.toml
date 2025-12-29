@@ -6,4 +6,4 @@ authors = [""]
 [dependencies]
 consts = { path = "../consts" }
 # XPath 2.0 functions library for SPARQL 1.1
-noir_xpath = { git = "https://github.com/jeswr/noir_XPath", tag = "v0.1.0", directory = "xpath" }
+noir_xpath = { tag = "v0.1.0", git = "https://github.com/jeswr/noir_XPath", directory = "xpath" }
