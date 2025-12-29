@@ -1,5 +1,26 @@
 # noir_XPath Integration Summary
 
+## ⚠️ IMPORTANT: Known Limitations
+
+**This integration has critical limitations that affect functionality:**
+
+### 🚨 Numeric Functions: Integer-Only
+- **ABS, ROUND, CEIL, FLOOR** only work with `xsd:integer` types
+- ❌ **NO support for float/double types**
+- ❌ **NO type casting or type promotion**
+- ❌ **VIOLATES SPARQL 1.1 spec** for numeric type handling
+- Using with non-integer types will cause circuit verification failures
+
+### 🚨 String Functions: Stub Implementations
+- **STRLEN, CONTAINS, STRSTARTS, STRENDS** are placeholder stubs only
+- ❌ **DO NOT perform actual string operations**
+- ❌ **CANNOT be used for real string processing**
+- Will compile but produce incorrect results
+
+**→ See [Limitations section](#limitations-and-future-work) for complete details**
+
+---
+
 ## Overview
 
 This document summarizes the integration of the [noir_XPath library](https://github.com/jeswr/noir_XPath) into sparql_noir to support additional SPARQL 1.1 functions.
@@ -163,39 +184,162 @@ Function::Year => {
 
 ### Current Limitations
 
-1. **String Functions (Placeholders)**
-   - STRLEN, CONTAINS, STRSTARTS, STRENDS have placeholder implementations
-   - Need actual string value handling (currently just use hash)
-   - Require proper string representation in circuits
+#### 1. String Functions - Stub Implementations Only
+**CRITICAL LIMITATION:** String functions are placeholders that do not perform actual operations.
 
-2. **DateTime Storage**
-   - Assumes datetime stored as epoch microseconds
-   - May need conversion logic for different encodings
+**Affected Functions:**
+- `STRLEN()` - Returns placeholder value, not actual string length
+- `CONTAINS()` - Returns placeholder boolean, not actual substring test
+- `STRSTARTS()` - Returns placeholder boolean, not actual prefix test  
+- `STRENDS()` - Returns placeholder boolean, not actual suffix test
 
-3. **Type Checking**
-   - Functions assume correct input types
-   - Runtime type errors will fail circuit verification
+**Technical Details:**
+- Functions generate Noir code but do not call actual string operation functions
+- Currently just use string hash values without computing actual results
+- Need proper string value handling in circuits (not just hashes)
+- Require proper string representation and UTF-8 support in Noir circuits
+
+**Impact:**
+- These functions **cannot be used for real string processing**
+- Queries using these functions will compile but produce incorrect results
+- Exist only for API compatibility and future implementation
+
+**Example - Current Behavior:**
+```rust
+// Generated code (does not work correctly)
+Function::StrLen => {
+    let term = expr_to_term(&args[0])?;
+    let str_idx = push_hidden(hidden, "strlen_str", &term);
+    Ok(format!("hidden[{}]", str_idx))  // Just returns hash, not length!
+}
+```
+
+#### 2. Numeric Functions - Integer-Only, No Type Handling
+**CRITICAL LIMITATION:** Numeric functions only support xsd:integer type with no type casting or multiple type support.
+
+**Affected Functions:**
+- `ABS()` - Calls `xpath::abs_int()` (integer-only)
+- `ROUND()` - Calls `xpath::round_int()` (integer-only)
+- `CEIL()` - Calls `xpath::ceil_int()` (integer-only)
+- `FLOOR()` - Calls `xpath::floor_int()` (integer-only)
+
+**Missing Type Support:**
+- ❌ **No support for `xsd:float` or `xsd:double` types**
+- ❌ **No type casting** between numeric types (integer ↔ decimal ↔ float ↔ double)
+- ❌ **No automatic type promotion** as required by SPARQL 1.1 spec (Section 17.3)
+- ❌ **No runtime type checking** - wrong types cause circuit verification failure
+- ❌ **No mixed-type operations** (e.g., cannot add integer and float)
+
+**SPARQL 1.1 Spec Requirements NOT Met:**
+Per SPARQL 1.1 Section 17.3, numeric operations should:
+1. Support all numeric types (integer, decimal, float, double)
+2. Automatically promote to wider type (integer → decimal → float → double)
+3. Return results in the widest operand type
+
+**Current implementation violates these requirements.**
+
+**Technical Details:**
+```rust
+// Current implementation (integer-only)
+Function::Abs => {
+    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+    Ok(format!("xpath::abs_int({} as i64) as Field", arg_code))
+    // Hard-coded to abs_int - no type checking or float support
+}
+```
+
+**Impact:**
+- Functions work correctly ONLY for `xsd:integer` and derived integer types
+- Using with `xsd:float`, `xsd:double`, or `xsd:decimal` will cause:
+  - Incorrect results due to inappropriate integer casting
+  - Circuit verification failures
+  - Loss of precision for decimal/float values
+- Cannot mix numeric types: `FILTER(ABS(?int) + ?float > 10)` will fail
+
+**Examples:**
+```sparql
+# WORKS - integer only
+FILTER(ABS(?intValue) > 5)  # OK if ?intValue is xsd:integer
+
+# FAILS - float/double not supported  
+FILTER(ABS(?floatValue) > 5.5)  # FAILS if ?floatValue is xsd:float
+FILTER(ROUND(?doubleValue) = 10)  # FAILS if ?doubleValue is xsd:double
+
+# FAILS - no type casting
+FILTER(ABS(?decimalValue) > 5)  # FAILS if ?decimalValue is xsd:decimal
+```
+
+#### 3. DateTime Storage Assumptions
+- Assumes datetime stored as epoch microseconds
+- May need conversion logic for different encodings
+- No validation of datetime encoding format
+
+#### 4. No Runtime Type Validation
+- Functions assume correct input types
+- No type checking in generated code
+- Type errors fail at circuit verification time (not at transform time)
+- No helpful error messages for type mismatches
 
 ### Future Enhancements
 
-1. **Complete String Function Implementation**
-   - Proper string handling in circuits
-   - UTF-8 support
-   - Length calculations
+#### Priority 1: Fix Numeric Function Type Support
+**Required for SPARQL 1.1 compliance:**
+1. Implement type checking in generated Noir code
+2. Add support for all numeric types (integer, decimal, float, double)
+3. Implement automatic type promotion per SPARQL 1.1 spec
+4. Add type casting between numeric types
+5. Use appropriate xpath functions based on runtime type:
+   - `xpath::abs_int()` for integers
+   - `xpath::abs_float()` for floats
+   - `xpath::abs_double()` for doubles
 
-2. **Additional Functions from noir_XPath**
-   - Float/double operations (when IEEE 754 support ready)
-   - Duration operations
-   - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
-   - Boolean operations
+**Example needed implementation:**
+```rust
+// Pseudo-code for proper type handling
+Function::Abs => {
+    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+    let type_code = get_datatype(&args[0], hidden)?;
+    Ok(format!(r#"
+        if xpath::is_integer_type(hidden[{type_idx}]) {{
+            xpath::abs_int({arg} as i64) as Field
+        }} else if xpath::is_float_type(hidden[{type_idx}]) {{
+            xpath::abs_float(decode_float({arg})) as Field  
+        }} else if xpath::is_double_type(hidden[{type_idx}]) {{
+            xpath::abs_double(decode_double({arg})) as Field
+        }} else {{
+            // Type error
+            assert(false);
+            0
+        }}
+    "#, type_idx = type_code, arg = arg_code))
+}
+```
 
-3. **Type Validation**
-   - Add runtime type checking in generated code
-   - Better error messages for type mismatches
+#### Priority 2: Complete String Function Implementation
+1. Implement actual string operations in generated code
+2. Add proper string value handling (not just hashes)
+3. Implement UTF-8 support in circuits
+4. Add string length calculations
+5. Implement substring search and comparison
 
-4. **Performance Optimization**
-   - Optimize generated Noir code
-   - Reduce constraint count where possible
+**Required:**
+- Access to actual string values in circuit (not just hashes)
+- String representation that supports operations
+- May need to expand hidden inputs to include string values
+
+#### Priority 3: Additional Functions from noir_XPath
+Once core limitations are fixed:
+- Float/double versions of numeric functions
+- Duration operations
+- Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+- Boolean operations
+- Additional datetime functions
+
+#### Priority 4: Better Error Handling
+1. Add runtime type checking in generated code
+2. Generate helpful error messages for type mismatches
+3. Validate input types at transform time where possible
+4. Document which type combinations are supported
 
 ## Files Modified
 

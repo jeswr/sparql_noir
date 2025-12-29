@@ -86,8 +86,8 @@ The sparql_noir project generates ZK proofs that SPARQL query results are correc
 - ✅ isIRI, isURI, isBlank, isLiteral
 - ✅ STR, LANG, DATATYPE, LANGMATCHES
 - ✅ sameTerm
-- ✅ ABS, ROUND, CEIL, FLOOR (numeric functions via noir_XPath)
-- ✅ STRLEN, CONTAINS, STRSTARTS, STRENDS (string functions via noir_XPath)
+- ⚠️ ABS, ROUND, CEIL, FLOOR (numeric functions via noir_XPath - **integer-only, no type casting**)
+- ⚠️ STRLEN, CONTAINS, STRSTARTS, STRENDS (string functions via noir_XPath - **stub implementations only**)
 - ✅ YEAR, MONTH, DAY, HOURS, MINUTES, SECONDS, TIMEZONE (datetime functions via noir_XPath)
 - ❌ REGEX (not implemented)
 
@@ -200,23 +200,52 @@ The transform now accepts and correctly handles the vast majority of SPARQL 1.0 
 
 ## noir_XPath Integration
 
-The project now integrates the [noir_XPath library](https://github.com/jeswr/noir_XPath) to provide comprehensive XPath 2.0 function support required by SPARQL 1.1:
+The project now integrates the [noir_XPath library](https://github.com/jeswr/noir_XPath) to provide XPath 2.0 function support required by SPARQL 1.1.
+
+### ⚠️ **Important Limitations**
+
+#### Numeric Functions - Integer-Only
+**Numeric functions (ABS, ROUND, CEIL, FLOOR) currently have significant limitations:**
+- ✅ Work correctly for `xsd:integer` and derived integer types
+- ❌ **Do NOT support `xsd:float` or `xsd:double` types**
+- ❌ **No type casting** between numeric types (integer, decimal, float, double)
+- ❌ **No automatic type promotion** per SPARQL 1.1 spec
+- ⚠️ Using these functions with non-integer types will cause circuit verification failures
+
+**Example - Will FAIL:**
+```sparql
+FILTER(ABS(?floatValue) > 5)  # Fails if ?floatValue is xsd:float
+```
+
+**Example - Will WORK:**
+```sparql
+FILTER(ABS(?intValue) > 5)    # Works if ?intValue is xsd:integer
+```
+
+#### String Functions - Stub Implementations Only
+**String functions (STRLEN, CONTAINS, STRSTARTS, STRENDS) are placeholder stubs:**
+- ❌ **Do NOT actually compute string operations**
+- ❌ Return placeholder values instead of actual results
+- ❌ Cannot be used for real string processing
+- ⚠️ These functions exist for API compatibility but are not functional
+
+**Current behavior:** These functions generate placeholder Noir code that does not perform actual string operations. They will not produce correct results.
 
 ### Functions Available via noir_XPath
 
-**Numeric Functions:**
-- `ABS()` - Absolute value
-- `ROUND()` - Round to nearest integer
-- `CEIL()` - Round up to nearest integer
-- `FLOOR()` - Round down to nearest integer
+**Numeric Functions (⚠️ Integer-only - see limitations above):**
+- `ABS()` - Absolute value (integer-only)
+- `ROUND()` - Round to nearest integer (integer-only)
+- `CEIL()` - Round up to nearest integer (integer-only)
+- `FLOOR()` - Round down to nearest integer (integer-only)
 
-**String Functions:**
-- `STRLEN()` - String length
-- `CONTAINS()` - Test if string contains substring
-- `STRSTARTS()` - Test if string starts with prefix
-- `STRENDS()` - Test if string ends with suffix
+**String Functions (⚠️ Stub implementations - see limitations above):**
+- `STRLEN()` - String length (stub only)
+- `CONTAINS()` - Test if string contains substring (stub only)
+- `STRSTARTS()` - Test if string starts with prefix (stub only)
+- `STRENDS()` - Test if string ends with suffix (stub only)
 
-**DateTime Functions:**
+**DateTime Functions (✅ Fully functional):**
 - `YEAR()` - Extract year from dateTime
 - `MONTH()` - Extract month from dateTime
 - `DAY()` - Extract day from dateTime
