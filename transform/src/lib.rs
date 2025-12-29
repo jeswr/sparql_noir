@@ -371,54 +371,61 @@ fn expr_to_noir_code(
                 Function::Abs => {
                     if args.len() != 1 { return Err("ABS requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::abs_int({} as i64) as Field", arg_code))
+                    Ok(format!("(xpath::abs_int({} as i64) as Field)", arg_code))
                 }
                 Function::Round => {
                     if args.len() != 1 { return Err("ROUND requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::round_int({} as i64) as Field", arg_code))
+                    Ok(format!("(xpath::round_int({} as i64) as Field)", arg_code))
                 }
                 Function::Ceil => {
                     if args.len() != 1 { return Err("CEIL requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::ceil_int({} as i64) as Field", arg_code))
+                    Ok(format!("(xpath::ceil_int({} as i64) as Field)", arg_code))
                 }
                 Function::Floor => {
                     if args.len() != 1 { return Err("FLOOR requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::floor_int({} as i64) as Field", arg_code))
+                    Ok(format!("(xpath::floor_int({} as i64) as Field)", arg_code))
                 }
                 
                 // DateTime functions
                 Function::Year => {
                     if args.len() != 1 { return Err("YEAR requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::year_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                    // DateTime values are stored as epoch milliseconds, convert to microseconds for xpath
+                    Ok(format!("xpath::year_from_datetime(xpath::datetime_from_epoch_microseconds(({} as i128) * 1000))", arg_code))
                 }
                 Function::Month => {
                     if args.len() != 1 { return Err("MONTH requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::month_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                    Ok(format!("xpath::month_from_datetime(xpath::datetime_from_epoch_microseconds(({} as i128) * 1000))", arg_code))
                 }
                 Function::Day => {
                     if args.len() != 1 { return Err("DAY requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::day_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                    Ok(format!("xpath::day_from_datetime(xpath::datetime_from_epoch_microseconds(({} as i128) * 1000))", arg_code))
                 }
                 Function::Hours => {
                     if args.len() != 1 { return Err("HOURS requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::hours_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                    Ok(format!("xpath::hours_from_datetime(xpath::datetime_from_epoch_microseconds(({} as i128) * 1000))", arg_code))
                 }
                 Function::Minutes => {
                     if args.len() != 1 { return Err("MINUTES requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::minutes_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                    Ok(format!("xpath::minutes_from_datetime(xpath::datetime_from_epoch_microseconds(({} as i128) * 1000))", arg_code))
                 }
                 Function::Seconds => {
                     if args.len() != 1 { return Err("SECONDS requires 1 argument".into()); }
                     let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("xpath::seconds_from_datetime(xpath::datetime_from_epoch_microseconds({} as i128)) as Field", arg_code))
+                    Ok(format!("xpath::seconds_from_datetime(xpath::datetime_from_epoch_microseconds(({} as i128) * 1000))", arg_code))
+                }
+                Function::Timezone => {
+                    if args.len() != 1 { return Err("TIMEZONE requires 1 argument".into()); }
+                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
+                    // Returns a duration representing the timezone offset
+                    Ok(format!("xpath::duration_to_microseconds(xpath::timezone_from_datetime(xpath::datetime_from_epoch_microseconds(({} as i128) * 1000)))", arg_code))
                 }
                 
                 _ => Err(format!("Unsupported function in expression: {:?}", func)),
@@ -739,85 +746,45 @@ fn filter_to_noir(
                 }
                 
                 // String functions (return numeric/boolean values only)
+                // Note: These are placeholder implementations that do not perform actual string operations
                 Function::StrLen => {
                     if args.len() != 1 { return Err("STRLEN requires 1 argument".into()); }
                     let term = expr_to_term(&args[0])?;
                     let str_idx = push_hidden(hidden, "strlen_str", &term);
-                    // Note: We need to pass the actual string, not the hash
-                    // For now, generate a placeholder that assumes string value is available
+                    // STUB: Returns placeholder value, not actual string length
+                    // TODO: Implement actual string length calculation when string values are available
                     Ok(format!("hidden[{}]", str_idx))
                 }
                 Function::Contains => {
                     if args.len() != 2 { return Err("CONTAINS requires 2 arguments".into()); }
                     let str1_term = expr_to_term(&args[0])?;
-                    let str2_term = expr_to_term(&args[1])?;
                     let str1_idx = push_hidden(hidden, "contains_str1", &str1_term);
-                    let _str2_idx = push_hidden(hidden, "contains_str2", &str2_term);
-                    // Generate placeholder - actual implementation needs string handling
+                    // STUB: Second argument not used - placeholder implementation only
+                    // TODO: Implement xpath::contains(str1, str2) when string values are available
                     Ok(format!("(hidden[{}] != 0)", str1_idx))
                 }
                 Function::StrStarts => {
                     if args.len() != 2 { return Err("STRSTARTS requires 2 arguments".into()); }
                     let str1_term = expr_to_term(&args[0])?;
-                    let str2_term = expr_to_term(&args[1])?;
                     let str1_idx = push_hidden(hidden, "strstarts_str1", &str1_term);
-                    let _str2_idx = push_hidden(hidden, "strstarts_str2", &str2_term);
+                    // STUB: Second argument not used - placeholder implementation only
+                    // TODO: Implement xpath::starts_with(str1, str2) when string values are available
                     Ok(format!("(hidden[{}] != 0)", str1_idx))
                 }
                 Function::StrEnds => {
                     if args.len() != 2 { return Err("STRENDS requires 2 arguments".into()); }
                     let str1_term = expr_to_term(&args[0])?;
-                    let str2_term = expr_to_term(&args[1])?;
                     let str1_idx = push_hidden(hidden, "strends_str1", &str1_term);
-                    let _str2_idx = push_hidden(hidden, "strends_str2", &str2_term);
+                    // STUB: Second argument not used - placeholder implementation only
+                    // TODO: Implement xpath::ends_with(str1, str2) when string values are available
                     Ok(format!("(hidden[{}] != 0)", str1_idx))
                 }
                 
-                // DateTime functions
-                Function::Year => {
-                    if args.len() != 1 { return Err("YEAR requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let dt_idx = push_hidden(hidden, "year_datetime", &term);
-                    // Generate call to xpath datetime function
-                    // Assuming datetime is stored as epoch microseconds
-                    Ok(format!("xpath::year_from_datetime(xpath::datetime_from_epoch_microseconds(hidden[{}] as i128))", dt_idx))
-                }
-                Function::Month => {
-                    if args.len() != 1 { return Err("MONTH requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let dt_idx = push_hidden(hidden, "month_datetime", &term);
-                    Ok(format!("xpath::month_from_datetime(xpath::datetime_from_epoch_microseconds(hidden[{}] as i128))", dt_idx))
-                }
-                Function::Day => {
-                    if args.len() != 1 { return Err("DAY requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let dt_idx = push_hidden(hidden, "day_datetime", &term);
-                    Ok(format!("xpath::day_from_datetime(xpath::datetime_from_epoch_microseconds(hidden[{}] as i128))", dt_idx))
-                }
-                Function::Hours => {
-                    if args.len() != 1 { return Err("HOURS requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let dt_idx = push_hidden(hidden, "hours_datetime", &term);
-                    Ok(format!("xpath::hours_from_datetime(xpath::datetime_from_epoch_microseconds(hidden[{}] as i128))", dt_idx))
-                }
-                Function::Minutes => {
-                    if args.len() != 1 { return Err("MINUTES requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let dt_idx = push_hidden(hidden, "minutes_datetime", &term);
-                    Ok(format!("xpath::minutes_from_datetime(xpath::datetime_from_epoch_microseconds(hidden[{}] as i128))", dt_idx))
-                }
-                Function::Seconds => {
-                    if args.len() != 1 { return Err("SECONDS requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let dt_idx = push_hidden(hidden, "seconds_datetime", &term);
-                    Ok(format!("xpath::seconds_from_datetime(xpath::datetime_from_epoch_microseconds(hidden[{}] as i128))", dt_idx))
-                }
-                Function::Timezone => {
-                    if args.len() != 1 { return Err("TIMEZONE requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let dt_idx = push_hidden(hidden, "timezone_datetime", &term);
-                    // Returns a duration representing the timezone offset
-                    Ok(format!("xpath::duration_to_microseconds(xpath::timezone_from_datetime(xpath::datetime_from_epoch_microseconds(hidden[{}] as i128)))", dt_idx))
+                // DateTime functions - delegate to expr_to_noir_code to avoid duplication
+                Function::Year | Function::Month | Function::Day | 
+                Function::Hours | Function::Minutes | Function::Seconds | Function::Timezone => {
+                    let expr = Expression::FunctionCall(func.clone(), args.clone());
+                    expr_to_noir_code(&expr, query, bindings, hidden)
                 }
                 
                 _ => Err(format!("Unsupported function: {:?}", func)),

@@ -270,9 +270,10 @@ FILTER(ABS(?decimalValue) > 5)  # FAILS if ?decimalValue is xsd:decimal
 ```
 
 #### 3. DateTime Storage Assumptions
-- Assumes datetime stored as epoch microseconds
-- May need conversion logic for different encodings
-- No validation of datetime encoding format
+- **Currently, datetime literals are encoded as epoch milliseconds** in `special_literal_handling` (see `transform/src/lib.rs` line 294)
+- The generated code for datetime functions assumes epoch **milliseconds** storage
+- There's a **conversion factor needed**: Generated code multiplies by 1000 to convert milliseconds to microseconds for xpath functions
+- If the storage encoding changes (e.g., to true epoch microseconds), the conversion logic at lines 396-421 in `transform/src/lib.rs` will need updating
 
 #### 4. No Runtime Type Validation
 - Functions assume correct input types
