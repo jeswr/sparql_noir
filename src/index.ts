@@ -4,18 +4,21 @@
  * This is the main API entry point for the sparql_noir package.
  */
 
-import type { SignedData, SignOptions } from './scripts/sign.js';
-import type { ProveOptions, ProofOutput, ProveResult } from './scripts/prove.js';
-import type { VerifyOptions, VerifyResult } from './scripts/verify.js';
+import type { Quad, DatasetCore } from '@rdfjs/types';
+import type { SignedData } from './scripts/sign.js';
+import type { ProveResult } from './scripts/prove.js';
+import type { VerifyResult } from './scripts/verify.js';
 import { defaultConfig } from './config.js';
+import N3 from 'n3';
+import { RDFC10 } from 'rdfjs-c14n';
 
-// Export core functionality
-export { signRdfData, processRdfDataWithoutSigning } from './scripts/sign.js';
+// Export core functionality for advanced use
+export { processQuadsForMerkle } from './scripts/sign.js';
 export { generateProofs } from './scripts/prove.js';
 export { verifyProofs } from './scripts/verify.js';
 
 // Export types
-export type { SignedData, SignOptions, ProveOptions, ProofOutput, ProveResult, VerifyOptions, VerifyResult };
+export type { SignedData, ProveResult, VerifyResult };
 
 // Export configuration
 export { defaultConfig, stringHashes, fieldHashes, merkleDepths, signatures } from './config.js';
@@ -47,34 +50,122 @@ export interface Config {
 /**
  * Sign an RDF dataset, producing a signed dataset with Merkle root and signature.
  * 
- * @param dataset - Path to the RDF dataset file (Turtle/N-Quads)
+ * @param dataset - RDF/JS DatasetCore containing the quads to sign
  * @param config - Optional configuration (uses defaults if not provided)
  * @returns Signed dataset with Merkle root, signature, and encoded triples
  * 
  * @example
  * ```typescript
  * import { sign } from '@jeswr/sparql-noir';
+ * import { Store } from 'n3';
  * 
- * const signed = await sign('data.ttl');
+ * const store = new Store();
+ * // ... add triples to store
+ * const signed = await sign(store);
  * console.log('Root:', signed.root);
  * console.log('Signature:', signed.signature);
  * ```
  */
 export async function sign(
-  dataset: string,
+  dataset: DatasetCore,
   config?: Partial<Config>
 ): Promise<SignedData> {
   // TODO: Apply config if provided (currently uses defaultConfig)
-  const { signRdfData } = await import('./scripts/sign.js');
-  return signRdfData(dataset);
+  const { processQuadsForMerkle } = await import('./scripts/sign.js');
+  const { runJson } = await import('./encode.js');
+  const crypto = (await import('crypto')).default;
+  const secp256k1 = (await import('secp256k1')).default;
+  // @ts-expect-error - secp256r1 has no type definitions
+  const secp256r1 = (await import('secp256r1')).default;
+  const { EdDSAPoseidon } = await import('@zk-kit/eddsa-poseidon');
+  const { Base8, mulPointEscalar } = await import('@zk-kit/baby-jubjub');
+  const { Schnorr } = await import('@aztec/foundation/crypto');
+  const { Fq } = await import('@aztec/foundation/fields');
+  const { quadToStringQuad } = await import('rdf-string-ttl');
+  
+  // Convert dataset to canonicalized quads
+  const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(dataset));
+  
+  // Process quads for Merkle tree
+  const { triples, noirInput } = await processQuadsForMerkle(quads);
+  
+  // Generate Merkle tree via Noir execution
+  const jsonRes = runJson(`[${noirInput}]`)[0];
+  
+  // Add quad string representations
+  jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
+  
+  // Generate cryptographic signature
+  let privKey = crypto.randomBytes(32);
+
+  if (defaultConfig.signature === 'secp256k1' || defaultConfig.signature === 'secp256r1') {
+    const pkg = defaultConfig.signature === 'secp256k1' ? secp256k1 : secp256r1;
+    while (!pkg.privateKeyVerify(privKey))
+      privKey = crypto.randomBytes(32);
+
+    const pubKey = pkg.publicKeyCreate(privKey, false);
+    const sigObj = (pkg.ecdsaSign || pkg.sign)(Buffer.from(jsonRes.root_u8), privKey);
+    jsonRes.signature = Array.from(sigObj.signature);
+    jsonRes.pubKey = {
+      x: Array.from(pubKey.slice(1, 33)),
+      y: Array.from(pubKey.slice(33, 65)),
+    };
+  } else if (defaultConfig.signature === 'babyjubjubOpt') {
+    const ed = new EdDSAPoseidon(privKey);
+    const signature = ed.signMessage(jsonRes.root);
+
+    const left = mulPointEscalar(Base8, signature.S);
+    const k8 = mulPointEscalar(ed.publicKey, 8n);
+
+    jsonRes.signature = {
+      r: {
+        x: '0x' + signature.R8[0].toString(16),
+        y: '0x' + signature.R8[1].toString(16),
+      },
+      left: {
+        x: '0x' + left[0].toString(16),
+        y: '0x' + left[1].toString(16),
+      },
+      s: '0x' + signature.S.toString(16),
+    };
+    jsonRes.pubKey = {
+      value: {
+        x: '0x' + ed.publicKey[0].toString(16),
+        y: '0x' + ed.publicKey[1].toString(16),
+      },
+      k8: {
+        x: '0x' + k8[0].toString(16),
+        y: '0x' + k8[1].toString(16),
+      },
+    };
+  } else if (defaultConfig.signature === 'schnorr') {
+    const schnorr = new Schnorr();
+    const schnorrPrivKey = Fq.random();
+
+    const messageBuf = Buffer.from(jsonRes.root_u8);
+    const signature = await schnorr.constructSignature(messageBuf, schnorrPrivKey);
+    const publicKey = await schnorr.computePublicKey(schnorrPrivKey);
+
+    jsonRes.signature = Array.from(signature.toBuffer());
+    jsonRes.pubKey = {
+      x: publicKey.x.toJSON(),
+      y: publicKey.y.toJSON(),
+      is_infinite: false,
+    };
+  } else {
+    throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
+  }
+
+  delete jsonRes.root_u8;
+
+  return jsonRes as SignedData;
 }
 
 /**
  * Generate a zero-knowledge proof that a SPARQL query holds over signed datasets.
  * 
  * @param query - SPARQL SELECT query string
- * @param circuitDir - Path to the compiled circuit directory
- * @param signedDatasets - Array of signed datasets to query
+ * @param signedDatasets - Signed dataset(s) to query over
  * @param config - Optional configuration
  * @returns Proof object with proof bytes, verification key, and metadata
  * 
@@ -84,40 +175,78 @@ export async function sign(
  * 
  * const proof = await prove(
  *   'SELECT ?name WHERE { ?person foaf:name ?name }',
- *   './circuit',
- *   [signedDataset]
+ *   signedDataset
  * );
  * ```
  */
 export async function prove(
-  circuitDir: string,
-  signedDatasets: SignedData | SignedData[] | null,
+  query: string,
+  signedDatasets: SignedData | SignedData[],
   config?: Partial<Config>
 ): Promise<ProveResult> {
+  const fs = (await import('fs')).default;
+  const path = (await import('path')).default;
+  const os = (await import('os')).default;
+  const { execSync } = await import('child_process');
   const { generateProofs } = await import('./scripts/prove.js');
   
   // Handle single dataset or array
-  const datasets = signedDatasets 
-    ? (Array.isArray(signedDatasets) ? signedDatasets : [signedDatasets])
-    : null;
-  const signedData = datasets && datasets.length === 1 ? datasets[0]! : null;
+  const datasets = Array.isArray(signedDatasets) ? signedDatasets : [signedDatasets];
+  const signedData = datasets.length === 1 ? datasets[0]! : null;
   
   // TODO: Handle multiple datasets properly
-  if (datasets && datasets.length > 1) {
+  if (datasets.length > 1) {
     throw new Error('Multiple datasets not yet supported in API');
   }
   
-  return generateProofs({
-    circuitDir,
-    signedData,
-  });
+  // Create temporary directory for circuit generation
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparql-noir-'));
+  
+  try {
+    // Write query to temporary file
+    const queryFile = path.join(tmpDir, 'query.rq');
+    fs.writeFileSync(queryFile, query);
+    
+    // Generate circuit using transform
+    const circuitDir = path.join(tmpDir, 'circuit');
+    const transformCmd = `cargo run --manifest-path ${path.join(process.cwd(), 'transform/Cargo.toml')} -- -q ${queryFile} -o ${circuitDir}`;
+    execSync(transformCmd, { stdio: 'pipe' });
+    
+    // Compile circuit
+    execSync(`cd ${circuitDir} && nargo compile`, { stdio: 'pipe' });
+    
+    // Read compiled circuit
+    const targetDir = path.join(circuitDir, 'target');
+    const circuitFiles = fs.readdirSync(targetDir).filter((f: string) => f.endsWith('.json'));
+    if (circuitFiles.length === 0) {
+      throw new Error('No compiled circuit found');
+    }
+    const compiledCircuit = JSON.parse(fs.readFileSync(path.join(targetDir, circuitFiles[0]!), 'utf8'));
+    
+    // Generate proof
+    const result = await generateProofs({
+      circuitDir,
+      signedData,
+    });
+    
+    // Attach compiled circuit to each proof for verification
+    if (result.proofs) {
+      for (const proof of result.proofs) {
+        (proof as any).compiledCircuit = compiledCircuit;
+      }
+    }
+    
+    return result;
+  } finally {
+    // Clean up temporary directory
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 }
 
 /**
  * Verify a proof is valid.
  * 
- * @param circuitDir - Path to the compiled circuit directory
- * @param proof - Proof object to verify
+ * @param proof - Proof object to verify (must include compiled circuit from prove())
  * @param config - Optional configuration
  * @returns Verification result indicating if the proof is valid
  * 
@@ -125,23 +254,59 @@ export async function prove(
  * ```typescript
  * import { verify } from '@jeswr/sparql-noir';
  * 
- * const result = await verify('./circuit', proof);
+ * const result = await verify(proof);
  * if (result.success) {
  *   console.log('Proof is valid!');
  * }
  * ```
  */
 export async function verify(
-  circuitDir: string,
   proof: ProveResult,
   config?: Partial<Config>
 ): Promise<VerifyResult> {
-  const { verifyProofs } = await import('./scripts/verify.js');
+  const { UltraHonkBackend } = await import('@aztec/bb.js');
   
-  return verifyProofs({
-    circuitDir,
-    proofData: proof,
-  });
+  // Verify each proof in the result
+  let verifiedCount = 0;
+  let failedCount = 0;
+  const proofs = proof.proofs || [];
+  
+  for (const proofItem of proofs) {
+    try {
+      // Get the compiled circuit from the proof
+      const compiledCircuit = (proofItem as any).compiledCircuit;
+      if (!compiledCircuit) {
+        throw new Error('Proof does not contain compiled circuit information. Make sure to use the proof returned from prove().');
+      }
+      
+      const backend = new UltraHonkBackend(compiledCircuit.bytecode, { threads: 6 });
+      
+      const proofData = {
+        proof: proofItem.proof instanceof Uint8Array
+          ? proofItem.proof
+          : new Uint8Array(proofItem.proof),
+        publicInputs: proofItem.publicInputs as string[],
+      };
+      
+      const isValid = await backend.verifyProof(proofData);
+      backend.destroy();
+      
+      if (isValid) {
+        verifiedCount++;
+      } else {
+        failedCount++;
+      }
+    } catch (error) {
+      failedCount++;
+    }
+  }
+  
+  return {
+    verified: verifiedCount,
+    failed: failedCount,
+    total: proofs.length,
+    success: failedCount === 0,
+  };
 }
 
 /**

@@ -18,53 +18,70 @@ npm install @jeswr/sparql-noir
 
 ```typescript
 import { sign, prove, verify, info } from '@jeswr/sparql-noir';
+import { Store, Parser } from 'n3';
 
-// 1. Sign your RDF dataset
-const signed = await sign('data.ttl');
+// 1. Load your RDF data into an RDF/JS dataset
+const store = new Store();
+const parser = new Parser();
+// Parse your RDF data...
 
-// 2. Get disclosure information for your query
+// 2. Sign the dataset
+const signed = await sign(store);
+
+// 3. Get disclosure information for your query
 const query = 'SELECT ?name WHERE { ?person foaf:name ?name }';
 const disclosure = info(query);
 console.log('Disclosed variables:', disclosure.disclosedVariables);
 
-// 3. Generate a proof (requires compiled circuit)
-const proof = await prove('circuit/', signed);
+// 4. Generate a proof (internally generates and compiles circuit)
+const proof = await prove(query, signed);
 
-// 4. Verify the proof
-const result = await verify('circuit/', proof);
+// 5. Verify the proof
+const result = await verify(proof);
 console.log('Valid:', result.success);
 ```
 
 ### API Reference
 
-#### `sign(dataset: string, config?: Config): Promise<SignedData>`
+#### `sign(dataset: DatasetCore, config?: Config): Promise<SignedData>`
 
-Signs an RDF dataset, producing a signed dataset with Merkle root and signature.
+Signs an RDF/JS dataset, producing a signed dataset with Merkle root and signature.
 
 **Parameters:**
-- `dataset` - Path to the RDF dataset file (Turtle/N-Quads)
+- `dataset` - RDF/JS DatasetCore (e.g., N3.Store) containing the quads to sign
 - `config` - Optional configuration (hash functions, signature scheme, merkle depth)
 
 **Returns:** Signed dataset with Merkle root, signature, and encoded triples
 
-#### `prove(circuitDir: string, signedData: SignedData | null, config?: Config): Promise<ProveResult>`
+**Example:**
+```typescript
+import { Store, Parser } from 'n3';
+const store = new Store();
+const parser = new Parser();
+// Parse your Turtle data into the store
+const signed = await sign(store);
+```
+
+#### `prove(query: string, signedData: SignedData, config?: Config): Promise<ProveResult>`
 
 Generates a zero-knowledge proof that a SPARQL query holds over signed datasets.
+Internally generates the Noir circuit, compiles it, and creates the proof.
 
 **Parameters:**
-- `circuitDir` - Path to the compiled circuit directory
+- `query` - SPARQL SELECT query string
 - `signedData` - Signed dataset(s) to query over
 - `config` - Optional configuration
 
-**Returns:** Proof object with proof bytes, verification key, and metadata
+**Returns:** Proof object with proof bytes, verification key, and embedded circuit
 
-#### `verify(circuitDir: string, proof: ProveResult, config?: Config): Promise<VerifyResult>`
+**Note:** Requires Rust/Cargo and Nargo to be installed for circuit generation and compilation.
 
-Verifies a proof is valid.
+#### `verify(proof: ProveResult, config?: Config): Promise<VerifyResult>`
+
+Verifies a proof is valid using the compiled circuit embedded in the proof.
 
 **Parameters:**
-- `circuitDir` - Path to the compiled circuit directory
-- `proof` - Proof object to verify
+- `proof` - Proof object returned from `prove()`
 - `config` - Optional configuration
 
 **Returns:** Verification result indicating if the proof is valid
