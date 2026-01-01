@@ -6,14 +6,22 @@
 
 import type { Quad, DatasetCore } from '@rdfjs/types';
 import type { SignedData } from './scripts/sign.js';
-import type { ProveResult } from './scripts/prove.js';
+import type { ProveResult, ProofOutput } from './scripts/prove.js';
 import type { VerifyResult } from './scripts/verify.js';
 import { defaultConfig } from './config.js';
 import N3 from 'n3';
 import { RDFC10 } from 'rdfjs-c14n';
+import { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
+import { runJson } from './encode.js';
+import { quadToStringQuad } from 'rdf-string-ttl';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { UltraHonkBackend } from '@aztec/bb.js';
+import { generateProofs } from './scripts/prove.js';
 
 // Export core functionality for advanced use
-export { processQuadsForMerkle } from './scripts/sign.js';
+export { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
 export { generateProofs } from './scripts/prove.js';
 export { verifyProofs } from './scripts/verify.js';
 
@@ -48,10 +56,17 @@ export interface Config {
 }
 
 /**
+ * Extended ProofOutput with compiled circuit for verification
+ */
+interface ProofOutputWithCircuit extends ProofOutput {
+  compiledCircuit?: any;
+}
+
+/**
  * Sign an RDF dataset, producing a signed dataset with Merkle root and signature.
  * 
  * @param dataset - RDF/JS DatasetCore containing the quads to sign
- * @param config - Optional configuration (uses defaults if not provided)
+ * @param config - Optional configuration (hash functions, signature scheme, merkle depth)
  * @returns Signed dataset with Merkle root, signature, and encoded triples
  * 
  * @example
@@ -70,24 +85,14 @@ export async function sign(
   dataset: DatasetCore,
   config?: Partial<Config>
 ): Promise<SignedData> {
-  // TODO: Apply config if provided (currently uses defaultConfig)
-  const { processQuadsForMerkle } = await import('./scripts/sign.js');
-  const { runJson } = await import('./encode.js');
-  const crypto = (await import('crypto')).default;
-  const secp256k1 = (await import('secp256k1')).default;
-  // @ts-expect-error - secp256r1 has no type definitions
-  const secp256r1 = (await import('secp256r1')).default;
-  const { EdDSAPoseidon } = await import('@zk-kit/eddsa-poseidon');
-  const { Base8, mulPointEscalar } = await import('@zk-kit/baby-jubjub');
-  const { Schnorr } = await import('@aztec/foundation/crypto');
-  const { Fq } = await import('@aztec/foundation/fields');
-  const { quadToStringQuad } = await import('rdf-string-ttl');
+  // Merge config with defaults
+  const effectiveConfig = { ...defaultConfig, ...config };
   
   // Convert dataset to canonicalized quads
   const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(dataset));
   
   // Process quads for Merkle tree
-  const { triples, noirInput } = await processQuadsForMerkle(quads);
+  const { noirInput } = await processQuadsForMerkle(quads);
   
   // Generate Merkle tree via Noir execution
   const jsonRes = runJson(`[${noirInput}]`)[0];
@@ -95,68 +100,8 @@ export async function sign(
   // Add quad string representations
   jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
   
-  // Generate cryptographic signature
-  let privKey = crypto.randomBytes(32);
-
-  if (defaultConfig.signature === 'secp256k1' || defaultConfig.signature === 'secp256r1') {
-    const pkg = defaultConfig.signature === 'secp256k1' ? secp256k1 : secp256r1;
-    while (!pkg.privateKeyVerify(privKey))
-      privKey = crypto.randomBytes(32);
-
-    const pubKey = pkg.publicKeyCreate(privKey, false);
-    const sigObj = (pkg.ecdsaSign || pkg.sign)(Buffer.from(jsonRes.root_u8), privKey);
-    jsonRes.signature = Array.from(sigObj.signature);
-    jsonRes.pubKey = {
-      x: Array.from(pubKey.slice(1, 33)),
-      y: Array.from(pubKey.slice(33, 65)),
-    };
-  } else if (defaultConfig.signature === 'babyjubjubOpt') {
-    const ed = new EdDSAPoseidon(privKey);
-    const signature = ed.signMessage(jsonRes.root);
-
-    const left = mulPointEscalar(Base8, signature.S);
-    const k8 = mulPointEscalar(ed.publicKey, 8n);
-
-    jsonRes.signature = {
-      r: {
-        x: '0x' + signature.R8[0].toString(16),
-        y: '0x' + signature.R8[1].toString(16),
-      },
-      left: {
-        x: '0x' + left[0].toString(16),
-        y: '0x' + left[1].toString(16),
-      },
-      s: '0x' + signature.S.toString(16),
-    };
-    jsonRes.pubKey = {
-      value: {
-        x: '0x' + ed.publicKey[0].toString(16),
-        y: '0x' + ed.publicKey[1].toString(16),
-      },
-      k8: {
-        x: '0x' + k8[0].toString(16),
-        y: '0x' + k8[1].toString(16),
-      },
-    };
-  } else if (defaultConfig.signature === 'schnorr') {
-    const schnorr = new Schnorr();
-    const schnorrPrivKey = Fq.random();
-
-    const messageBuf = Buffer.from(jsonRes.root_u8);
-    const signature = await schnorr.constructSignature(messageBuf, schnorrPrivKey);
-    const publicKey = await schnorr.computePublicKey(schnorrPrivKey);
-
-    jsonRes.signature = Array.from(signature.toBuffer());
-    jsonRes.pubKey = {
-      x: publicKey.x.toJSON(),
-      y: publicKey.y.toJSON(),
-      is_infinite: false,
-    };
-  } else {
-    throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
-  }
-
-  delete jsonRes.root_u8;
+  // Generate cryptographic signature using shared logic
+  await generateSignature(jsonRes, effectiveConfig.signature);
 
   return jsonRes as SignedData;
 }
@@ -178,17 +123,24 @@ export async function sign(
  *   signedDataset
  * );
  * ```
+ * 
+ * @note Requires Nargo to be installed for circuit compilation
  */
 export async function prove(
   query: string,
   signedDatasets: SignedData | SignedData[],
   config?: Partial<Config>
 ): Promise<ProveResult> {
-  const fs = (await import('fs')).default;
-  const path = (await import('path')).default;
-  const os = (await import('os')).default;
-  const { execSync } = await import('child_process');
-  const { generateProofs } = await import('./scripts/prove.js');
+  // Merge config with defaults
+  const effectiveConfig = { ...defaultConfig, ...config };
+  
+  // Validate Nargo installation
+  try {
+    const { execSync } = await import('child_process');
+    execSync('nargo --version', { stdio: 'pipe' });
+  } catch (error) {
+    throw new Error('Nargo is not installed or not in PATH. Please install Nargo from https://noir-lang.org/docs/getting_started/installation/');
+  }
   
   // Handle single dataset or array
   const datasets = Array.isArray(signedDatasets) ? signedDatasets : [signedDatasets];
@@ -207,19 +159,44 @@ export async function prove(
     const queryFile = path.join(tmpDir, 'query.rq');
     fs.writeFileSync(queryFile, query);
     
-    // Generate circuit using transform
+    // Use WASM to generate circuit
     const circuitDir = path.join(tmpDir, 'circuit');
-    const transformCmd = `cargo run --manifest-path ${path.join(process.cwd(), 'transform/Cargo.toml')} -- -q ${queryFile} -o ${circuitDir}`;
-    execSync(transformCmd, { stdio: 'pipe' });
+    try {
+      // Try to import the WASM module if it exists (using dynamic import with variable to avoid TS checking)
+      const wasmPath = path.join(path.dirname(new URL(import.meta.url).pathname), '../transform/pkg/transform.cjs');
+      let wasmModule: any;
+      try {
+        const { default: loadModule } = await import('module');
+        const moduleRequire = loadModule.createRequire(import.meta.url);
+        wasmModule = moduleRequire(wasmPath);
+      } catch (error) {
+        throw new Error('WASM transform module not found. Please build it first with: npm run build:wasm');
+      }
+      
+      const output = wasmModule.transform_query(query, circuitDir);
+      if (!output || output.error) {
+        throw new Error(`Circuit generation failed: ${output?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      throw new Error(`Failed to generate circuit using WASM: ${(error as Error).message}`);
+    }
     
-    // Compile circuit
-    execSync(`cd ${circuitDir} && nargo compile`, { stdio: 'pipe' });
+    // Compile circuit with Nargo
+    const { execSync } = await import('child_process');
+    try {
+      execSync('nargo compile', { 
+        cwd: circuitDir,
+        stdio: 'pipe'
+      });
+    } catch (error) {
+      throw new Error(`Circuit compilation failed: ${(error as Error).message}`);
+    }
     
     // Read compiled circuit
     const targetDir = path.join(circuitDir, 'target');
     const circuitFiles = fs.readdirSync(targetDir).filter((f: string) => f.endsWith('.json'));
     if (circuitFiles.length === 0) {
-      throw new Error('No compiled circuit found');
+      throw new Error('No compiled circuit found after compilation');
     }
     const compiledCircuit = JSON.parse(fs.readFileSync(path.join(targetDir, circuitFiles[0]!), 'utf8'));
     
@@ -232,14 +209,19 @@ export async function prove(
     // Attach compiled circuit to each proof for verification
     if (result.proofs) {
       for (const proof of result.proofs) {
-        (proof as any).compiledCircuit = compiledCircuit;
+        (proof as ProofOutputWithCircuit).compiledCircuit = compiledCircuit;
       }
     }
     
     return result;
   } finally {
     // Clean up temporary directory
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch (error) {
+      // Ignore cleanup errors
+      console.warn(`Failed to clean up temporary directory: ${(error as Error).message}`);
+    }
   }
 }
 
@@ -247,7 +229,7 @@ export async function prove(
  * Verify a proof is valid.
  * 
  * @param proof - Proof object to verify (must include compiled circuit from prove())
- * @param config - Optional configuration
+ * @param config - Optional configuration (currently unused but reserved for future use)
  * @returns Verification result indicating if the proof is valid
  * 
  * @example
@@ -264,19 +246,21 @@ export async function verify(
   proof: ProveResult,
   config?: Partial<Config>
 ): Promise<VerifyResult> {
-  const { UltraHonkBackend } = await import('@aztec/bb.js');
-  
   // Verify each proof in the result
   let verifiedCount = 0;
   let failedCount = 0;
   const proofs = proof.proofs || [];
+  const errors: string[] = [];
   
-  for (const proofItem of proofs) {
+  for (let i = 0; i < proofs.length; i++) {
+    const proofItem = proofs[i]!;
     try {
       // Get the compiled circuit from the proof
-      const compiledCircuit = (proofItem as any).compiledCircuit;
+      const compiledCircuit = (proofItem as ProofOutputWithCircuit).compiledCircuit;
       if (!compiledCircuit) {
-        throw new Error('Proof does not contain compiled circuit information. Make sure to use the proof returned from prove().');
+        const error = `Proof ${i + 1} does not contain compiled circuit information. Make sure to use the proof returned from prove().`;
+        errors.push(error);
+        throw new Error(error);
       }
       
       const backend = new UltraHonkBackend(compiledCircuit.bytecode, { threads: 6 });
@@ -294,9 +278,13 @@ export async function verify(
       if (isValid) {
         verifiedCount++;
       } else {
+        const error = `Proof ${i + 1} verification failed: invalid proof`;
+        errors.push(error);
         failedCount++;
       }
     } catch (error) {
+      const errorMsg = `Proof ${i + 1} verification error: ${(error as Error).message}`;
+      errors.push(errorMsg);
       failedCount++;
     }
   }
@@ -306,7 +294,8 @@ export async function verify(
     failed: failedCount,
     total: proofs.length,
     success: failedCount === 0,
-  };
+    errors: errors.length > 0 ? errors : undefined,
+  } as VerifyResult;
 }
 
 /**
@@ -314,7 +303,7 @@ export async function verify(
  * Returns information about what will be disclosed vs. hidden in the proof.
  * 
  * @param query - SPARQL SELECT query string
- * @param config - Optional configuration
+ * @param config - Optional configuration (hash functions, signature scheme, merkle depth)
  * @returns Disclosure information including disclosed and hidden variables
  * 
  * @example
@@ -330,25 +319,26 @@ export function info(
   query: string,
   config?: Partial<Config>
 ): DisclosureInfo {
-  // Parse the query to extract variables
-  // TODO: Implement proper SPARQL parsing to determine disclosed vs hidden variables
+  // Merge config with defaults
+  const effectiveConfig = { ...defaultConfig, ...config };
   
-  // For now, return a basic implementation
-  const selectMatch = query.match(/SELECT\s+(.*?)\s+WHERE/i);
+  // Parse the query to extract variables
+  // TODO: Use proper SPARQL parser (spargebra) for more robust parsing
+  const selectMatch = query.match(/SELECT\s+(.*?)\s+WHERE/is);
   const variables = selectMatch 
     ? selectMatch[1]!.match(/\?(\w+)/g)?.map(v => v.substring(1)) || []
     : [];
   
   return {
     query,
-    merkleDepth: config?.merkleDepth || defaultConfig.merkleDepth,
+    merkleDepth: effectiveConfig.merkleDepth,
     pathSegmentMax: 8, // Default from spec
-    signatureScheme: config?.signature || defaultConfig.signature,
+    signatureScheme: effectiveConfig.signature,
     disclosedVariables: variables,
     hiddenVariables: [], // All projected variables are disclosed by default
     summary: `This query discloses ${variables.length} variable(s): ${variables.join(', ')}. ` +
-             `Merkle depth: ${config?.merkleDepth || defaultConfig.merkleDepth}, ` +
-             `Signature: ${config?.signature || defaultConfig.signature}.`
+             `Merkle depth: ${effectiveConfig.merkleDepth}, ` +
+             `Signature: ${effectiveConfig.signature}.`
   };
 }
 
@@ -371,5 +361,3 @@ export interface DisclosureInfo {
   /** Human-readable summary */
   summary: string;
 }
-
-
