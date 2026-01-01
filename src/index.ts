@@ -18,7 +18,7 @@ import { UltraHonkBackend } from '@aztec/bb.js';
 import { generateProofsInMemory } from './scripts/prove.js';
 import { compile_program } from '@noir-lang/noir_wasm';
 import type { CompiledCircuit } from '@noir-lang/noir_js';
-import { getNoirLibFiles } from './noir-lib-bundle.js';
+import { getNoirLibFilesEncoded } from './noir-lib-bundle.js';
 
 // --- Circuit Cache ---
 
@@ -110,8 +110,17 @@ export {
 // --- In-Memory FileManager for noir_wasm compilation ---
 
 /**
+ * Get static noir lib files (pre-encoded as Uint8Array from bundle).
+ * These are decoded once on first access and cached in the bundle module.
+ */
+function getStaticNoirLibFiles(): Map<string, Uint8Array> {
+  return getNoirLibFilesEncoded();
+}
+
+/**
  * In-memory filesystem for noir_wasm compilation.
  * Implements the FileManager interface without any disk I/O.
+ * Noir lib files are always available as static unmodifiable files.
  */
 class InMemoryFileManager {
   private files: Map<string, Uint8Array> = new Map();
@@ -134,11 +143,17 @@ class InMemoryFileManager {
 
   existsSync(path: string): boolean {
     const normalizedPath = this.getPath(path);
-    // Check for exact file match
+    // Check for exact file match in instance files
     if (this.files.has(normalizedPath)) return true;
+    // Check static noir lib files
+    const staticFiles = getStaticNoirLibFiles();
+    if (staticFiles.has(normalizedPath)) return true;
     // Check if path is a directory (any file starts with this path + /)
     const dirPrefix = normalizedPath.endsWith('/') ? normalizedPath : normalizedPath + '/';
     for (const key of this.files.keys()) {
+      if (key.startsWith(dirPrefix) || key === normalizedPath) return true;
+    }
+    for (const key of staticFiles.keys()) {
       if (key.startsWith(dirPrefix) || key === normalizedPath) return true;
     }
     return false;
@@ -180,7 +195,11 @@ class InMemoryFileManager {
 
   async readFile(name: string, encoding?: 'utf-8'): Promise<Uint8Array | string> {
     const path = this.getPath(name);
-    const content = this.files.get(path);
+    // Check instance files first, then static noir lib files
+    let content = this.files.get(path);
+    if (!content) {
+      content = getStaticNoirLibFiles().get(path);
+    }
     if (!content) {
       throw new Error(`File not found: ${path}`);
     }
@@ -238,21 +257,38 @@ class InMemoryFileManager {
     const dirPath = this.getPath(dir);
     const dirPrefix = dirPath.endsWith('/') ? dirPath : dirPath + '/';
     const results: string[] = [];
+    const seen = new Set<string>();
     
-    for (const filePath of this.files.keys()) {
+    // Helper to process file paths
+    const processPath = (filePath: string) => {
       if (filePath.startsWith(dirPrefix)) {
         const relativePath = filePath.slice(dirPrefix.length);
         if (options?.recursive) {
-          results.push(joinPath(dir, relativePath));
+          const fullRelPath = joinPath(dir, relativePath);
+          if (!seen.has(fullRelPath)) {
+            seen.add(fullRelPath);
+            results.push(fullRelPath);
+          }
         } else {
           // Only return immediate children
           const firstSlash = relativePath.indexOf('/');
           const entry = firstSlash === -1 ? relativePath : relativePath.slice(0, firstSlash);
-          if (entry && !results.includes(entry)) {
+          if (entry && !seen.has(entry)) {
+            seen.add(entry);
             results.push(entry);
           }
         }
       }
+    };
+    
+    // Check instance files
+    for (const filePath of this.files.keys()) {
+      processPath(filePath);
+    }
+    
+    // Check static noir lib files
+    for (const filePath of getStaticNoirLibFiles().keys()) {
+      processPath(filePath);
     }
     
     return results;
@@ -408,22 +444,15 @@ export async function prove(
       throw new Error(`Circuit generation failed: ${transformResult.error}`);
     }
     
-    // Get bundled noir/lib files for in-memory compilation
-    const noirLibFiles = getNoirLibFiles();
-    
-    // Prepare all files for the in-memory filesystem
+    // Prepare circuit files for the in-memory filesystem
+    // (noir/lib files are automatically available as static files)
     const circuitFiles: Record<string, string> = {
       'Nargo.toml': transformResult.nargo_toml,
       'src/main.nr': transformResult.main_nr,
       'src/sparql.nr': transformResult.sparql_nr,
     };
     
-    // Add all noir/lib files with correct paths (they're referenced as "../noir/lib/..." in Nargo.toml)
-    for (const [relativePath, content] of Object.entries(noirLibFiles)) {
-      circuitFiles[`../noir/lib/${relativePath}`] = content;
-    }
-    
-    // Create in-memory FileManager with all circuit and library files
+    // Create in-memory FileManager with circuit files
     const fm = createInMemoryFileManager('/circuit', circuitFiles);
     
     // Compile circuit using noir_wasm (completely in-memory)
