@@ -94,10 +94,15 @@ function readDirRecursive(dir, basePath = dir) {
       if (isTestFile(entry, relativePath)) continue;
       
       let content = readFileSync(fullPath, 'utf-8');
-      // Strip comments and tests from Noir files to reduce bundle size
+      // Strip comments, tests, and whitespace from Noir files to reduce bundle size
       if (entry.endsWith('.nr')) {
         content = stripComments(content);
         content = stripTestCode(content);
+        content = minifyWhitespace(content);
+      }
+      // Strip # comments from Nargo.toml files
+      if (entry === 'Nargo.toml') {
+        content = stripTomlComments(content);
       }
       files[relativePath] = content;
     }
@@ -114,6 +119,56 @@ function escapeForTemplateLiteral(str) {
     .replace(/\\/g, '\\\\')
     .replace(/`/g, '\\`')
     .replace(/\$\{/g, '\\${');
+}
+
+/**
+ * Strip # comments from TOML files (Nargo.toml).
+ * Preserves # inside quoted strings.
+ */
+function stripTomlComments(content) {
+  return content
+    .split('\n')
+    .map(line => {
+      let inString = false;
+      let stringChar = '';
+      let result = '';
+      
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        
+        // Handle string literals
+        if (!inString && (char === '"' || char === "'")) {
+          inString = true;
+          stringChar = char;
+          result += char;
+          continue;
+        }
+        
+        if (inString) {
+          if (char === '\\' && i + 1 < line.length) {
+            result += char + line[i + 1];
+            i++;
+            continue;
+          }
+          if (char === stringChar) {
+            inString = false;
+          }
+          result += char;
+          continue;
+        }
+        
+        // Comment starts - stop here
+        if (char === '#') {
+          break;
+        }
+        
+        result += char;
+      }
+      
+      return result.trimEnd();
+    })
+    .filter(line => line.trim() !== '')
+    .join('\n') + '\n';
 }
 
 /**
@@ -183,6 +238,75 @@ function stripComments(content) {
     .filter(line => line.trim() !== '')  // Remove all empty lines
     .join('\n')
     .trim() + '\n';
+}
+
+/**
+ * Minify Noir source code by removing unnecessary whitespace.
+ * Preserves whitespace inside strings and where syntactically required.
+ */
+function minifyWhitespace(content) {
+  let result = '';
+  let i = 0;
+  let inString = false;
+  let stringChar = '';
+  let lastChar = '';
+  
+  while (i < content.length) {
+    const char = content[i];
+    
+    // Handle string literals - preserve all whitespace inside
+    if (!inString && (char === '"' || char === "'")) {
+      inString = true;
+      stringChar = char;
+      result += char;
+      lastChar = char;
+      i++;
+      continue;
+    }
+    
+    if (inString) {
+      if (char === '\\' && i + 1 < content.length) {
+        result += char + content[i + 1];
+        lastChar = content[i + 1];
+        i += 2;
+        continue;
+      }
+      if (char === stringChar) {
+        inString = false;
+      }
+      result += char;
+      lastChar = char;
+      i++;
+      continue;
+    }
+    
+    // Handle whitespace
+    if (/\s/.test(char)) {
+      // Collapse all whitespace to single space, but only if needed
+      // Skip if last output was already whitespace or punctuation that doesn't need trailing space
+      if (lastChar && !/[\s{(\[,;:<>=+\-*/%&|!^~]/.test(lastChar)) {
+        // Check if next non-whitespace char needs preceding space
+        let j = i + 1;
+        while (j < content.length && /\s/.test(content[j])) j++;
+        const nextChar = content[j] || '';
+        
+        // Need space between identifiers/keywords, but not before punctuation
+        if (nextChar && !/[})\],;:<>=+\-*/%&|!^~{(\[]/.test(nextChar)) {
+          result += ' ';
+          lastChar = ' ';
+        }
+      }
+      // Skip all consecutive whitespace
+      while (i < content.length && /\s/.test(content[i])) i++;
+      continue;
+    }
+    
+    result += char;
+    lastChar = char;
+    i++;
+  }
+  
+  return result;
 }
 
 /**
