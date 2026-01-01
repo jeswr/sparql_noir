@@ -49,3 +49,5 @@ test/circuits/edge-cases/
 legacy/
 *.log
 libs/
+# Fetched external dependencies
+noir/lib/external-deps/

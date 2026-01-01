@@ -14,11 +14,79 @@ import { RDFC10 } from 'rdfjs-c14n';
 import { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
 import { runJson } from './encode.js';
 import { quadToStringQuad } from 'rdf-string-ttl';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import { UltraHonkBackend } from '@aztec/bb.js';
-import { generateProofs } from './scripts/prove.js';
+import { generateProofsInMemory } from './scripts/prove.js';
+import { compile_program } from '@noir-lang/noir_wasm';
+import type { CompiledCircuit } from '@noir-lang/noir_js';
+import { getNoirLibFiles } from './noir-lib-bundle.js';
+
+// --- Circuit Cache ---
+
+/**
+ * Cache for compiled circuits, keyed by query string.
+ * This avoids recompiling the same query multiple times.
+ */
+const circuitCache = new Map<string, { circuit: CompiledCircuit; metadata: Record<string, unknown> }>();
+
+/**
+ * Simple hash function for cache keys (FNV-1a)
+ */
+function hashQuery(query: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < query.length; i++) {
+    hash ^= query.charCodeAt(i);
+    hash = (hash * 16777619) >>> 0;
+  }
+  return hash.toString(16);
+}
+
+/**
+ * Clear the circuit cache (useful for testing or memory management)
+ */
+export function clearCircuitCache(): void {
+  circuitCache.clear();
+}
+
+/**
+ * Get the current circuit cache size
+ */
+export function getCircuitCacheSize(): number {
+  return circuitCache.size;
+}
+
+// --- Path utilities (no filesystem access, just string manipulation) ---
+
+function normalizePath(p: string): string {
+  // Handle empty path
+  if (!p) return '.';
+  
+  // Split path and filter out empty segments and '.'
+  const parts = p.split(/[\\/]+/).filter(part => part && part !== '.');
+  const result: string[] = [];
+  
+  for (const part of parts) {
+    if (part === '..') {
+      if (result.length > 0 && result[result.length - 1] !== '..') {
+        result.pop();
+      } else if (!p.startsWith('/')) {
+        result.push('..');
+      }
+    } else {
+      result.push(part);
+    }
+  }
+  
+  const normalized = result.join('/');
+  return p.startsWith('/') ? '/' + normalized : (normalized || '.');
+}
+
+function joinPath(...parts: string[]): string {
+  return normalizePath(parts.filter(Boolean).join('/'));
+}
+
+function isAbsolutePath(p: string): boolean {
+  return p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p);
+}
 
 // Export core functionality for advanced use
 export { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
@@ -38,6 +106,176 @@ export {
   encodeDatatypeIri,
   getTermEncodingString 
 } from './encode.js';
+
+// --- In-Memory FileManager for noir_wasm compilation ---
+
+/**
+ * In-memory filesystem for noir_wasm compilation.
+ * Implements the FileManager interface without any disk I/O.
+ */
+class InMemoryFileManager {
+  private files: Map<string, Uint8Array> = new Map();
+  private dataDir: string;
+
+  constructor(dataDir: string) {
+    this.dataDir = dataDir;
+  }
+
+  getDataDir(): string {
+    return this.dataDir;
+  }
+
+  private getPath(name: string): string {
+    if (isAbsolutePath(name)) {
+      return normalizePath(name);
+    }
+    return normalizePath(joinPath(this.dataDir, name));
+  }
+
+  existsSync(path: string): boolean {
+    const normalizedPath = this.getPath(path);
+    // Check for exact file match
+    if (this.files.has(normalizedPath)) return true;
+    // Check if path is a directory (any file starts with this path + /)
+    const dirPrefix = normalizedPath.endsWith('/') ? normalizedPath : normalizedPath + '/';
+    for (const key of this.files.keys()) {
+      if (key.startsWith(dirPrefix) || key === normalizedPath) return true;
+    }
+    return false;
+  }
+
+  // Alias for existsSync - required by noir_wasm FileManager interface
+  hasFileSync(path: string): boolean {
+    return this.existsSync(path);
+  }
+
+  async writeFile(name: string, streamOrContent: ReadableStream<Uint8Array> | Uint8Array | string): Promise<void> {
+    // Allow absolute paths within the dataDir for dependency caching
+    const path = this.getPath(name);
+    
+    let content: Uint8Array;
+    if (streamOrContent instanceof ReadableStream) {
+      const chunks: Uint8Array[] = [];
+      const reader = streamOrContent.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+      const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+      content = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        content.set(chunk, offset);
+        offset += chunk.length;
+      }
+    } else if (typeof streamOrContent === 'string') {
+      content = new TextEncoder().encode(streamOrContent);
+    } else {
+      content = streamOrContent;
+    }
+    
+    this.files.set(path, content);
+  }
+
+  async readFile(name: string, encoding?: 'utf-8'): Promise<Uint8Array | string> {
+    const path = this.getPath(name);
+    const content = this.files.get(path);
+    if (!content) {
+      throw new Error(`File not found: ${path}`);
+    }
+    if (encoding === 'utf-8') {
+      return new TextDecoder().decode(content);
+    }
+    return content;
+  }
+
+  async mkdir(_dir: string, _opts?: { recursive?: boolean }): Promise<void> {
+    // No-op for in-memory filesystem - directories are implicit
+  }
+
+  async rename(oldName: string, newName: string): Promise<void> {
+    const oldPath = this.getPath(oldName);
+    const newPath = this.getPath(newName);
+    
+    // Check if it's a single file
+    const content = this.files.get(oldPath);
+    if (content) {
+      this.files.delete(oldPath);
+      this.files.set(newPath, content);
+      return;
+    }
+    
+    // Check if it's a directory (any files start with oldPath/)
+    const oldPrefix = oldPath.endsWith('/') ? oldPath : oldPath + '/';
+    const newPrefix = newPath.endsWith('/') ? newPath : newPath + '/';
+    const filesToMove: [string, Uint8Array][] = [];
+    
+    for (const [filePath, fileContent] of this.files.entries()) {
+      if (filePath.startsWith(oldPrefix)) {
+        filesToMove.push([filePath, fileContent]);
+      }
+    }
+    
+    if (filesToMove.length === 0) {
+      throw new Error(`File not found: ${oldPath}`);
+    }
+    
+    // Move all files in the directory
+    for (const [filePath, fileContent] of filesToMove) {
+      this.files.delete(filePath);
+      const newFilePath = newPrefix + filePath.slice(oldPrefix.length);
+      this.files.set(newFilePath, fileContent);
+    }
+  }
+
+  // Alias for rename - required by noir_wasm FileManager interface
+  async moveFile(oldName: string, newName: string): Promise<void> {
+    return this.rename(oldName, newName);
+  }
+
+  async readdir(dir: string, options?: { recursive?: boolean }): Promise<string[]> {
+    const dirPath = this.getPath(dir);
+    const dirPrefix = dirPath.endsWith('/') ? dirPath : dirPath + '/';
+    const results: string[] = [];
+    
+    for (const filePath of this.files.keys()) {
+      if (filePath.startsWith(dirPrefix)) {
+        const relativePath = filePath.slice(dirPrefix.length);
+        if (options?.recursive) {
+          results.push(joinPath(dir, relativePath));
+        } else {
+          // Only return immediate children
+          const firstSlash = relativePath.indexOf('/');
+          const entry = firstSlash === -1 ? relativePath : relativePath.slice(0, firstSlash);
+          if (entry && !results.includes(entry)) {
+            results.push(entry);
+          }
+        }
+      }
+    }
+    
+    return results;
+  }
+}
+
+/**
+ * Creates an in-memory FileManager populated with circuit files
+ */
+function createInMemoryFileManager(
+  dataDir: string,
+  files: Record<string, string>
+): InMemoryFileManager {
+  const fm = new InMemoryFileManager(dataDir);
+  
+  // Pre-populate files synchronously by converting to Uint8Array
+  for (const [path, content] of Object.entries(files)) {
+    const fullPath = isAbsolutePath(path) ? path : joinPath(dataDir, path);
+    fm['files'].set(normalizePath(fullPath), new TextEncoder().encode(content));
+  }
+  
+  return fm;
+}
 
 /**
  * Configuration options for SPARQL Noir
@@ -123,8 +361,6 @@ export async function sign(
  *   signedDataset
  * );
  * ```
- * 
- * @note Requires Nargo to be installed for circuit compilation
  */
 export async function prove(
   query: string,
@@ -133,14 +369,6 @@ export async function prove(
 ): Promise<ProveResult> {
   // Merge config with defaults
   const effectiveConfig = { ...defaultConfig, ...config };
-  
-  // Validate Nargo installation
-  try {
-    const { execSync } = await import('child_process');
-    execSync('nargo --version', { stdio: 'pipe' });
-  } catch (error) {
-    throw new Error('Nargo is not installed or not in PATH. Please install Nargo from https://noir-lang.org/docs/getting_started/installation/');
-  }
   
   // Handle single dataset or array
   const datasets = Array.isArray(signedDatasets) ? signedDatasets : [signedDatasets];
@@ -151,78 +379,85 @@ export async function prove(
     throw new Error('Multiple datasets not yet supported in API');
   }
   
-  // Create temporary directory for circuit generation
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sparql-noir-'));
+  if (!signedData) {
+    throw new Error('signedData is required');
+  }
   
-  try {
-    // Write query to temporary file
-    const queryFile = path.join(tmpDir, 'query.rq');
-    fs.writeFileSync(queryFile, query);
-    
-    // Use WASM to generate circuit
-    const circuitDir = path.join(tmpDir, 'circuit');
+  // Check circuit cache first
+  const cacheKey = hashQuery(query);
+  let cached = circuitCache.get(cacheKey);
+  
+  if (!cached) {
+    // Transform SPARQL query to Noir circuit code (in-memory)
+    let wasmModule: any;
     try {
-      // Try to import the WASM module if it exists (using dynamic import with variable to avoid TS checking)
-      const wasmPath = path.join(path.dirname(new URL(import.meta.url).pathname), '../transform/pkg/transform.cjs');
-      let wasmModule: any;
-      try {
-        const { default: loadModule } = await import('module');
-        const moduleRequire = loadModule.createRequire(import.meta.url);
-        wasmModule = moduleRequire(wasmPath);
-      } catch (error) {
-        throw new Error('WASM transform module not found. Please build it first with: npm run build:wasm');
-      }
-      
-      const output = wasmModule.transform_query(query, circuitDir);
-      if (!output || output.error) {
-        throw new Error(`Circuit generation failed: ${output?.error || 'Unknown error'}`);
-      }
+      const { default: loadModule } = await import('module');
+      const { fileURLToPath } = await import('url');
+      const modulePath = fileURLToPath(new URL('../transform/pkg/transform.cjs', import.meta.url));
+      const moduleRequire = loadModule.createRequire(import.meta.url);
+      wasmModule = moduleRequire(modulePath);
     } catch (error) {
-      throw new Error(`Failed to generate circuit using WASM: ${(error as Error).message}`);
+      throw new Error('WASM transform module not found. Please build it first with: npm run build:wasm');
     }
     
-    // Compile circuit with Nargo
-    const { execSync } = await import('child_process');
+    // Call transform (returns JSON string with sparql_nr, main_nr, nargo_toml, metadata)
+    const transformResultJson = wasmModule.transform(query);
+    const transformResult = JSON.parse(transformResultJson);
+    
+    if (transformResult.error) {
+      throw new Error(`Circuit generation failed: ${transformResult.error}`);
+    }
+    
+    // Get bundled noir/lib files for in-memory compilation
+    const noirLibFiles = getNoirLibFiles();
+    
+    // Prepare all files for the in-memory filesystem
+    const circuitFiles: Record<string, string> = {
+      'Nargo.toml': transformResult.nargo_toml,
+      'src/main.nr': transformResult.main_nr,
+      'src/sparql.nr': transformResult.sparql_nr,
+    };
+    
+    // Add all noir/lib files with correct paths (they're referenced as "../noir/lib/..." in Nargo.toml)
+    for (const [relativePath, content] of Object.entries(noirLibFiles)) {
+      circuitFiles[`../noir/lib/${relativePath}`] = content;
+    }
+    
+    // Create in-memory FileManager with all circuit and library files
+    const fm = createInMemoryFileManager('/circuit', circuitFiles);
+    
+    // Compile circuit using noir_wasm (completely in-memory)
+    let compiledCircuit: CompiledCircuit;
     try {
-      execSync('nargo compile', { 
-        cwd: circuitDir,
-        stdio: 'pipe'
-      });
+      const compiledArtifacts = await compile_program(fm as any);
+      compiledCircuit = (compiledArtifacts.program || compiledArtifacts) as CompiledCircuit;
+      if (!compiledCircuit || !compiledCircuit.bytecode) {
+        throw new Error('Compilation produced no bytecode');
+      }
     } catch (error) {
       throw new Error(`Circuit compilation failed: ${(error as Error).message}`);
     }
     
-    // Read compiled circuit
-    const targetDir = path.join(circuitDir, 'target');
-    const circuitFiles = fs.readdirSync(targetDir).filter((f: string) => f.endsWith('.json'));
-    if (circuitFiles.length === 0) {
-      throw new Error('No compiled circuit found after compilation');
-    }
-    const compiledCircuit = JSON.parse(fs.readFileSync(path.join(targetDir, circuitFiles[0]!), 'utf8'));
-    
-    // Generate proof
-    const result = await generateProofs({
-      circuitDir,
-      signedData,
-    });
-    
-    // Attach compiled circuit to each proof for verification
-    if (result.proofs) {
-      for (const proof of result.proofs) {
-        (proof as ProofOutputWithCircuit).compiledCircuit = compiledCircuit;
-      }
-    }
-    
-    return result;
-  } finally {
-    // Clean up temporary directory
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    } catch (error) {
-      // Ignore cleanup errors
-      console.warn(`Failed to clean up temporary directory: ${(error as Error).message}`);
+    // Cache the compiled circuit
+    cached = { circuit: compiledCircuit, metadata: transformResult.metadata };
+    circuitCache.set(cacheKey, cached);
+  }
+  
+  // Generate proof using cached circuit
+  const result = await generateProofsInMemory({
+    compiledCircuit: cached.circuit,
+    metadata: cached.metadata,
+    signedData,
+  });
+  
+  // Attach compiled circuit to each proof for verification
+  if (result.proofs) {
+    for (const proof of result.proofs) {
+      (proof as ProofOutputWithCircuit).compiledCircuit = cached.circuit;
     }
   }
+  
+  return result;
 }
 
 /**

@@ -2,17 +2,16 @@
 /**
  * e2e.ts - End-to-end test for SPARQL Noir pipeline
  * 
- * Tests the complete workflow:
+ * Tests the complete workflow using the index.ts API:
  * 1. Sign RDF data with Merkle tree + signature
- * 2. Transform SPARQL query to Noir circuit
- * 3. Compile the generated circuit
- * 4. Generate ZK proofs for query results
- * 5. Verify the proofs
+ * 2. Generate ZK proofs for query results (includes transform + compile)
+ * 3. Verify the proofs
  */
 import fs from 'fs';
 import path from 'path';
-import { execSync, spawn } from 'child_process';
 import { Command } from 'commander';
+import N3 from 'n3';
+import { sign, prove, verify } from '../index.js';
 
 const program = new Command();
 
@@ -39,7 +38,6 @@ const rootDir = process.cwd();
 const dataPath = path.resolve(rootDir, opts.data);
 const queryPath = path.resolve(rootDir, opts.query);
 const outputDir = path.resolve(rootDir, opts.output);
-const circuitDir = path.join(outputDir, 'circuit');
 const signedPath = path.join(outputDir, 'signed.json');
 const proofPath = path.join(outputDir, 'proof.json');
 
@@ -63,26 +61,29 @@ function logVerbose(message: string) {
   }
 }
 
-function runCommand(command: string, description: string): TestResult {
+async function runStep<T>(
+  description: string,
+  fn: () => Promise<T>
+): Promise<{ result: TestResult; value?: T }> {
   const start = Date.now();
   log(`Starting: ${description}`);
-  logVerbose(`Command: ${command}`);
   
   try {
-    const output = execSync(command, { 
-      cwd: rootDir, 
-      encoding: 'utf8',
-      stdio: opts.verbose ? 'inherit' : 'pipe'
-    });
+    const value = await fn();
     const duration = Date.now() - start;
     log(`✓ ${description} (${(duration / 1000).toFixed(2)}s)`);
-    return { step: description, success: true, duration, output: output?.toString() };
+    return { 
+      result: { step: description, success: true, duration }, 
+      value 
+    };
   } catch (err) {
     const duration = Date.now() - start;
     const error = (err as Error).message || String(err);
     log(`✗ ${description} failed`);
     console.error(error);
-    return { step: description, success: false, duration, error };
+    return { 
+      result: { step: description, success: false, duration, error } 
+    };
   }
 }
 
@@ -111,52 +112,58 @@ async function main() {
   // Create output directory
   fs.mkdirSync(outputDir, { recursive: true });
 
-  // Step 1: Sign RDF data
-  results.push(runCommand(
-    `node dist/scripts/sign.js -i "${dataPath}" -o "${signedPath}"`,
-    'Sign RDF data'
-  ));
-  if (!results[results.length - 1]!.success) {
+  // Load RDF data into N3 store
+  const rdfData = fs.readFileSync(dataPath, 'utf8');
+  const parser = new N3.Parser();
+  const store = new N3.Store();
+  store.addQuads(parser.parse(rdfData));
+
+  // Load SPARQL query
+  const query = fs.readFileSync(queryPath, 'utf8');
+  logVerbose(`Query: ${query}`);
+
+  // Step 1: Sign RDF data using index.ts API
+  const signResult = await runStep('Sign RDF data', async () => {
+    const signedData = await sign(store);
+    // Save signed data for inspection
+    fs.writeFileSync(signedPath, JSON.stringify(signedData, null, 2));
+    logVerbose(`Signed data saved to: ${signedPath}`);
+    return signedData;
+  });
+  results.push(signResult.result);
+  if (!signResult.result.success || !signResult.value) {
     printSummary(testStart);
     process.exit(1);
   }
+  const signedData = signResult.value;
 
-  // Step 2: Transform SPARQL to Noir circuit
-  const query = fs.readFileSync(queryPath, 'utf8').replace(/\n/g, ' ');
-  results.push(runCommand(
-    `cargo run --manifest-path transform/Cargo.toml -- -i "${dataPath}" -o "${outputDir}/transform.json" -q "${query}"`,
-    'Transform SPARQL to Noir'
-  ));
-  if (!results[results.length - 1]!.success) {
+  // Step 2: Generate proofs using index.ts API (includes transform + compile)
+  const proveResult = await runStep('Generate ZK proofs', async () => {
+    const proofResult = await prove(query, signedData);
+    // Save proof for inspection
+    fs.writeFileSync(proofPath, JSON.stringify(proofResult, (_, v) => 
+      v instanceof Uint8Array ? Array.from(v) : v
+    , 2));
+    logVerbose(`Proof saved to: ${proofPath}`);
+    return proofResult;
+  });
+  results.push(proveResult.result);
+  if (!proveResult.result.success || !proveResult.value) {
     printSummary(testStart);
     process.exit(1);
   }
+  const proofResult = proveResult.value;
 
-  // Step 3: Compile the circuit (circuit is generated in noir_prove/)
-  results.push(runCommand(
-    `cd noir_prove && nargo compile`,
-    'Compile Noir circuit'
-  ));
-  if (!results[results.length - 1]!.success) {
-    printSummary(testStart);
-    process.exit(1);
-  }
-
-  // Step 4: Generate proofs
-  results.push(runCommand(
-    `node dist/scripts/prove.js -c noir_prove -s "${signedPath}" -o "${proofPath}"`,
-    'Generate ZK proofs'
-  ));
-  if (!results[results.length - 1]!.success) {
-    printSummary(testStart);
-    process.exit(1);
-  }
-
-  // Step 5: Verify proofs
-  results.push(runCommand(
-    `node dist/scripts/verify.js -i "${proofPath}" -c noir_prove`,
-    'Verify ZK proofs'
-  ));
+  // Step 3: Verify proofs using index.ts API
+  const verifyResult = await runStep('Verify ZK proofs', async () => {
+    const result = await verify(proofResult);
+    logVerbose(`Verification result: ${JSON.stringify(result)}`);
+    if (!result.success) {
+      throw new Error(`Verification failed: ${result.errors?.join(', ')}`);
+    }
+    return result;
+  });
+  results.push(verifyResult.result);
 
   // Print summary
   printSummary(testStart);
