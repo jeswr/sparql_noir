@@ -51,3 +51,4 @@ legacy/
 libs/
 # Fetched external dependencies
 noir/lib/external-deps/
+src/noir-lib-bundle.ts
