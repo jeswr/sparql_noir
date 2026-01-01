@@ -37,17 +37,6 @@ jobs:
       - name: Build TypeScript
         run: npm run build:tsc
 
-      - name: Install semantic-release plugins
-        run: |
-          npm install --no-save \
-            @semantic-release/commit-analyzer \
-            @semantic-release/release-notes-generator \
-            @semantic-release/changelog \
-            @semantic-release/npm \
-            @semantic-release/git \
-            @semantic-release/github \
-            conventional-changelog-conventionalcommits
-
       - name: Semantic Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

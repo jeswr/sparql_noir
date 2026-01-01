@@ -25,6 +25,7 @@ export interface VerifyResult {
   failed: number;
   total: number;
   success: boolean;
+  errors?: string[];
 }
 
 // --- Exported Verify Functions ---

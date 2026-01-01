@@ -15,25 +15,35 @@ The implementation provides:
 
 The package now exports a clean API with four main functions:
 
-#### `sign(dataset: string, config?: Config): Promise<SignedData>`
-- Signs an RDF dataset with Merkle tree and cryptographic signature
-- Wraps the existing `signRdfData()` function from `src/scripts/sign.ts`
+#### `sign(dataset: DatasetCore, config?: Config): Promise<SignedData>`
+- Signs an RDF/JS `DatasetCore` dataset with Merkle tree and cryptographic signature
+- Wraps the existing signing logic from `src/scripts/sign.ts`
+- Now uses shared `generateSignature()` function to avoid code duplication
+- **Config is now applied**: Uses provided config or defaults
 - Returns signed dataset with root, signature, and encoded triples
 
-#### `prove(circuitDir: string, signedData: SignedData | null, config?: Config): Promise<ProveResult>`
-- Generates zero-knowledge proofs for SPARQL queries
-- Wraps the existing `generateProofs()` function from `src/scripts/prove.ts`
+#### `prove(query: string, signedData: SignedData | SignedData[], config?: Config): Promise<ProveResult>`
+- Generates zero-knowledge proofs for SPARQL queries given as a query string
+- **Uses WASM transform** instead of cargo for circuit generation
+- Internally generates the Noir circuit for the query
+- Compiles circuit with nargo
+- Wraps `generateProofs()` from `src/scripts/prove.ts`
+- Embeds compiled circuit in proof for self-contained verification
+- **Validates Nargo installation** before attempting to prove
 - Returns proof object with proof bytes and verification key
 
-#### `verify(circuitDir: string, proof: ProveResult, config?: Config): Promise<VerifyResult>`
-- Verifies ZK proofs are valid
-- Wraps the existing `verifyProofs()` function from `src/scripts/verify.ts`
-- Returns verification result with success status
+#### `verify(proof: ProveResult, config?: Config): Promise<VerifyResult>`
+- Verifies ZK proofs are valid using embedded circuit
+- No longer requires circuit directory - uses circuit from proof
+- **Enhanced error reporting**: Includes error messages in result
+- Returns verification result with success status and error details
 
 #### `info(query: string, config?: Config): DisclosureInfo`
 - Returns disclosure information for a query
 - Shows what variables will be disclosed vs. hidden
+- **Config is now applied**: Uses provided config or defaults
 - Provides configuration details (merkle depth, signature scheme)
+- Note: Uses basic regex parsing (TODO: switch to proper SPARQL parser)
 
 ### Type Exports
 

@@ -21,7 +21,6 @@
     "LICENSE"
   ],
   "scripts": {
-    "prepare": "npm run build:tsc",
     "postinstall": "node scripts/postinstall.js",
     "build:signature": "cd noir/bin/signature && nargo build",
     "build:tsc": "tsc",

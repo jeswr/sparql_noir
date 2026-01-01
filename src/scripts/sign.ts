@@ -66,26 +66,14 @@ export async function processQuadsForMerkle(quads: Quad[]): Promise<{
 }
 
 /**
- * Sign RDF data and return the signed data structure
+ * Generate cryptographic signature for a merkle root
+ * This is the shared signing logic used by both sign.ts and index.ts
  */
-export async function signRdfData(inputPath: string): Promise<SignedData> {
-  // Dereference, parse and canonicalize the RDF dataset
-  const { store } = await dereferenceToStore.default(inputPath, { localFiles: true });
-  const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
-  
-  const { triples, noirInput } = await processQuadsForMerkle(quads);
-  
-  // Generate Merkle tree via Noir execution
-  const jsonRes = runJson(`[${noirInput}]`)[0];
-  
-  // Add quad string representations
-  jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
-  
-  // Generate cryptographic signature
+export async function generateSignature(jsonRes: any, signatureScheme: string = defaultConfig.signature): Promise<void> {
   let privKey = crypto.randomBytes(32);
 
-  if (defaultConfig.signature === 'secp256k1' || defaultConfig.signature === 'secp256r1') {
-    const pkg = defaultConfig.signature === 'secp256k1' ? secp256k1 : secp256r1;
+  if (signatureScheme === 'secp256k1' || signatureScheme === 'secp256r1') {
+    const pkg = signatureScheme === 'secp256k1' ? secp256k1 : secp256r1;
     while (!pkg.privateKeyVerify(privKey))
       privKey = crypto.randomBytes(32);
 
@@ -96,7 +84,7 @@ export async function signRdfData(inputPath: string): Promise<SignedData> {
       x: Array.from(pubKey.slice(1, 33)),
       y: Array.from(pubKey.slice(33, 65)),
     };
-  } else if (defaultConfig.signature === 'babyjubjubOpt') {
+  } else if (signatureScheme === 'babyjubjubOpt') {
     const ed = new EdDSAPoseidon(privKey);
     const signature = ed.signMessage(jsonRes.root);
 
@@ -124,7 +112,7 @@ export async function signRdfData(inputPath: string): Promise<SignedData> {
         y: '0x' + k8[1].toString(16),
       },
     };
-  } else if (defaultConfig.signature === 'schnorr') {
+  } else if (signatureScheme === 'schnorr') {
     const schnorr = new Schnorr();
     const schnorrPrivKey = Fq.random();
 
@@ -139,10 +127,30 @@ export async function signRdfData(inputPath: string): Promise<SignedData> {
       is_infinite: false,
     };
   } else {
-    throw new Error(`Unsupported signature type: ${defaultConfig.signature}`);
+    throw new Error(`Unsupported signature type: ${signatureScheme}`);
   }
 
   delete jsonRes.root_u8;
+}
+
+/**
+ * Sign RDF data and return the signed data structure
+ */
+export async function signRdfData(inputPath: string): Promise<SignedData> {
+  // Dereference, parse and canonicalize the RDF dataset
+  const { store } = await dereferenceToStore.default(inputPath, { localFiles: true });
+  const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
+  
+  const { noirInput } = await processQuadsForMerkle(quads);
+  
+  // Generate Merkle tree via Noir execution
+  const jsonRes = runJson(`[${noirInput}]`)[0];
+  
+  // Add quad string representations
+  jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
+  
+  // Generate cryptographic signature using shared logic
+  await generateSignature(jsonRes, defaultConfig.signature);
 
   return jsonRes as SignedData;
 }
