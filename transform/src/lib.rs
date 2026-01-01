@@ -355,12 +355,18 @@ fn handle_xsd_cast(
         "positiveInteger" | "negativeInteger" | "nonPositiveInteger" | "nonNegativeInteger" => {
             match source_type {
                 Some(NumericSourceType::Float) => {
-                    // cast_float_to_integer returns Option<i64>, unwrap with assertion
-                    Ok(format!("xpath::cast_float_to_integer(xpath::XsdFloat::from_bits({} as u32)).unwrap() as Field", arg_code))
+                    // cast_float_to_integer returns Option<i64>; assert success before unwrap
+                    Ok(format!(
+                        "{{ let tmp = xpath::cast_float_to_integer(xpath::XsdFloat::from_bits({} as u32)); assert(tmp.is_some()); tmp.unwrap() as Field }}",
+                        arg_code
+                    ))
                 }
                 Some(NumericSourceType::Double) => {
-                    // cast_double_to_integer returns Option<i64>, unwrap with assertion
-                    Ok(format!("xpath::cast_double_to_integer(xpath::XsdDouble::from_bits({} as u64)).unwrap() as Field", arg_code))
+                    // cast_double_to_integer returns Option<i64>; assert success before unwrap
+                    Ok(format!(
+                        "{{ let tmp = xpath::cast_double_to_integer(xpath::XsdDouble::from_bits({} as u64)); assert(tmp.is_some()); tmp.unwrap() as Field }}",
+                        arg_code
+                    ))
                 }
                 Some(NumericSourceType::Integer) | None => {
                     // Already integer or unknown - just pass through as Field
@@ -373,9 +379,9 @@ fn handle_xsd_cast(
         "float" => {
             match source_type {
                 Some(NumericSourceType::Integer) => {
-                    // cast_integer_to_float takes i8, returns XsdFloat
+                    // cast_integer_to_float takes a signed integer (use i64 to avoid truncation)
                     // Convert to bits for Field representation
-                    Ok(format!("xpath::cast_integer_to_float(({}) as i8).to_bits() as Field", arg_code))
+                    Ok(format!("xpath::cast_integer_to_float(({}) as i64).to_bits() as Field", arg_code))
                 }
                 Some(NumericSourceType::Double) => {
                     // cast_double_to_float
@@ -392,8 +398,8 @@ fn handle_xsd_cast(
         "double" => {
             match source_type {
                 Some(NumericSourceType::Integer) => {
-                    // cast_integer_to_double takes i8, returns XsdDouble
-                    Ok(format!("xpath::cast_integer_to_double(({}) as i8).to_bits() as Field", arg_code))
+                    // cast_integer_to_double takes i64 to avoid truncation
+                    Ok(format!("xpath::cast_integer_to_double(({}) as i64).to_bits() as Field", arg_code))
                 }
                 Some(NumericSourceType::Float) => {
                     // XsdDouble::from_float for float to double
@@ -410,7 +416,7 @@ fn handle_xsd_cast(
         "decimal" => {
             match source_type {
                 Some(NumericSourceType::Integer) => {
-                    Ok(format!("xpath::cast_integer_to_double(({}) as i8).to_bits() as Field", arg_code))
+                    Ok(format!("xpath::cast_integer_to_double(({}) as i64).to_bits() as Field", arg_code))
                 }
                 _ => Ok(format!("{}", arg_code))
             }
@@ -418,20 +424,25 @@ fn handle_xsd_cast(
         
         // Cast to xsd:boolean
         "boolean" => {
-            // Boolean cast: 0 -> false, non-zero -> true for numerics
-            // For strings: "" -> false, non-empty -> true (but we can't handle strings properly)
-            // For now, treat as EBV-like: 0 = false, non-zero = true
-            Ok(format!("({} != 0)", arg_code))
+            // XSD boolean cast from numerics only permits 0 and 1:
+            // 0 -> false, 1 -> true. Other numeric values are invalid.
+            // Generate Noir code that enforces this at runtime via an assertion.
+            Ok(format!("{{ let v = {}; assert(v == 0 || v == 1); v == 1 }}", arg_code))
         }
         
         // Cast to xsd:string - returns the encoded string representation
-        // Note: This is a simplified implementation that returns the value field
         "string" | "normalizedString" | "token" => {
-            // String cast preserves the lexical value
-            // For numeric types, this would need actual string conversion
-            // which isn't fully supported in ZK circuits
-            // For now, just return the value as-is
-            Ok(format!("{}", arg_code))
+            // String cast preserves the lexical value.
+            // For numeric types, proper lexical conversion (e.g., 42 -> "42")
+            // is not implemented in the generated Noir circuits.
+            // To avoid silently incorrect behavior, we reject numeric→string casts.
+            match source_type {
+                Some(_) => Err(
+                    "Casting numeric types to xsd:string (or derived types) is not supported by the transformer"
+                        .to_string(),
+                ),
+                None => Ok(format!("{}", arg_code)),
+            }
         }
         
         // Cast to xsd:dateTime
@@ -1101,8 +1112,9 @@ fn numeric_comparison(
     if let (Expression::Literal(lit_a), Expression::Literal(lit_b)) = (a, b) {
         let dt_a = lit_a.datatype().as_str();
         let dt_b = lit_b.datatype().as_str();
-        if (dt_a.ends_with("float") || dt_a.ends_with("double") || dt_a.ends_with("decimal")) &&
-           (dt_b.ends_with("float") || dt_b.ends_with("double") || dt_b.ends_with("decimal")) {
+        // Only treat xsd:float and xsd:double as IEEE 754; xsd:decimal is arbitrary-precision
+        if (dt_a.ends_with("float") || dt_a.ends_with("double")) &&
+           (dt_b.ends_with("float") || dt_b.ends_with("double")) {
             let fa = parse_float_special(lit_a.value(), dt_a);
             let fb = parse_float_special(lit_b.value(), dt_b);
             
@@ -1150,7 +1162,7 @@ fn numeric_comparison(
                 format!("xpath::XsdDouble::from_float(xpath::XsdFloat::from_bits({} as u32))", left_code)
             }
             Some(NumericSourceType::Integer) | None => {
-                format!("xpath::cast_integer_to_double(({}) as i8)", left_code)
+                format!("xpath::cast_integer_to_double(({}) as i64)", left_code)
             }
         };
         let right_double = match type_b {
@@ -1159,7 +1171,7 @@ fn numeric_comparison(
                 format!("xpath::XsdDouble::from_float(xpath::XsdFloat::from_bits({} as u32))", right_code)
             }
             Some(NumericSourceType::Integer) | None => {
-                format!("xpath::cast_integer_to_double(({}) as i8)", right_code)
+                format!("xpath::cast_integer_to_double(({}) as i64)", right_code)
             }
         };
         
@@ -1189,14 +1201,14 @@ fn numeric_comparison(
         let left_float = match type_a {
             Some(NumericSourceType::Float) => format!("xpath::XsdFloat::from_bits({} as u32)", left_code),
             Some(NumericSourceType::Integer) | None => {
-                format!("xpath::cast_integer_to_float(({}) as i8)", left_code)
+                format!("xpath::cast_integer_to_float(({}) as i64)", left_code)
             }
             Some(NumericSourceType::Double) => unreachable!("Double handled above"),
         };
         let right_float = match type_b {
             Some(NumericSourceType::Float) => format!("xpath::XsdFloat::from_bits({} as u32)", right_code),
             Some(NumericSourceType::Integer) | None => {
-                format!("xpath::cast_integer_to_float(({}) as i8)", right_code)
+                format!("xpath::cast_integer_to_float(({}) as i64)", right_code)
             }
             Some(NumericSourceType::Double) => unreachable!("Double handled above"),
         };
