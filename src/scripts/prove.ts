@@ -71,6 +71,26 @@ export interface CircuitVariant {
   matched_optionals: number[];
 }
 
+/** Options for in-memory proof generation (no filesystem access) */
+export interface ProveOptionsInMemory {
+  /** Compiled circuit (bytecode + abi) */
+  compiledCircuit: CompiledCircuit;
+  /** Circuit metadata */
+  metadata: Record<string, unknown>;
+  /** Signed RDF data */
+  signedData: SignedData;
+  /** Number of threads for proof generation */
+  threads?: number;
+  /** If true, only generate witness without creating the actual ZK proof */
+  witnessOnly?: boolean;
+  /** If true, skip signature verification (use simplified circuit) */
+  skipSigning?: boolean;
+  /** Maximum number of bindings to process */
+  maxBindings?: number;
+  /** If true, suppress console output */
+  quiet?: boolean;
+}
+
 export interface ProveOptions {
   circuitDir: string;
   signedData: SignedData | null;
@@ -1300,6 +1320,368 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       totalBindings: bindings.length,
       successfulProofs: successCount,
       circuit: path.basename(circuitDir),
+      witnessOnly: witnessOnly || undefined,
+    },
+    errors: collectedErrors.length > 0 ? collectedErrors : undefined,
+  };
+}
+
+// --- In-Memory Proof Generation ---
+
+/**
+ * Generate ZK proofs for SPARQL query results using in-memory data (no filesystem access).
+ * 
+ * This is a simplified interface for programmatic use that doesn't require
+ * writing circuit files to disk.
+ */
+export async function generateProofsInMemory(options: ProveOptionsInMemory): Promise<ProveResult> {
+  const {
+    compiledCircuit,
+    metadata,
+    signedData,
+    threads = 6,
+    witnessOnly = false,
+    skipSigning = false,
+    maxBindings,
+    quiet = false,
+  } = options;
+
+  const collectedErrors: string[] = [];
+  const log = (msg: string) => { if (!quiet) console.log(msg); };
+  const warn = (msg: string) => {
+    if (quiet) {
+      collectedErrors.push(msg);
+    } else {
+      console.warn(msg);
+    }
+  };
+
+  // Build RDF store from signed quads
+  const quadArr = signedData.nquads.map(nq => stringQuadToQuad(nq));
+  const stringArr = quadArr.map(q => termToString(q));
+  const stringIndexMap = new Map(stringArr.map((s, i) => [s, i]));
+  const store = new Store(quadArr);
+
+  log(`Loaded ${quadArr.length} quads from signed data`);
+
+  // Function to find triple index
+  function findTripleIndex(q: Quad): number {
+    const s = termToString(q);
+    const idx = stringIndexMap.get(s);
+    if (idx !== undefined) return idx;
+    for (let i = 0; i < quadArr.length; i++) {
+      const quad = quadArr[i];
+      if (quad && equalQuadIgnoreBlankLabel(quad, q)) return i;
+    }
+    return -1;
+  }
+
+  // Build triple object for circuit input
+  function getTripleObject(id: number) {
+    if (skipSigning) {
+      return { terms: signedData.triples[id] };
+    }
+    return {
+      terms: signedData.triples[id],
+      path: signedData.paths[id],
+      directions: signedData.direction[id],
+    };
+  }
+
+  // Get input patterns from metadata
+  const circuitMetadata = metadata as unknown as CircuitMetadata;
+  const inputPatterns = circuitMetadata?.input_patterns || circuitMetadata?.inputPatterns || [];
+
+  if (inputPatterns.length === 0) {
+    throw new Error('No input patterns found in metadata.');
+  }
+
+  log(`Query has ${inputPatterns.length} BGP pattern(s)`);
+
+  // Convert patterns to RDF terms
+  const patternQuads = inputPatterns.map(p => ({
+    subject: termJsonToRdfTerm(p.subject),
+    predicate: termJsonToRdfTerm(p.predicate),
+    object: termJsonToRdfTerm(p.object),
+    graph: termJsonToRdfTerm(p.graph),
+  }));
+
+  // Helper functions (same as in generateProofs)
+  function isPatternVariable(term: Term): boolean {
+    return term.termType === 'Variable' || term.termType === 'BlankNode';
+  }
+
+  function getPatternKey(term: Term): string {
+    if (term.termType === 'Variable') return term.value;
+    if (term.termType === 'BlankNode') return `__blank_${term.value}`;
+    throw new Error(`Cannot get pattern key for term type: ${term.termType}`);
+  }
+
+  function extractBinding(quad: Quad, pattern: typeof patternQuads[0]): Map<string, Term> {
+    const binding = new Map<string, Term>();
+    if (isPatternVariable(pattern.subject)) binding.set(getPatternKey(pattern.subject), quad.subject);
+    if (isPatternVariable(pattern.predicate)) binding.set(getPatternKey(pattern.predicate), quad.predicate);
+    if (isPatternVariable(pattern.object)) binding.set(getPatternKey(pattern.object), quad.object);
+    if (isPatternVariable(pattern.graph)) binding.set(getPatternKey(pattern.graph), quad.graph);
+    return binding;
+  }
+
+  function bindingsCompatible(b1: Map<string, Term>, b2: Map<string, Term>): boolean {
+    for (const [varName, term1] of b1) {
+      const term2 = b2.get(varName);
+      if (term2 && !equalTermIgnoreBlankLabel(term1, term2)) return false;
+    }
+    return true;
+  }
+
+  function mergeBindings(b1: Map<string, Term>, b2: Map<string, Term>): Map<string, Term> {
+    const merged = new Map(b1);
+    for (const [varName, term] of b2) {
+      if (!merged.has(varName)) merged.set(varName, term);
+    }
+    return merged;
+  }
+
+  // Find matching quads
+  const firstPattern = patternQuads[0]!;
+  const matchingQuads = store.getQuads(
+    isPatternVariable(firstPattern.subject) ? null : firstPattern.subject,
+    isPatternVariable(firstPattern.predicate) ? null : firstPattern.predicate,
+    isPatternVariable(firstPattern.object) ? null : firstPattern.object,
+    isPatternVariable(firstPattern.graph) || firstPattern.graph.termType === 'DefaultGraph' ? null : firstPattern.graph
+  );
+
+  log(`Found ${matchingQuads.length} matching quad(s) for first pattern`);
+
+  interface BindingWithQuads {
+    binding: Map<string, Term>;
+    quads: Quad[];
+  }
+
+  let bindingsWithQuads: BindingWithQuads[];
+
+  if (patternQuads.length === 1) {
+    bindingsWithQuads = matchingQuads.map(quad => ({
+      binding: extractBinding(quad, firstPattern),
+      quads: [quad]
+    }));
+  } else {
+    let currentBindings: BindingWithQuads[] =
+      matchingQuads.map(q => ({ binding: extractBinding(q, firstPattern), quads: [q] }));
+
+    for (let patternIdx = 1; patternIdx < patternQuads.length; patternIdx++) {
+      const pattern = patternQuads[patternIdx]!;
+      const newBindings: BindingWithQuads[] = [];
+
+      for (const { binding, quads } of currentBindings) {
+        const subjectMatch = isPatternVariable(pattern.subject)
+          ? binding.get(getPatternKey(pattern.subject)) || null
+          : pattern.subject;
+        const predicateMatch = isPatternVariable(pattern.predicate)
+          ? binding.get(getPatternKey(pattern.predicate)) || null
+          : pattern.predicate;
+        const objectMatch = isPatternVariable(pattern.object)
+          ? binding.get(getPatternKey(pattern.object)) || null
+          : pattern.object;
+        const graphMatch = isPatternVariable(pattern.graph)
+          ? binding.get(getPatternKey(pattern.graph)) || null
+          : (pattern.graph.termType === 'DefaultGraph' ? null : pattern.graph);
+
+        const matchingForPattern = store.getQuads(subjectMatch, predicateMatch, objectMatch, graphMatch);
+
+        for (const matchedQuad of matchingForPattern) {
+          const newBinding = extractBinding(matchedQuad, pattern);
+          if (bindingsCompatible(binding, newBinding)) {
+            const merged = mergeBindings(binding, newBinding);
+            newBindings.push({ binding: merged, quads: [...quads, matchedQuad] });
+          }
+        }
+      }
+
+      currentBindings = newBindings;
+    }
+
+    bindingsWithQuads = currentBindings;
+    log(`After join: ${bindingsWithQuads.length} bindings`);
+  }
+
+  const bindings: Map<string, Term>[] = bindingsWithQuads.map(b => b.binding);
+
+  if (bindings.length === 0) {
+    throw new Error('No bindings found for the query.');
+  }
+
+  log(`Processing ${bindings.length} binding(s)`);
+
+  const noir = new Noir(compiledCircuit);
+  const backend = witnessOnly ? null : new UltraHonkBackend(compiledCircuit.bytecode, { threads });
+
+  const proofs: ProofOutput[] = [];
+  const witnesses: WitnessOutput[] = [];
+
+  interface BindingInput {
+    bindingIdx: number;
+    circuitInput: Record<string, unknown>;
+  }
+
+  const bindingInputs: BindingInput[] = [];
+
+  for (let bindingIdx = 0; bindingIdx < bindings.length; bindingIdx++) {
+    const binding = bindings[bindingIdx]!;
+    const { quads } = bindingsWithQuads[bindingIdx]!;
+
+    const tripleIndices: number[] = [];
+
+    for (let patternIdx = 0; patternIdx < inputPatterns.length; patternIdx++) {
+      const quad = quads[patternIdx];
+      if (!quad) continue;
+      const idx = findTripleIndex(quad);
+      if (idx < 0) break;
+      tripleIndices.push(idx);
+    }
+
+    if (tripleIndices.length !== inputPatterns.length) continue;
+
+    const variables: Record<string, string> = {};
+    const selectVars = circuitMetadata?.variables || [];
+    for (const varName of selectVars) {
+      for (let patternIdx = 0; patternIdx < inputPatterns.length; patternIdx++) {
+        const positions: (keyof PatternJson)[] = ['subject', 'predicate', 'object', 'graph'];
+        let found = false;
+        for (let pi = 0; pi < positions.length; pi++) {
+          const pos = positions[pi]!;
+          const pattern = inputPatterns[patternIdx];
+          if (!pattern) continue;
+          const patternTerm = pattern[pos] as TermJson | undefined;
+          if (patternTerm && patternTerm.termType === 'Variable' && patternTerm.value === varName) {
+            const tripleIdx = tripleIndices[patternIdx];
+            const triple = tripleIdx !== undefined ? signedData.triples[tripleIdx] : undefined;
+            if (triple) {
+              variables[varName] = triple[pi]!;
+              found = true;
+              break;
+            }
+          }
+        }
+        if (found) break;
+      }
+    }
+
+    const hiddenInputs = circuitMetadata?.hiddenInputs || circuitMetadata?.hidden_inputs || [];
+    const hiddenValues = computeHiddenInputs(hiddenInputs, binding);
+    if (hiddenValues === null) continue;
+
+    const baseInput = skipSigning ? {
+      bgp: tripleIndices.map(i => getTripleObject(i)),
+      variables,
+    } : {
+      public_key: [signedData.pubKey],
+      roots: [{
+        value: signedData.root,
+        signature: signedData.signature,
+        keyIndex: 0,
+      }],
+      bgp: tripleIndices.map(i => getTripleObject(i)),
+      variables,
+    };
+
+    const circuitInput = hiddenValues.length > 0
+      ? { ...baseInput, hidden: hiddenValues }
+      : baseInput;
+
+    bindingInputs.push({ bindingIdx, circuitInput });
+  }
+
+  if (bindingInputs.length === 0) {
+    throw new Error('No valid binding inputs could be prepared.');
+  }
+
+  let bindingsToProcess = bindingInputs;
+  if (maxBindings !== undefined && maxBindings > 0 && bindingInputs.length > maxBindings) {
+    bindingsToProcess = bindingInputs.slice(0, maxBindings);
+    log(`Limiting to ${maxBindings} binding(s)`);
+  }
+
+  log(`\nGenerating witnesses for ${bindingsToProcess.length} binding(s)...`);
+
+  const witnessResults = await Promise.allSettled(
+    bindingsToProcess.map(async ({ bindingIdx, circuitInput }) => {
+      const startTime = Date.now();
+      // @ts-expect-error - circuit input types vary
+      const { witness } = await noir.execute(circuitInput);
+      const timingMs = Date.now() - startTime;
+      return { bindingIdx, witness, timingMs };
+    })
+  );
+
+  const successfulWitnesses: { bindingIdx: number; witness: Uint8Array; timingMs: number }[] = [];
+  for (const result of witnessResults) {
+    if (result.status === 'fulfilled') {
+      successfulWitnesses.push(result.value);
+      if (witnessOnly) {
+        witnesses.push({
+          witness: serializeProof(result.value.witness) as number[],
+          circuit: 'in-memory',
+          timestamp: new Date().toISOString(),
+          timingMs: result.value.timingMs,
+        });
+      }
+    } else {
+      const msg = String(result.reason?.message || result.reason);
+      if (!msg.includes('Cannot satisfy constraint')) {
+        warn(`  Warning: witness generation failed: ${msg}`);
+      }
+    }
+  }
+
+  log(`  Generated ${successfulWitnesses.length}/${bindingsToProcess.length} witnesses`);
+
+  if (successfulWitnesses.length === 0) {
+    throw new Error('No witnesses could be generated.');
+  }
+
+  if (!witnessOnly && backend) {
+    log(`\nGenerating proofs...`);
+
+    const proofResults = await Promise.allSettled(
+      successfulWitnesses.map(async ({ bindingIdx, witness }) => {
+        const startTime = Date.now();
+        const proof = await backend.generateProof(witness);
+        const timingMs = Date.now() - startTime;
+        return { bindingIdx, proof, timingMs };
+      })
+    );
+
+    for (const result of proofResults) {
+      if (result.status === 'fulfilled') {
+        proofs.push({
+          proof: serializeProof(result.value.proof.proof) as number[],
+          publicInputs: result.value.proof.publicInputs,
+          circuit: 'in-memory',
+          timestamp: new Date().toISOString(),
+          timingMs: result.value.timingMs,
+        });
+      } else {
+        warn(`  Warning: proof generation failed: ${result.reason?.message || result.reason}`);
+      }
+    }
+
+    log(`  Generated ${proofs.length}/${successfulWitnesses.length} proofs`);
+  }
+
+  if (backend) {
+    await backend.destroy();
+  }
+
+  const successCount = witnessOnly ? witnesses.length : proofs.length;
+
+  return {
+    proofs,
+    witnesses: witnessOnly ? witnesses : undefined,
+    metadata: {
+      totalBindings: bindings.length,
+      successfulProofs: successCount,
+      circuit: 'in-memory',
       witnessOnly: witnessOnly || undefined,
     },
     errors: collectedErrors.length > 0 ? collectedErrors : undefined,
