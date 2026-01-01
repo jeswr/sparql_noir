@@ -62,6 +62,19 @@ function patchNargoToml(content, relativeTo = '') {
 }
 
 /**
+ * Check if a file or directory is test-related
+ */
+function isTestFile(name, relativePath) {
+  // Skip test files and directories
+  if (name === 'tests' || name === 'tests.nr' || name === 'test.nr') return true;
+  if (name.startsWith('test_') || name.endsWith('_test.nr')) return true;
+  if (relativePath.includes('/tests/')) return true;
+  // Skip benchmark files
+  if (name === 'bench.nr' || name.startsWith('bench_')) return true;
+  return false;
+}
+
+/**
  * Recursively read all files in a directory
  */
 function readDirRecursive(dir, basePath = dir) {
@@ -73,11 +86,20 @@ function readDirRecursive(dir, basePath = dir) {
     const stat = statSync(fullPath);
     
     if (stat.isDirectory()) {
-      // Skip target directories (build artifacts)
-      if (entry === 'target') continue;
+      // Skip target directories (build artifacts) and test directories
+      if (entry === 'target' || entry === 'tests') continue;
       Object.assign(files, readDirRecursive(fullPath, basePath));
     } else if (entry.endsWith('.nr') || entry === 'Nargo.toml') {
-      files[relativePath] = readFileSync(fullPath, 'utf-8');
+      // Skip test files
+      if (isTestFile(entry, relativePath)) continue;
+      
+      let content = readFileSync(fullPath, 'utf-8');
+      // Strip comments and tests from Noir files to reduce bundle size
+      if (entry.endsWith('.nr')) {
+        content = stripComments(content);
+        content = stripTestCode(content);
+      }
+      files[relativePath] = content;
     }
   }
   
@@ -92,6 +114,153 @@ function escapeForTemplateLiteral(str) {
     .replace(/\\/g, '\\\\')
     .replace(/`/g, '\\`')
     .replace(/\$\{/g, '\\${');
+}
+
+/**
+ * Strip comments from Noir source code.
+ * Handles single-line comments (//) and multi-line comments.
+ */
+function stripComments(content) {
+  let result = '';
+  let i = 0;
+  let inString = false;
+  let stringChar = '';
+  
+  while (i < content.length) {
+    // Handle string literals (don't strip comments inside strings)
+    if (!inString && (content[i] === '"' || content[i] === "'")) {
+      inString = true;
+      stringChar = content[i];
+      result += content[i];
+      i++;
+      continue;
+    }
+    
+    if (inString) {
+      // Check for escape sequences
+      if (content[i] === '\\' && i + 1 < content.length) {
+        result += content[i] + content[i + 1];
+        i += 2;
+        continue;
+      }
+      // Check for end of string
+      if (content[i] === stringChar) {
+        inString = false;
+      }
+      result += content[i];
+      i++;
+      continue;
+    }
+    
+    // Check for single-line comment
+    if (content[i] === '/' && i + 1 < content.length && content[i + 1] === '/') {
+      // Skip until end of line
+      while (i < content.length && content[i] !== '\n') {
+        i++;
+      }
+      continue;
+    }
+    
+    // Check for multi-line comment
+    if (content[i] === '/' && i + 1 < content.length && content[i + 1] === '*') {
+      i += 2;
+      // Skip until closing */
+      while (i < content.length - 1 && !(content[i] === '*' && content[i + 1] === '/')) {
+        i++;
+      }
+      i += 2; // Skip the closing */
+      continue;
+    }
+    
+    result += content[i];
+    i++;
+  }
+  
+  // Clean up: remove all empty lines and trailing whitespace
+  return result
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(line => line.trim() !== '')  // Remove all empty lines
+    .join('\n')
+    .trim() + '\n';
+}
+
+/**
+ * Strip test code from Noir source.
+ * Removes #[test] functions, mod tests blocks, and mod tests/bench declarations.
+ */
+function stripTestCode(content) {
+  let result = '';
+  let i = 0;
+  
+  while (i < content.length) {
+    // Check for #[test] annotation
+    if (content.slice(i, i + 7) === '#[test]') {
+      // Skip the #[test] and any whitespace
+      i += 7;
+      while (i < content.length && /\s/.test(content[i])) i++;
+      
+      // Check if followed by 'fn'
+      if (content.slice(i, i + 2) === 'fn') {
+        // Skip the entire function including its body
+        // Find the opening brace
+        while (i < content.length && content[i] !== '{') i++;
+        if (i < content.length) {
+          // Skip the matched braces
+          let braceCount = 1;
+          i++; // Skip opening brace
+          while (i < content.length && braceCount > 0) {
+            if (content[i] === '{') braceCount++;
+            else if (content[i] === '}') braceCount--;
+            i++;
+          }
+        }
+        continue;
+      }
+    }
+    
+    // Check for 'mod tests' or 'mod bench' declarations (both inline blocks and file references)
+    if (content.slice(i, i + 3) === 'mod' && /\s/.test(content[i + 3])) {
+      let j = i + 4;
+      while (j < content.length && /\s/.test(content[j])) j++;
+      
+      // Check for tests or bench module
+      const isTests = content.slice(j, j + 5) === 'tests' && (j + 5 >= content.length || /[\s{;]/.test(content[j + 5]));
+      const isBench = content.slice(j, j + 5) === 'bench' && (j + 5 >= content.length || /[\s{;]/.test(content[j + 5]));
+      
+      if (isTests || isBench) {
+        j += 5;
+        // Skip whitespace after module name
+        while (j < content.length && /\s/.test(content[j])) j++;
+        
+        if (content[j] === ';') {
+          // mod tests; or mod bench; declaration - skip the whole thing
+          i = j + 1;
+          continue;
+        } else if (content[j] === '{') {
+          // mod tests { ... } block - skip the matched braces
+          let braceCount = 1;
+          j++; // Skip opening brace
+          while (j < content.length && braceCount > 0) {
+            if (content[j] === '{') braceCount++;
+            else if (content[j] === '}') braceCount--;
+            j++;
+          }
+          i = j;
+          continue;
+        }
+      }
+    }
+    
+    result += content[i];
+    i++;
+  }
+  
+  // Remove any remaining empty lines created by removal
+  return result
+    .split('\n')
+    .filter(line => line.trim() !== '')
+    .join('\n');
 }
 
 // Read all noir/lib files
