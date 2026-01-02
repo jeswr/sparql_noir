@@ -1,3 +1,5 @@
+⚠️ This library is under development, and is not ready for experimental or production use ⚠️
+
 # SPARQL Noir
 
 Zero-knowledge proofs for SPARQL query results over signed RDF datasets.
