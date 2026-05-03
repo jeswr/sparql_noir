@@ -5,30 +5,11 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-    # The round-3 main-event branch runs its own trimmed CI in
-    # round3-ci.yml; the full matrix is restored by the final commit
-    # (`chore(ci): restore full CI matrix before merge`).
-    paths-ignore:
-      - 'spec/**'
-      - 'SPARQL_ROADMAP.md'
-      - 'DELETION_CANDIDATES.md'
-      - 'questions/**'
 
 jobs:
   test-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Skip the full test-build matrix for the round-3 main-event PR
-    # (`jeswr/sparql_noir:feat/not-exists-sorted-commitment`); the
-    # trimmed `round3-ci.yml` workflow is the gate. Repository-
-    # qualified to avoid fork PRs with the same branch name
-    # bypassing this matrix. Restored by the final pre-merge commit.
-    if: |
-      github.event_name != 'pull_request' ||
-      !(
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        github.head_ref == 'feat/not-exists-sorted-commitment'
-      )
 
     steps:
     - name: Checkout repository
