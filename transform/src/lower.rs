@@ -13,7 +13,7 @@ use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
     PropertyPathExpression,
 };
-use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
+use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 
 use crate::{
     Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, GraphContext,
@@ -52,6 +52,15 @@ impl FreshSource {
 
     fn fresh_pred(&mut self) -> Variable {
         Variable::new_unchecked(format!("__np{}", self.next_id()))
+    }
+
+    /// Mint a fresh inner-only EXISTS variable name. The name carries
+    /// the source variable for readability in metadata / debug
+    /// snapshots. Per-query `FreshSource` ensures no two EXISTS
+    /// blocks (in the same query or across concurrent queries) ever
+    /// produce the same `__exists_*` identifier.
+    fn fresh_exists_var(&mut self, orig: &str) -> String {
+        format!("__exists_{}_{}", orig, self.next_id())
     }
 }
 
@@ -539,6 +548,433 @@ fn expand_normalised_path(
     }
 }
 
+/// Lower `Expression::Exists(P)` occurrences within a filter expression
+/// by flattening `P` into the outer `info` and rewriting the EXISTS node
+/// to a `true` literal. See `spec/exists.md` for the design rationale.
+///
+/// For the round 3 spike this only accepts EXISTS as the **root** filter
+/// expression (no nesting under `And`/`Or`/`Not`). NOT EXISTS is rejected
+/// outright. This is a deliberately narrow scope — the boolean-context
+/// integration of EXISTS within larger expressions, and the
+/// sorted-commitment NOT-EXISTS primitive, are the round-3-main-event
+/// scope.
+fn lower_exists_in_expression(
+    expr: &Expression,
+    info: &mut PatternInfo,
+    options: &TransformOptions,
+    fresh: &mut FreshSource,
+) -> Result<Expression, String> {
+    match expr {
+        Expression::Exists(inner) => {
+            flatten_exists_into(inner, info, options, fresh)?;
+            Ok(true_literal())
+        }
+        // `NOT EXISTS` parses as `Not(Exists(_))` (spargebra parser.rs
+        // ~L2335). Reject explicitly with a pointer to the design doc.
+        Expression::Not(boxed) => {
+            if matches!(boxed.as_ref(), Expression::Exists(_)) {
+                Err(
+                    "NOT EXISTS is not yet implemented (round 3 spike shipped EXISTS only). \
+                     A sound NOT-EXISTS primitive requires upgrading the dataset commitment to a \
+                     sorted Merkle tree so the prover can supply non-membership proofs via \
+                     adjacent leaves; see spec/exists.md §3 / §6 for the deferred design."
+                        .into(),
+                )
+            } else {
+                // Recurse into nested EXISTS in non-NOT-EXISTS positions
+                // — also rejected for now; the spike's narrow scope is
+                // documented in spec/exists.md §7 (open question 3).
+                if expression_contains_exists(boxed) {
+                    Err(
+                        "EXISTS nested inside `!`/`&&`/`||` is not yet implemented (round 3 spike \
+                         supports `FILTER(EXISTS { … })` at the filter root only). \
+                         See spec/exists.md §7 open question 3."
+                            .into(),
+                    )
+                } else {
+                    Ok(expr.clone())
+                }
+            }
+        }
+        Expression::And(_, _)
+        | Expression::Or(_, _)
+        | Expression::If(_, _, _)
+        | Expression::Coalesce(_)
+        | Expression::FunctionCall(_, _)
+        | Expression::In(_, _) => {
+            if expression_contains_exists(expr) {
+                Err(
+                    "EXISTS nested inside `&&`/`||`/IF/COALESCE/IN/FunctionCall is not yet \
+                     implemented (round 3 spike supports `FILTER(EXISTS { … })` at the filter \
+                     root only). See spec/exists.md §7 open question 3."
+                        .into(),
+                )
+            } else {
+                Ok(expr.clone())
+            }
+        }
+        // Leaf and shape-preserving expressions that cannot transitively
+        // contain EXISTS — pass through untouched.
+        _ => Ok(expr.clone()),
+    }
+}
+
+/// True if the expression tree contains an `Expression::Exists` anywhere.
+fn expression_contains_exists(expr: &Expression) -> bool {
+    match expr {
+        Expression::Exists(_) => true,
+        Expression::Not(a) | Expression::UnaryPlus(a) | Expression::UnaryMinus(a) => {
+            expression_contains_exists(a)
+        }
+        Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            expression_contains_exists(a) || expression_contains_exists(b)
+        }
+        Expression::If(a, b, c) => {
+            expression_contains_exists(a)
+                || expression_contains_exists(b)
+                || expression_contains_exists(c)
+        }
+        Expression::Coalesce(args) | Expression::FunctionCall(_, args) => {
+            args.iter().any(expression_contains_exists)
+        }
+        Expression::In(a, args) => {
+            expression_contains_exists(a) || args.iter().any(expression_contains_exists)
+        }
+        _ => false,
+    }
+}
+
+fn true_literal() -> Expression {
+    let xsd_boolean =
+        NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean");
+    Expression::Literal(Literal::new_typed_literal("true", xsd_boolean))
+}
+
+/// Flatten an inner `GraphPattern` (the `P` in `EXISTS { P }`) into the
+/// outer `info`, treating it as a Join. This is the §2 reformulation
+/// from `spec/exists.md`: append the inner triples + assertions, unify
+/// shared variables with existing outer bindings, and rename inner-only
+/// variables to fresh `__exists_*` names so they cannot clash with the
+/// outer scope's projection or another EXISTS block's vars.
+///
+/// **Rejects EXISTS over a UNION outer.** When the outer pattern lowered
+/// to `union_branches`, `info.bindings` is empty (UNION's branches each
+/// own their bindings) — naive flattening would treat every shared
+/// variable as inner-only and silently corrupt the constraint shape
+/// (a correlated EXISTS reduces to a global "some matching triple
+/// exists somewhere" check). Per-branch EXISTS lowering is the right
+/// fix but is out of scope for this spike.
+fn flatten_exists_into(
+    inner: &GraphPattern,
+    info: &mut PatternInfo,
+    options: &TransformOptions,
+    fresh: &mut FreshSource,
+) -> Result<(), String> {
+    if info.union_branches.is_some() {
+        return Err(
+            "EXISTS inside a FILTER over a UNION outer pattern is not yet implemented \
+             (round 3 spike). The current lowering has no per-branch binding scope to \
+             correlate against. See spec/exists.md §7."
+                .into(),
+        );
+    }
+
+    let inner_info = process_graph_pattern_inner(inner, options, fresh)?;
+
+    // Forbid features in the inner pattern that the spike doesn't yet
+    // support. Each of these has a clean follow-up but is out of scope.
+    if inner_info.union_branches.is_some() {
+        return Err(
+            "UNION inside EXISTS is not yet implemented (round 3 spike). \
+             See spec/exists.md §7."
+                .into(),
+        );
+    }
+    if !inner_info.optional_blocks.is_empty() {
+        return Err(
+            "OPTIONAL inside EXISTS is not yet implemented (round 3 spike). \
+             See spec/exists.md §7."
+                .into(),
+        );
+    }
+
+    let offset = info.patterns.len();
+
+    // Pre-compute the set of variables already bound in the outer info
+    // so we can decide whether each inner binding unifies (shared
+    // variable → assertion) or is renamed to a fresh hidden inner-only
+    // variable.
+    let outer_bound: std::collections::BTreeSet<String> = info
+        .bindings
+        .iter()
+        .map(|b| b.variable.clone())
+        .collect();
+
+    // Map from original inner variable name to its rewritten name (for
+    // inner-only variables). Shared variables aren't in the map — the
+    // inner_info's references to them stay as-is and pick up the outer
+    // binding via `Term::Variable` lookup at emit time.
+    let mut rename: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for b in &inner_info.bindings {
+        if !outer_bound.contains(&b.variable) {
+            rename.insert(b.variable.clone(), fresh.fresh_exists_var(&b.variable));
+        }
+    }
+
+    // Rename inner-only variables inside the spargebra TriplePatterns
+    // before extending — otherwise `metadata.json` would expose the
+    // original local names, allowing downstream metadata-driven
+    // matchers to correlate two independent EXISTS blocks that reuse
+    // the same source variable name. Subject / predicate / object /
+    // graph all carry variable references; each must be rewritten.
+    let renamed_patterns: Vec<ContextualizedTriple> = inner_info
+        .patterns
+        .into_iter()
+        .map(|ct| ContextualizedTriple {
+            pattern: TriplePattern {
+                subject: rename_term_pattern(ct.pattern.subject, &rename),
+                predicate: rename_named_node_pattern(ct.pattern.predicate, &rename),
+                object: rename_term_pattern(ct.pattern.object, &rename),
+            },
+            graph: rename_graph_context(ct.graph, &rename),
+        })
+        .collect();
+    info.patterns.extend(renamed_patterns);
+
+    for binding in inner_info.bindings {
+        let adjusted_term = match binding.term {
+            Term::Input(i, j) => Term::Input(i + offset, j),
+            other => other,
+        };
+        if outer_bound.contains(&binding.variable) {
+            // Shared variable — emit a unification assertion against
+            // the existing outer binding. The LHS keeps the original
+            // name so the existing outer binding is reused.
+            info.assertions.push(Assertion(
+                Term::Variable(binding.variable),
+                adjusted_term,
+            ));
+        } else {
+            // Inner-only variable — rename to a fresh `__exists_*`
+            // identifier so it cannot collide with outer-scope or other
+            // EXISTS-block names. It stays in `bindings` (for emit-time
+            // serialise_term lookup) but is excluded from projection by
+            // `process_query`'s `__`-prefix filter (lower.rs ~L785).
+            let renamed = rename.get(&binding.variable).expect("rename built above");
+            info.bindings.push(Binding {
+                variable: renamed.clone(),
+                term: adjusted_term,
+            });
+        }
+    }
+
+    for assertion in inner_info.assertions {
+        let adj_left = rename_term_in_assertion(assertion.0, &rename, offset);
+        let adj_right = rename_term_in_assertion(assertion.1, &rename, offset);
+        info.assertions.push(Assertion(adj_left, adj_right));
+    }
+
+    // Inner filters keep their semantics, but they may not themselves
+    // contain EXISTS in the spike (forbidden via expression_contains_exists).
+    for inner_filter in inner_info.filters {
+        if expression_contains_exists(&inner_filter) {
+            return Err(
+                "Nested EXISTS inside an EXISTS-block's FILTER is not yet implemented \
+                 (round 3 spike). See spec/exists.md §7."
+                    .into(),
+            );
+        }
+        // Filter expressions may reference the inner-only variables we
+        // just renamed, so substitute through.
+        info.filters.push(rename_variables_in_expression(&inner_filter, &rename));
+    }
+
+    Ok(())
+}
+
+/// Rename inner-only `TermPattern::Variable` references inside a
+/// spargebra `TermPattern`. Other variants pass through unchanged.
+fn rename_term_pattern(
+    tp: TermPattern,
+    rename: &std::collections::BTreeMap<String, String>,
+) -> TermPattern {
+    if let TermPattern::Variable(v) = &tp {
+        if let Some(fresh) = rename.get(v.as_str()) {
+            return TermPattern::Variable(Variable::new_unchecked(fresh.clone()));
+        }
+    }
+    tp
+}
+
+/// Rename inner-only `NamedNodePattern::Variable` references (predicate
+/// position). `NamedNode` arm passes through.
+fn rename_named_node_pattern(
+    nnp: NamedNodePattern,
+    rename: &std::collections::BTreeMap<String, String>,
+) -> NamedNodePattern {
+    if let NamedNodePattern::Variable(v) = &nnp {
+        if let Some(fresh) = rename.get(v.as_str()) {
+            return NamedNodePattern::Variable(Variable::new_unchecked(fresh.clone()));
+        }
+    }
+    nnp
+}
+
+/// Rename inner-only variable references inside a `GraphContext`. The
+/// `Variable` arm is the only case that carries a name; `Default` /
+/// `NamedNode` pass through.
+fn rename_graph_context(
+    graph: GraphContext,
+    rename: &std::collections::BTreeMap<String, String>,
+) -> GraphContext {
+    if let GraphContext::Variable(name) = &graph {
+        if let Some(fresh) = rename.get(name) {
+            return GraphContext::Variable(fresh.clone());
+        }
+    }
+    graph
+}
+
+/// Adjust an inner-pattern `Term` for the outer offset, and rename
+/// inner-only `Term::Variable` references to their fresh `__exists_*`
+/// names.
+fn rename_term_in_assertion(
+    term: Term,
+    rename: &std::collections::BTreeMap<String, String>,
+    offset: usize,
+) -> Term {
+    match term {
+        Term::Input(i, j) => Term::Input(i + offset, j),
+        Term::Variable(name) => {
+            if let Some(fresh) = rename.get(&name) {
+                Term::Variable(fresh.clone())
+            } else {
+                Term::Variable(name)
+            }
+        }
+        other => other,
+    }
+}
+
+/// Substitute renamed inner-only variables inside a SPARQL expression.
+/// Conservative: only `Expression::Variable` is rewritten; all other
+/// shapes recurse structurally. EXISTS / NOT EXISTS expressions inside
+/// `expr` are left untouched here — `flatten_exists_into` already
+/// rejects them via `expression_contains_exists`.
+fn rename_variables_in_expression(
+    expr: &Expression,
+    rename: &std::collections::BTreeMap<String, String>,
+) -> Expression {
+    use Expression::{
+        Add, And, Bound as BoundE, Coalesce, Divide, Equal, FunctionCall, Greater,
+        GreaterOrEqual, If, In, Less, LessOrEqual, Multiply, Not, Or, SameTerm, Subtract,
+        UnaryMinus, UnaryPlus, Variable as VariableE,
+    };
+    match expr {
+        VariableE(v) => {
+            if let Some(fresh) = rename.get(v.as_str()) {
+                VariableE(Variable::new_unchecked(fresh.clone()))
+            } else {
+                expr.clone()
+            }
+        }
+        BoundE(v) => {
+            if let Some(fresh) = rename.get(v.as_str()) {
+                BoundE(Variable::new_unchecked(fresh.clone()))
+            } else {
+                expr.clone()
+            }
+        }
+        Or(a, b) => Or(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        And(a, b) => And(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Equal(a, b) => Equal(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        SameTerm(a, b) => SameTerm(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Greater(a, b) => Greater(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        GreaterOrEqual(a, b) => GreaterOrEqual(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Less(a, b) => Less(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        LessOrEqual(a, b) => LessOrEqual(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Add(a, b) => Add(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Subtract(a, b) => Subtract(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Multiply(a, b) => Multiply(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Divide(a, b) => Divide(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        UnaryPlus(a) => UnaryPlus(Box::new(rename_variables_in_expression(a, rename))),
+        UnaryMinus(a) => UnaryMinus(Box::new(rename_variables_in_expression(a, rename))),
+        Not(a) => Not(Box::new(rename_variables_in_expression(a, rename))),
+        If(a, b, c) => If(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+            Box::new(rename_variables_in_expression(c, rename)),
+        ),
+        In(a, args) => In(
+            Box::new(rename_variables_in_expression(a, rename)),
+            args.iter()
+                .map(|e| rename_variables_in_expression(e, rename))
+                .collect(),
+        ),
+        Coalesce(args) => Coalesce(
+            args.iter()
+                .map(|e| rename_variables_in_expression(e, rename))
+                .collect(),
+        ),
+        FunctionCall(f, args) => FunctionCall(
+            f.clone(),
+            args.iter()
+                .map(|e| rename_variables_in_expression(e, rename))
+                .collect(),
+        ),
+        // Leaf: literal / named node / Exists (rejected upstream).
+        _ => expr.clone(),
+    }
+}
+
 /// Build the pattern that represents the zero-step branch of `p?` /
 /// `p*` — i.e. `subject = object`. Per SPARQL 1.1 §18.5 a
 /// zero-length path matches whenever the two endpoints are the same
@@ -775,7 +1211,23 @@ fn process_graph_pattern_inner(
 
         GraphPattern::Filter { expr, inner } => {
             let mut info = process_graph_pattern_inner(inner, options, fresh)?;
-            info.filters.push(expr.clone());
+            // EXISTS / NOT EXISTS — round 3 spike (see spec/exists.md).
+            //
+            // `FILTER(EXISTS { P })` flattens the inner pattern P into the
+            // outer BGP via the witness-supplied compatibility reformulation:
+            // each inner triple becomes an additional `Triple` in the outer
+            // `bgp`, with full Merkle inclusion + signature checking; the
+            // EXISTS expression itself collapses to `true`. Inner-only
+            // variables become hidden bindings that are not exposed in
+            // `Variables`.
+            //
+            // `FILTER(NOT EXISTS { P })` is rejected at lowering time:
+            // sound non-existence requires a sorted-Merkle-commitment
+            // primitive that is the round-3-main-event scope (spec/exists.md
+            // §3, §6).
+            let rewritten_expr =
+                lower_exists_in_expression(expr, &mut info, options, fresh)?;
+            info.filters.push(rewritten_expr);
             Ok(info)
         }
 
@@ -1260,11 +1712,22 @@ pub(crate) fn process_query_with_options(
                 offset: post.offset,
             })
         }
-        // ASK queries do not have PROJECT — project all bound variables.
+        // ASK queries do not have PROJECT — project all bound
+        // variables, except those with `__`-prefix (blank-node
+        // internals and `__exists_*` inner-only EXISTS witnesses,
+        // which must never appear in the disclosed projection).
         _ => {
             let pattern = process_graph_pattern_with_options(inner, options)?;
-            let mut vars: Vec<String> =
-                pattern.bindings.iter().map(|b| b.variable.clone()).collect();
+            // Filter out `__`-prefix names: blank-node internals and
+            // `__exists_*` inner-only EXISTS witnesses must never
+            // appear in the disclosed projection (round 3 spike;
+            // mirrors the SELECT-with-aggregates fallback).
+            let mut vars: Vec<String> = pattern
+                .bindings
+                .iter()
+                .map(|b| b.variable.clone())
+                .filter(|v| !v.starts_with("__"))
+                .collect();
             vars.sort();
             vars.dedup();
             Ok(QueryInfo {

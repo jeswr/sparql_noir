@@ -228,6 +228,32 @@ const CORPUS: &[Case] = &[
         name: "kleene_join_sibling",
         query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o ?x WHERE { ?s ex:flag ?x . ?s ex:knows+ ?o . }",
     },
+    // EXISTS — round 3 spike (see spec/exists.md). The inner pattern
+    // `?o ex:age ?age` flattens into the outer BGP via the
+    // witness-supplied compatibility reformulation: the second triple
+    // is an ordinary `Triple` with full inclusion + signature checking;
+    // ?age is an inner-only variable and is not projected.
+    Case {
+        name: "exists_basic",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ex:age ?age . }) }",
+    },
+    // EXISTS with a fully ground inner pattern — every inner-position
+    // is fixed by the outer mapping. Smallest possible inner BGP cost
+    // (single-triple inclusion proof + 3 unification assertions).
+    Case {
+        name: "exists_grounded",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?s ex:type ex:Person . }) }",
+    },
+    // EXISTS with an inner-only **predicate** variable. Verifies the
+    // rename pass covers `NamedNodePattern::Variable` so metadata
+    // does not expose the original local name `?p`.
+    Case {
+        name: "exists_var_predicate",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ?p \"hello\" . }) }",
+    },
 ];
 
 /// Round 2 §7 — defensive cap on OPTIONAL blocks. The transform must
@@ -415,6 +441,143 @@ fn check_or_update(path: &PathBuf, actual: &str, update: bool, label: &str, name
             actual_path.display()
         );
     }
+}
+
+/// `NOT EXISTS` is rejected at lowering — see `spec/exists.md` §3 / §6
+/// for the deferred sorted-Merkle-commitment design.
+#[test]
+fn not_exists_is_rejected_with_pointer_to_design_doc() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(NOT EXISTS { ?o ex:age ?age . }) }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected NOT EXISTS to be rejected, but transform succeeded"),
+        Err(err) => assert!(
+            err.contains("NOT EXISTS") && err.contains("spec/exists.md"),
+            "expected error to mention NOT EXISTS and spec/exists.md, got: {}",
+            err
+        ),
+    }
+}
+
+/// EXISTS nested under boolean operators is rejected for now (see
+/// `spec/exists.md` §7 open question 3).
+#[test]
+fn exists_inside_boolean_combinator_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ex:a ?a } && EXISTS { ?o ex:b ?b }) }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected nested EXISTS to be rejected, but transform succeeded"),
+        Err(err) => assert!(
+            err.contains("EXISTS") && err.contains("spec/exists.md"),
+            "expected error to mention EXISTS and spec/exists.md, got: {}",
+            err
+        ),
+    }
+}
+
+/// `FILTER(EXISTS{P})` over a UNION-shaped outer pattern is rejected
+/// (per roborev finding 2026-05-03). Naively flattening would corrupt
+/// the constraint shape because UNION's branches each own their
+/// bindings; EXISTS would then see no outer bindings at all and treat
+/// every variable as inner-only.
+#[test]
+fn exists_over_union_outer_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               { ?s ex:a ?o . } UNION { ?s ex:b ?o . } \
+               FILTER(EXISTS { ?o ex:age ?age . }) \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected EXISTS over UNION outer to be rejected"),
+        Err(err) => assert!(
+            err.contains("UNION") && err.contains("spec/exists.md"),
+            "expected error to mention UNION and spec/exists.md, got: {}",
+            err
+        ),
+    }
+}
+
+/// Inner-only EXISTS variables are renamed to `__exists_<orig>_<id>` so
+/// they cannot collide with the outer scope or another EXISTS block's
+/// vars. Verifies the medium-severity roborev fix: prevents an EXISTS
+/// witness's inner variable from accidentally correlating with a real
+/// outer binding of the same name.
+#[test]
+fn inner_only_exists_variables_are_renamed() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ex:age ?age . }) }";
+    let result = transform_query(q).expect("transform should succeed");
+    // ?age is inner-only — the original name must not appear in the
+    // generated Noir code (would imply it leaked into outer scope).
+    assert!(
+        !result.sparql_nr.contains("variables.age"),
+        "?age should not be projected as a variable: {}",
+        result.sparql_nr
+    );
+    // Variables struct should only contain ?s.
+    assert!(result.sparql_nr.contains("pub(crate) struct Variables {\n  pub(crate) s: Field,\n}"));
+}
+
+/// Inner-only **predicate** variables must also be renamed in metadata
+/// (per roborev follow-up). A `?p` predicate inside EXISTS would
+/// otherwise leak its original name and let downstream matchers
+/// correlate two unrelated EXISTS blocks reusing `?p`.
+#[test]
+fn inner_only_predicate_variable_is_renamed_in_metadata() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ?p \"hi\" . }) }";
+    let result = transform_query(q).expect("transform should succeed");
+    let metadata = serde_json::to_string(&result.metadata).expect("serialise");
+    // Original predicate name must not appear as an exposed Variable.
+    assert!(
+        !metadata.contains("\"value\":\"p\""),
+        "?p (predicate) should be renamed in metadata: {}",
+        metadata
+    );
+    assert!(
+        metadata.contains("__exists_p_"),
+        "metadata should expose the renamed __exists_p_<id>: {}",
+        metadata
+    );
+}
+
+/// ASK queries auto-project every bound variable. The roborev
+/// 2026-05-03 finding: with EXISTS now introducing `__exists_*` hidden
+/// vars, ASK must filter them out to avoid leaking inner-only witness
+/// names. This test guards that filter.
+#[test]
+fn ask_with_exists_does_not_leak_inner_only_vars() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             ASK WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ex:age ?age . }) }";
+    let result = transform_query(q).expect("transform should succeed");
+    assert!(
+        !result.sparql_nr.contains("__exists_age"),
+        "__exists_age_* should not appear in ASK projection: {}",
+        result.sparql_nr
+    );
+    // Sanity: the regular outer-bound variables ?s and ?o still project.
+    assert!(result.sparql_nr.contains("pub(crate) s: Field"));
+    assert!(result.sparql_nr.contains("pub(crate) o: Field"));
+}
+
+/// EXISTS with a fully-ground inner pattern lowers cleanly: the inner
+/// triple becomes an additional outer BGP entry with constant-position
+/// assertions and a unification of the shared variable.
+#[test]
+fn exists_grounded_lowers_to_two_triple_bgp() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?s ex:type ex:Person . }) }";
+    let result = transform_query(q).expect("transform should succeed");
+    // Two triples: the outer `?s ex:knows ?o` and the flattened inner
+    // `?s ex:type ex:Person`.
+    assert!(result.sparql_nr.contains("type BGP = [Triple; 2]"));
+    // The inner subject unifies with the outer-bound variable `?s`.
+    assert!(result.sparql_nr.contains("variables.s == bgp[1].terms[0]"));
+    // Inner predicate / object land as constant assertions.
+    assert!(result.sparql_nr.contains("http://example.org/type"));
+    assert!(result.sparql_nr.contains("http://example.org/Person"));
+    // The EXISTS expression itself collapsed to `true`.
+    assert!(result.sparql_nr.contains("assert(true);"));
 }
 
 #[test]
