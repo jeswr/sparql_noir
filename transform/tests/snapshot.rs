@@ -66,6 +66,18 @@ const CORPUS: &[Case] = &[
         name: "optional_basic",
         query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
     },
+    // Round-3 follow-up — tiered partial OPTIONAL collapse (easy
+    // case). The inner triple `?s ex:type ex:Person` has every
+    // variable position outer-bound (`?s`) and constant positions
+    // (`ex:type`, `ex:Person`); after substitution it is fully
+    // ground. The OPTIONAL therefore collapses to a single
+    // `assert(matched | unmatched)` line — no power-set generation,
+    // no `optional_circuits[]` entry. See `spec/exists.md` §4.1.
+    Case {
+        name: "optional_easy_collapse",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s ?o WHERE { ?s ex:knows ?o . OPTIONAL { ?s ex:type ex:Person . } }",
+    },
     Case {
         name: "union_basic",
         query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { { ?s ex:a ?o . } UNION { ?s ex:b ?o . } }",
@@ -583,6 +595,131 @@ fn minus_variable_disjoint_is_noop() {
         ne.len(),
         0,
         "variable-disjoint MINUS must emit no NonExistenceConstraint"
+    );
+}
+
+/// Round-3 follow-up — tiered partial OPTIONAL collapse easy case.
+/// `?s ex:knows ?o . OPTIONAL { ?s ex:type ex:Person . }` — every
+/// position of the inner triple is either an outer-bound variable
+/// (`?s`) or a constant (`ex:type`, `ex:Person`). The OPTIONAL must
+/// collapse to a single `assert(matched | unmatched)` line, with
+/// `verify_non_membership_no_inclusion_check` in the unmatched arm
+/// and inclusion-style position assertions on the matched arm. No
+/// `optional_circuits[]` entry is produced. See `spec/exists.md` §4.1.
+#[test]
+fn optional_easy_case_collapses_to_single_circuit() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { ?s ex:knows ?o . OPTIONAL { ?s ex:type ex:Person . } }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    // No power-set variants: easy-case OPTIONAL does not contribute
+    // to the `optional_circuits[]` array.
+    assert!(
+        result.optional_circuits.is_empty(),
+        "easy-case OPTIONAL must not produce power-set variants, got {} circuits",
+        result.optional_circuits.len()
+    );
+    // Three appended slots (outer triple + matched-arm slot + 2 brackets).
+    assert!(
+        result.sparql_nr.contains("type BGP = [Triple; 4]"),
+        "expected BGP of size 4 (1 outer + 1 matched + 2 brackets), got:\n{}",
+        result.sparql_nr
+    );
+    // Body must contain the boolean non-membership check inside the
+    // unmatched arm of an `assert(... | ...)` line.
+    assert!(
+        result.sparql_nr.contains("verify_non_membership_no_inclusion_check"),
+        "expected verify_non_membership_no_inclusion_check call, got:\n{}",
+        result.sparql_nr
+    );
+    // Metadata exposes the easy-case OPTIONAL.
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(easy.len(), 1, "expected one easy-case OPTIONAL, got {:?}", easy);
+    // No regular `optionalPatterns` entry — the easy-case OPTIONAL
+    // does not flow through the power-set machinery.
+    let opt = result
+        .metadata
+        .get("optionalPatterns")
+        .and_then(|v| v.as_array())
+        .expect("optionalPatterns metadata array");
+    assert_eq!(
+        opt.len(),
+        0,
+        "easy-case OPTIONAL must not appear in optionalPatterns, got {:?}",
+        opt
+    );
+}
+
+/// Round-3 follow-up — tiered partial OPTIONAL collapse fall-through.
+/// `OPTIONAL { ?p ex:age ?o }` (where `?p` is outer-bound but `?o` is
+/// inner-only) does **not** satisfy the easy-case predicate; it must
+/// still flow through the existing `2^n` power-set path unchanged —
+/// `optional_circuits` non-empty, regular `optionalPatterns` populated.
+#[test]
+fn optional_inner_only_var_falls_through_to_power_set() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    // Power-set path preserved.
+    assert_eq!(
+        result.optional_circuits.len(),
+        1,
+        "fall-through OPTIONAL must produce one power-set variant, got {}",
+        result.optional_circuits.len()
+    );
+    let opt = result
+        .metadata
+        .get("optionalPatterns")
+        .and_then(|v| v.as_array())
+        .expect("optionalPatterns metadata array");
+    assert_eq!(opt.len(), 1, "fall-through OPTIONAL must populate optionalPatterns");
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert!(
+        easy.is_empty(),
+        "fall-through OPTIONAL must NOT register as easy-case, got {:?}",
+        easy
+    );
+    assert!(
+        !result
+            .sparql_nr
+            .contains("verify_non_membership_no_inclusion_check"),
+        "fall-through OPTIONAL must NOT emit the boolean non-membership check"
+    );
+}
+
+/// Multi-triple inner `OPTIONAL` falls through to power-set even when
+/// every variable is outer-bound — easy-case scope is single-triple
+/// inner only. Round-4's prefix-tree commitments will lift this.
+#[test]
+fn optional_multi_triple_inner_falls_through() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?s ex:type ex:Person . ?p ex:type ex:Person . } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+    assert_eq!(
+        result.optional_circuits.len(),
+        1,
+        "multi-triple OPTIONAL must fall through to power-set"
+    );
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert!(
+        easy.is_empty(),
+        "multi-triple OPTIONAL must NOT register as easy-case"
     );
 }
 

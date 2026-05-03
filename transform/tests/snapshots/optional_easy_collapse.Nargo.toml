@@ -1,0 +1,9 @@
+[package]
+name = "sparql_proof"
+type = "bin"
+authors = [""]
+
+[dependencies]
+consts = { path = "../noir/lib/consts" }
+types = { path = "../noir/lib/types" }
+utils = { path = "../noir/lib/utils" }

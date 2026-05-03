@@ -1,7 +1,27 @@
 {
   "aggregates": [],
-  "easyOptionals": [],
-  "easy_optionals": [],
+  "easyOptionals": [
+    {
+      "bracketLeftIdx": 2,
+      "bracketRightIdx": 3,
+      "bracket_left_idx": 2,
+      "bracket_right_idx": 3,
+      "id": 0,
+      "matchedIdx": 1,
+      "matched_idx": 1
+    }
+  ],
+  "easy_optionals": [
+    {
+      "bracketLeftIdx": 2,
+      "bracketRightIdx": 3,
+      "bracket_left_idx": 2,
+      "bracket_right_idx": 3,
+      "id": 0,
+      "matchedIdx": 1,
+      "matched_idx": 1
+    }
+  ],
   "hiddenInputs": [],
   "hidden_inputs": [],
   "inputPatterns": [
@@ -16,6 +36,23 @@
       "predicate": {
         "termType": "NamedNode",
         "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "NamedNode",
+        "value": "http://example.org/Person"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/type"
       },
       "subject": {
         "termType": "Variable",
@@ -80,6 +117,23 @@
         "termType": "DefaultGraph"
       },
       "object": {
+        "termType": "NamedNode",
+        "value": "http://example.org/Person"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/type"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
         "termType": "Variable",
         "value": "__br_o_0"
       },
@@ -111,22 +165,8 @@
     }
   ],
   "limit": null,
-  "notExists": [
-    {
-      "bracketLeftIdx": 1,
-      "bracketRightIdx": 2,
-      "bracket_left_idx": 1,
-      "bracket_right_idx": 2
-    }
-  ],
-  "not_exists": [
-    {
-      "bracketLeftIdx": 1,
-      "bracketRightIdx": 2,
-      "bracket_left_idx": 1,
-      "bracket_right_idx": 2
-    }
-  ],
+  "notExists": [],
+  "not_exists": [],
   "num_optionals": 0,
   "offset": null,
   "optionalPatterns": [],
@@ -134,7 +174,7 @@
   "orderBy": [],
   "order_by": [],
   "skip_signing": false,
-  "total_patterns": 3,
+  "total_patterns": 4,
   "unionBranches": [],
   "union_branches": [],
   "variables": [
