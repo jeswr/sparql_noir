@@ -200,6 +200,14 @@ const CORPUS: &[Case] = &[
         query: "PREFIX ex: <http://example.org/>\n\
                 SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?s ex:type ex:Person . }) }",
     },
+    // EXISTS with an inner-only **predicate** variable. Verifies the
+    // rename pass covers `NamedNodePattern::Variable` so metadata
+    // does not expose the original local name `?p`.
+    Case {
+        name: "exists_var_predicate",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ?p \"hello\" . }) }",
+    },
 ];
 
 fn snapshots_dir() -> PathBuf {
@@ -302,6 +310,29 @@ fn inner_only_exists_variables_are_renamed() {
     );
     // Variables struct should only contain ?s.
     assert!(result.sparql_nr.contains("pub(crate) struct Variables {\n  pub(crate) s: Field,\n}"));
+}
+
+/// Inner-only **predicate** variables must also be renamed in metadata
+/// (per roborev follow-up). A `?p` predicate inside EXISTS would
+/// otherwise leak its original name and let downstream matchers
+/// correlate two unrelated EXISTS blocks reusing `?p`.
+#[test]
+fn inner_only_predicate_variable_is_renamed_in_metadata() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ?p \"hi\" . }) }";
+    let result = transform_query(q).expect("transform should succeed");
+    let metadata = serde_json::to_string(&result.metadata).expect("serialise");
+    // Original predicate name must not appear as an exposed Variable.
+    assert!(
+        !metadata.contains("\"value\":\"p\""),
+        "?p (predicate) should be renamed in metadata: {}",
+        metadata
+    );
+    assert!(
+        metadata.contains("__exists_p_"),
+        "metadata should expose the renamed __exists_p_<id>: {}",
+        metadata
+    );
 }
 
 /// ASK queries auto-project every bound variable. The roborev

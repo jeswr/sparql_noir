@@ -441,14 +441,15 @@ fn flatten_exists_into(
     // before extending — otherwise `metadata.json` would expose the
     // original local names, allowing downstream metadata-driven
     // matchers to correlate two independent EXISTS blocks that reuse
-    // the same source variable name.
+    // the same source variable name. Subject / predicate / object /
+    // graph all carry variable references; each must be rewritten.
     let renamed_patterns: Vec<ContextualizedTriple> = inner_info
         .patterns
         .into_iter()
         .map(|ct| ContextualizedTriple {
             pattern: TriplePattern {
                 subject: rename_term_pattern(ct.pattern.subject, &rename),
-                predicate: ct.pattern.predicate,
+                predicate: rename_named_node_pattern(ct.pattern.predicate, &rename),
                 object: rename_term_pattern(ct.pattern.object, &rename),
             },
             graph: rename_graph_context(ct.graph, &rename),
@@ -519,6 +520,20 @@ fn rename_term_pattern(
         }
     }
     tp
+}
+
+/// Rename inner-only `NamedNodePattern::Variable` references (predicate
+/// position). `NamedNode` arm passes through.
+fn rename_named_node_pattern(
+    nnp: NamedNodePattern,
+    rename: &std::collections::BTreeMap<String, String>,
+) -> NamedNodePattern {
+    if let NamedNodePattern::Variable(v) = &nnp {
+        if let Some(fresh) = rename.get(v.as_str()) {
+            return NamedNodePattern::Variable(Variable::new_unchecked(fresh.clone()));
+        }
+    }
+    nnp
 }
 
 /// Rename inner-only variable references inside a `GraphContext`. The
