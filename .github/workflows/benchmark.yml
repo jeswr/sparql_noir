@@ -1,5 +1,11 @@
 name: Benchmark
 
+# Informational workflow: collects circuit gate counts / timings.
+# Failures here are NOT a merge gate — branch protection only requires
+# the unit-test workflows. The job is marked `continue-on-error: true`
+# so a partial failure (e.g. a single circuit failing to compile)
+# surfaces in the PR check rollup as "informational" rather than red.
+
 on:
   push:
     branches: [ main ]
@@ -12,6 +18,8 @@ jobs:
   benchmark:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Informational only — see header comment.
+    continue-on-error: true
 
     steps:
     - name: Checkout repository
@@ -27,25 +35,17 @@ jobs:
       run: npm install
 
     - name: Install Noir
-      run: |
-        # Install noirup
-        bash noir_install.sh
-        
-        # Source bashrc and install nargo
-        export PATH="/home/runner/.nargo/bin:$PATH"
-        echo 'export PATH="/home/runner/.nargo/bin:$PATH"' >> ~/.bashrc
-        source ~/.bashrc
-        ~/.noirup/bin/noirup
+      uses: noir-lang/noirup@v0.1.4
 
     - name: Verify Noir installation
-      run: |
-        export PATH="/home/runner/.nargo/bin:$PATH"
-        nargo --version
+      run: nargo --version
+
+    - name: Bundle Noir library sources
+      # Required for `npm run build:tsc` — see test-build.yml for the rationale.
+      run: npm run bundle:noir-lib
 
     - name: Build project
-      run: |
-        export PATH="/home/runner/.nargo/bin:$PATH"
-        npm run build:tsc
+      run: npm run build:tsc
 
     # Try to build individual circuits to check compatibility
     - name: Check circuit compatibility

@@ -24,6 +24,12 @@ jobs:
     - name: Install dependencies
       run: npm install
 
+    - name: Bundle Noir library sources
+      # `src/index.ts` imports from `./noir-lib-bundle.js`, which is generated
+      # by this script from `noir/lib/`. Without this, `npm run build:tsc`
+      # fails with TS2307: cannot find module './noir-lib-bundle.js'.
+      run: npm run bundle:noir-lib
+
     - name: Build TypeScript
       run: npm run build:tsc
 
