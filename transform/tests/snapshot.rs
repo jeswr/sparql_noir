@@ -719,6 +719,23 @@ fn order_by_key_is_threaded_into_circuit_vars() {
     assert!(names.contains(&"s"), "?s (projected) must be in circuit_vars: {:?}", names);
 }
 
+/// ORDER BY repeating the same variable must not push the same
+/// name twice into `circuit_vars` (roborev follow-up on item 3).
+#[test]
+fn order_by_duplicate_key_does_not_duplicate_circuit_vars() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . } ORDER BY ?o ASC(?o)";
+    let result = transform_query(q).expect("transform should succeed");
+    let variables = result
+        .metadata
+        .get("variables")
+        .and_then(|v| v.as_array())
+        .expect("variables array");
+    let names: Vec<&str> = variables.iter().filter_map(|v| v.as_str()).collect();
+    let o_count = names.iter().filter(|n| **n == "o").count();
+    assert_eq!(o_count, 1, "?o should appear exactly once even with two ORDER BY uses: {:?}", names);
+}
+
 /// ORDER BY referencing an unbound variable is rejected — the
 /// verifier cannot sort by a variable that the BGP never assigned
 /// (audit follow-up to item 3).

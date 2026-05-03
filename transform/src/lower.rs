@@ -2021,8 +2021,11 @@ pub(crate) fn process_query_with_options(
             // verifier can't sort the multiset (audit item 3,
             // sparql_noir #39 row). Append any order-by variable not
             // already in `circuit_vars`, preserving first-seen order
-            // and skipping `__`-prefixed witnesses.
-            let already: std::collections::HashSet<String> =
+            // and skipping `__`-prefixed witnesses. The `already`
+            // set is mutated as we go so a query that re-uses the
+            // same key in two ORDER BY positions doesn't push the
+            // variable twice.
+            let mut already: std::collections::HashSet<String> =
                 circuit_vars.iter().cloned().collect();
             for key in &post.order_by {
                 if already.contains(&key.variable) || key.variable.starts_with("__") {
@@ -2049,6 +2052,7 @@ pub(crate) fn process_query_with_options(
                         key.variable
                     ));
                 }
+                already.insert(key.variable.clone());
                 circuit_vars.push(key.variable.clone());
             }
 
