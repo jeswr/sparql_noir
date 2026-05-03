@@ -9,12 +9,15 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use spargebra::algebra::{Expression, GraphPattern, PropertyPathExpression};
+use spargebra::algebra::{
+    AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
+    PropertyPathExpression,
+};
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 
 use crate::{
-    Assertion, Binding, ContextualizedTriple, GraphContext, OptionalBlock, PatternInfo, QueryInfo,
-    Term,
+    Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, GraphContext,
+    OptionalBlock, OrderDirection, OrderKey, PatternInfo, QueryInfo, Term,
 };
 
 static OPTIONAL_BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -496,24 +499,307 @@ pub(crate) fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, St
     }
 }
 
-pub(crate) fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
-    // Unwrap post-processing modifiers (DISTINCT, ORDER BY, LIMIT/OFFSET)
-    let mut inner = gp;
-    loop {
-        inner = match inner {
-            GraphPattern::Distinct { inner: i } => i,
-            GraphPattern::Reduced { inner: i } => i,
-            GraphPattern::OrderBy { inner: i, .. } => i,
-            GraphPattern::Slice { inner: i, .. } => i,
-            _ => break,
-        };
+/// Extract aggregate / order-by / limit / offset modifiers from the
+/// algebra root, leaving an `inner` that is either a `Project` or a
+/// non-projecting pattern (for ASK).
+///
+/// The disclose-and-verify approach (SPARQL_ROADMAP.md §8.6, Q6
+/// decision 2026-05-03) means these modifiers contribute *only* to
+/// `metadata.json`; the circuit body is identical to the underlying
+/// pattern. No DISTINCT / sort / count primitives are emitted.
+struct PostProcessing {
+    order_by: Vec<OrderKey>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+impl PostProcessing {
+    fn empty() -> Self {
+        Self {
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        }
     }
+}
+
+/// Convert a spargebra `OrderExpression` into our IR. Only variable
+/// keys are supported for now — arbitrary expressions would force the
+/// verifier to recompute them, which we punt to a follow-up.
+fn order_expression_to_key(expr: &OrderExpression) -> Result<OrderKey, String> {
+    let (direction, inner) = match expr {
+        OrderExpression::Asc(e) => (OrderDirection::Asc, e),
+        OrderExpression::Desc(e) => (OrderDirection::Desc, e),
+    };
+    match inner {
+        Expression::Variable(v) => Ok(OrderKey {
+            variable: v.as_str().to_string(),
+            direction,
+        }),
+        other => Err(format!(
+            "ORDER BY by non-variable expression is not yet supported: {:?}",
+            other
+        )),
+    }
+}
+
+/// Translate a spargebra `AggregateExpression` over `?source` into the
+/// IR, given the variable name the aggregate result is bound to in the
+/// outer projection.
+fn aggregate_expression_to_kind(
+    agg: &AggregateExpression,
+) -> Result<(AggregateKind, Option<String>), String> {
+    match agg {
+        AggregateExpression::CountSolutions { distinct } => {
+            Ok((AggregateKind::CountSolutions { distinct: *distinct }, None))
+        }
+        AggregateExpression::FunctionCall { name, expr, distinct } => {
+            let source = match expr {
+                Expression::Variable(v) => Some(v.as_str().to_string()),
+                other => {
+                    return Err(format!(
+                        "Aggregate over non-variable expression is not yet supported: {:?}",
+                        other
+                    ));
+                }
+            };
+            let kind = match name {
+                AggregateFunction::Count => {
+                    if *distinct {
+                        AggregateKind::CountDistinct
+                    } else {
+                        AggregateKind::Count
+                    }
+                }
+                AggregateFunction::Sum => AggregateKind::Sum { distinct: *distinct },
+                AggregateFunction::Min => AggregateKind::Min { distinct: *distinct },
+                AggregateFunction::Max => AggregateKind::Max { distinct: *distinct },
+                AggregateFunction::Avg => AggregateKind::Avg { distinct: *distinct },
+                AggregateFunction::GroupConcat { .. } => {
+                    return Err(
+                        "GROUP_CONCAT is not yet implemented (deferred — bounded string handling)"
+                            .into(),
+                    );
+                }
+                AggregateFunction::Sample => {
+                    return Err(
+                        "SAMPLE is not yet implemented (non-deterministic; out of scope for round 2)"
+                            .into(),
+                    );
+                }
+                AggregateFunction::Custom(iri) => {
+                    return Err(format!("Custom aggregate function not supported: {}", iri));
+                }
+            };
+            Ok((kind, source))
+        }
+    }
+}
+
+/// Strip outer modifiers and remember them. Order matters because
+/// spargebra normalises into a fixed shape:
+///
+/// ```text
+/// Slice { inner: Project { inner: OrderBy { inner: Extend* {
+///     Group { inner: <pattern>, aggregates: [...] } } } } }
+/// ```
+fn strip_post_processing(gp: &GraphPattern) -> (&GraphPattern, PostProcessing) {
+    let mut post = PostProcessing::empty();
+    let mut current = gp;
+    loop {
+        match current {
+            GraphPattern::Slice {
+                inner,
+                start,
+                length,
+            } => {
+                if *start > 0 {
+                    post.offset = Some(*start);
+                }
+                if let Some(l) = length {
+                    post.limit = Some(*l);
+                }
+                current = inner;
+            }
+            GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => {
+                current = inner;
+            }
+            // Top-level ORDER BY is rare (it's normally inside the
+            // Project), but unwrap it defensively.
+            GraphPattern::OrderBy { inner, expression } => {
+                for e in expression {
+                    if let Ok(key) = order_expression_to_key(e) {
+                        post.order_by.push(key);
+                    }
+                }
+                current = inner;
+            }
+            _ => break,
+        }
+    }
+    (current, post)
+}
+
+/// Does the eventual leaf of this pattern (after stripping
+/// `Extend` / `OrderBy` / `Distinct` / `Reduced`) reach a `Group`?
+/// If so, intervening `Extend` nodes are aggregate-result aliases
+/// that we want to capture; otherwise they are user `BIND`s that the
+/// regular `process_graph_pattern` lowering must handle.
+fn project_inner_has_group(gp: &GraphPattern) -> bool {
+    let mut current = gp;
+    loop {
+        match current {
+            GraphPattern::Group { .. } => return true,
+            GraphPattern::OrderBy { inner, .. }
+            | GraphPattern::Distinct { inner }
+            | GraphPattern::Reduced { inner }
+            | GraphPattern::Extend { inner, .. } => current = inner,
+            _ => return false,
+        }
+    }
+}
+
+/// Walk the inner of a `Project` to collect ORDER BY keys, aggregate
+/// `Extend` aliases, and the underlying pattern. Aggregate aliases
+/// are only stripped when there is a `Group` underneath — otherwise
+/// the `Extend` is a user `BIND` and stays in the body.
+fn unwrap_project_inner<'a>(
+    inner: &'a GraphPattern,
+    post: &mut PostProcessing,
+    aggregate_alias: &mut std::collections::HashMap<String, String>,
+) -> Result<&'a GraphPattern, String> {
+    let has_group = project_inner_has_group(inner);
+    let mut current = inner;
+    loop {
+        match current {
+            GraphPattern::OrderBy { inner, expression } => {
+                for e in expression {
+                    post.order_by.push(order_expression_to_key(e)?);
+                }
+                current = inner;
+            }
+            GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => {
+                current = inner;
+            }
+            // `Extend { variable: ?out, expression: Variable(?intermediate) }`
+            // is the alias spargebra inserts to bind a `Group`'s
+            // anonymous result to the outer projection name. Only
+            // strip it when there really is a `Group` underneath —
+            // otherwise it's a user `BIND` that the regular pattern
+            // lowering needs to see.
+            GraphPattern::Extend {
+                inner,
+                variable,
+                expression: Expression::Variable(source),
+            } if has_group => {
+                aggregate_alias
+                    .insert(source.as_str().to_string(), variable.as_str().to_string());
+                current = inner;
+            }
+            _ => break,
+        }
+    }
+    Ok(current)
+}
+
+pub(crate) fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
+    let (inner, mut post) = strip_post_processing(gp);
 
     match inner {
         GraphPattern::Project { inner, variables } => {
             let vars: Vec<String> = variables.iter().map(|v| v.as_str().to_string()).collect();
-            let pattern = process_graph_pattern(inner)?;
-            Ok(QueryInfo { variables: vars, pattern })
+
+            let mut aggregate_alias: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+
+            let body = unwrap_project_inner(inner, &mut post, &mut aggregate_alias)?;
+
+            let (pattern, aggregates) = match body {
+                GraphPattern::Group {
+                    inner,
+                    variables: group_vars,
+                    aggregates: aggs,
+                } => {
+                    if !group_vars.is_empty() {
+                        return Err(
+                            "GROUP BY with explicit grouping variables is not yet implemented \
+                             (deferred — needs partition semantics)"
+                                .into(),
+                        );
+                    }
+                    let pattern = process_graph_pattern(inner)?;
+                    let mut translated: Vec<Aggregate> = Vec::with_capacity(aggs.len());
+                    for (intermediate, agg_expr) in aggs {
+                        let intermediate_name = intermediate.as_str().to_string();
+                        let output = aggregate_alias
+                            .get(&intermediate_name)
+                            .cloned()
+                            .unwrap_or(intermediate_name);
+                        let (kind, source) = aggregate_expression_to_kind(agg_expr)?;
+                        translated.push(Aggregate { kind, source, output });
+                    }
+                    (pattern, translated)
+                }
+                other => (process_graph_pattern(other)?, Vec::new()),
+            };
+
+            // Per the disclose-and-verify pattern (SPARQL_ROADMAP.md
+            // §8.6 Q6 decision 2026-05-03), the circuit discloses the
+            // *source* multisets — the aggregate output variables are
+            // computed externally by the verifier and never appear as
+            // circuit bindings. Replace each aggregate output in the
+            // projected variable list with its source variable, then
+            // dedupe while preserving the first-seen order.
+            let circuit_vars = if aggregates.is_empty() {
+                vars
+            } else {
+                let agg_outputs: std::collections::HashSet<String> =
+                    aggregates.iter().map(|a| a.output.clone()).collect();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut result: Vec<String> = Vec::new();
+                for v in &vars {
+                    if agg_outputs.contains(v) {
+                        // Replace with this aggregate's source (if any).
+                        // `COUNT(*)` has no source — it just discloses
+                        // the underlying solution multiset.
+                        if let Some(agg) = aggregates.iter().find(|a| &a.output == v) {
+                            if let Some(src) = &agg.source {
+                                if seen.insert(src.clone()) {
+                                    result.push(src.clone());
+                                }
+                            }
+                        }
+                    } else if seen.insert(v.clone()) {
+                        result.push(v.clone());
+                    }
+                }
+                // If the projected variables collapse to nothing
+                // (e.g. `SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }`),
+                // fall back to disclosing every bound variable. Empty
+                // `Variables` would make `main.nr` trivially satisfiable.
+                if result.is_empty() {
+                    let mut all: Vec<String> = pattern
+                        .bindings
+                        .iter()
+                        .map(|b| b.variable.clone())
+                        .filter(|v| !v.starts_with("__"))
+                        .collect();
+                    all.sort();
+                    all.dedup();
+                    all
+                } else {
+                    result
+                }
+            };
+
+            Ok(QueryInfo {
+                variables: circuit_vars,
+                pattern,
+                aggregates,
+                order_by: post.order_by,
+                limit: post.limit,
+                offset: post.offset,
+            })
         }
         // ASK queries do not have PROJECT — project all bound variables.
         _ => {
@@ -522,7 +808,14 @@ pub(crate) fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
                 pattern.bindings.iter().map(|b| b.variable.clone()).collect();
             vars.sort();
             vars.dedup();
-            Ok(QueryInfo { variables: vars, pattern })
+            Ok(QueryInfo {
+                variables: vars,
+                pattern,
+                aggregates: Vec::new(),
+                order_by: post.order_by,
+                limit: post.limit,
+                offset: post.offset,
+            })
         }
     }
 }

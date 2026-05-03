@@ -6,7 +6,32 @@
 
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern};
 
-use crate::{ContextualizedTriple, GraphContext, OptionalBlock, QueryInfo};
+use crate::{
+    Aggregate, ContextualizedTriple, GraphContext, OptionalBlock, OrderDirection, OrderKey,
+    QueryInfo,
+};
+
+fn aggregate_to_json(agg: &Aggregate) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("kind".into(), serde_json::Value::String(agg.kind.metadata_tag().into()));
+    obj.insert("output".into(), serde_json::Value::String(agg.output.clone()));
+    if let Some(src) = &agg.source {
+        obj.insert("source".into(), serde_json::Value::String(src.clone()));
+    } else {
+        obj.insert("source".into(), serde_json::Value::Null);
+    }
+    serde_json::Value::Object(obj)
+}
+
+fn order_key_to_json(key: &OrderKey) -> serde_json::Value {
+    serde_json::json!({
+        "variable": key.variable,
+        "direction": match key.direction {
+            OrderDirection::Asc => "asc",
+            OrderDirection::Desc => "desc",
+        },
+    })
+}
 
 pub(crate) fn ground_term_to_json(gt: &GroundTerm) -> serde_json::Value {
     match gt {
@@ -130,6 +155,11 @@ pub(crate) fn build_base_metadata(
         })
         .unwrap_or_default();
 
+    let aggregates_json: Vec<serde_json::Value> =
+        info.aggregates.iter().map(aggregate_to_json).collect();
+    let order_by_json: Vec<serde_json::Value> =
+        info.order_by.iter().map(order_key_to_json).collect();
+
     serde_json::json!({
         "variables": info.variables,
         "skip_signing": skip_signing,
@@ -143,6 +173,11 @@ pub(crate) fn build_base_metadata(
         "hidden_inputs": base_hidden,
         "num_optionals": all_optionals.len(),
         "total_patterns": total_patterns,
+        "aggregates": aggregates_json,
+        "orderBy": order_by_json,
+        "order_by": order_by_json,
+        "limit": info.limit,
+        "offset": info.offset,
     })
 }
 
@@ -195,11 +230,21 @@ pub(crate) fn build_variant_metadata(
         );
     }
 
+    let aggregates_json: Vec<serde_json::Value> =
+        info.aggregates.iter().map(aggregate_to_json).collect();
+    let order_by_json: Vec<serde_json::Value> =
+        info.order_by.iter().map(order_key_to_json).collect();
+
     serde_json::json!({
         "variables": combo_variables,
         "skip_signing": skip_signing,
         "inputPatterns": combo_patterns,
         "matchedOptionals": matched_indices,
         "hiddenInputs": circuit_hidden,
+        "aggregates": aggregates_json,
+        "orderBy": order_by_json,
+        "order_by": order_by_json,
+        "limit": info.limit,
+        "offset": info.offset,
     })
 }

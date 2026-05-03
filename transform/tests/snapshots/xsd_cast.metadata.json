@@ -1,4 +1,5 @@
 {
+  "aggregates": [],
   "hiddenInputs": [
     {
       "computedType": "expr_value",
@@ -89,9 +90,13 @@
       }
     }
   ],
+  "limit": null,
   "num_optionals": 0,
+  "offset": null,
   "optionalPatterns": [],
   "optional_patterns": [],
+  "orderBy": [],
+  "order_by": [],
   "skip_signing": false,
   "total_patterns": 1,
   "unionBranches": [],

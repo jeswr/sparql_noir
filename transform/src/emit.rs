@@ -95,9 +95,16 @@ pub(crate) fn generate_circuit_for_optional_combination(
         .cloned()
         .collect();
 
+    // Variant circuits inherit the base query's aggregate / ordering
+    // metadata — these are post-processing concerns that don't change
+    // per OPTIONAL combination.
     let combo_info = QueryInfo {
         variables: filtered_variables,
         pattern: combined,
+        aggregates: base_info.aggregates.clone(),
+        order_by: base_info.order_by.clone(),
+        limit: base_info.limit,
+        offset: base_info.offset,
     };
 
     generate_sparql_nr_from_query_info(&combo_info, options)
