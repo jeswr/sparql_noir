@@ -17,18 +17,15 @@ mod metadata;
 
 pub use crate::expr::{ieee754_equal, ieee754_less_than, FloatSpecial};
 
-use crate::expr::{filter_to_noir, serialize_term};
+use crate::emit::{
+    build_nargo_toml, collect_all_optional_blocks, fill_main_nr_template,
+    generate_circuit_for_optional_combination,
+};
 use crate::lower::{process_query, reset_optional_counter};
 use crate::metadata::contextualized_pattern_to_json;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
-
-use std::collections::BTreeMap;
-
-// Embed the template at compile time for WASM compatibility
-const MAIN_TEMPLATE: &str = include_str!("../template/main-verify.template.nr");
-const MAIN_TEMPLATE_SIMPLE: &str = include_str!("../template/main-simple.template.nr");
 
 pub use crate::ir::{
     Assertion, Binding, ContextualizedTriple, GraphContext, OptionalBlock, PatternInfo,
@@ -80,251 +77,6 @@ pub struct TransformOptions {
     pub skip_signing: bool,
 }
 
-/// Recursively collect all optional blocks from a pattern, flattening nested optionals.
-fn collect_all_optional_blocks(optionals: &[OptionalBlock]) -> Vec<OptionalBlock> {
-    let mut result = Vec::new();
-    for opt in optionals {
-        // Add this optional
-        result.push(OptionalBlock {
-            id: opt.id,
-            patterns: opt.patterns.clone(),
-            bindings: opt.bindings.clone(),
-            assertions: opt.assertions.clone(),
-            filters: opt.filters.clone(),
-            nested_optionals: Vec::new(), // Flatten - don't recurse into children here
-        });
-        // Recursively collect nested optionals
-        result.extend(collect_all_optional_blocks(&opt.nested_optionals));
-    }
-    result
-}
-
-/// Generate the sparql.nr content for a specific optional combination.
-/// 
-/// This creates a synthetic QueryInfo with the base patterns plus the matched optional patterns,
-/// then uses the same code path as the main transform to generate the circuit.
-fn generate_circuit_for_optional_combination(
-    base_info: &QueryInfo,
-    all_optionals: &[OptionalBlock],
-    matched_indices: &[usize],
-    options: &TransformOptions,
-) -> Result<(String, Vec<serde_json::Value>, bool, bool), String> {
-    // Build a combined PatternInfo with base + matched optional patterns
-    let mut combined = PatternInfo {
-        patterns: base_info.pattern.patterns.clone(),
-        bindings: base_info.pattern.bindings.clone(),
-        assertions: base_info.pattern.assertions.clone(),
-        filters: base_info.pattern.filters.clone(),
-        union_branches: base_info.pattern.union_branches.clone(),
-        optional_blocks: Vec::new(), // Flatten - no nested optionals in the combined version
-    };
-    
-    // Collect variables that only appear in unmatched optionals
-    let mut optional_only_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (idx, opt) in all_optionals.iter().enumerate() {
-        if !matched_indices.contains(&idx) {
-            // This optional is not matched - collect its variables
-            for b in &opt.bindings {
-                optional_only_vars.insert(b.variable.clone());
-            }
-        }
-    }
-    
-    // Remove variables that appear in base patterns
-    for b in &base_info.pattern.bindings {
-        optional_only_vars.remove(&b.variable);
-    }
-    // Remove variables that appear in matched optionals
-    for &idx in matched_indices {
-        if idx < all_optionals.len() {
-            let opt = &all_optionals[idx];
-            for b in &opt.bindings {
-                optional_only_vars.remove(&b.variable);
-            }
-        }
-    }
-    
-    for &idx in matched_indices {
-        if idx < all_optionals.len() {
-            let opt = &all_optionals[idx];
-            combined.patterns.extend(opt.patterns.clone());
-            combined.bindings.extend(opt.bindings.clone());
-            combined.assertions.extend(opt.assertions.clone());
-            combined.filters.extend(opt.filters.clone());
-        }
-    }
-    
-    // Filter out variables that only appear in unmatched optionals
-    let filtered_variables: Vec<String> = base_info.variables.iter()
-        .filter(|v| !optional_only_vars.contains(*v))
-        .cloned()
-        .collect();
-    
-    // Create a synthetic QueryInfo for this combination
-    let combo_info = QueryInfo {
-        variables: filtered_variables,
-        pattern: combined,
-    };
-    
-    // Use the same circuit generation logic as the main transform
-    generate_sparql_nr_from_query_info(&combo_info, options)
-}
-
-/// Generate sparql.nr content from a QueryInfo.
-/// This is the core circuit generation logic, extracted to be reusable.
-/// Returns (sparql_nr content, hidden inputs, has_hidden, needs_xpath)
-fn generate_sparql_nr_from_query_info(
-    info: &QueryInfo,
-    options: &TransformOptions,
-) -> Result<(String, Vec<serde_json::Value>, bool, bool), String> {
-    // Build bindings map for non-projected variables
-    let mut binding_map: BTreeMap<String, Term> = BTreeMap::new();
-    for b in &info.pattern.bindings {
-        if !info.variables.contains(&b.variable) && !binding_map.contains_key(&b.variable) {
-            binding_map.insert(b.variable.clone(), b.term.clone());
-        }
-    }
-
-    // Generate assertions
-    let mut assertions: Vec<String> = Vec::new();
-    let mut union_assertions: Vec<Vec<String>> = Vec::new();
-    let mut hidden: Vec<serde_json::Value> = Vec::new();
-
-    if let Some(branches) = &info.pattern.union_branches {
-        for branch in branches {
-            let mut branch_bindings = binding_map.clone();
-            for b in &branch.bindings {
-                if !info.variables.contains(&b.variable) && !branch_bindings.contains_key(&b.variable) {
-                    branch_bindings.insert(b.variable.clone(), b.term.clone());
-                }
-            }
-
-            let mut branch_asserts: Vec<String> = Vec::new();
-
-            for b in &branch.bindings {
-                let left = Term::Variable(b.variable.clone());
-                branch_asserts.push(format!(
-                    "{} == {}",
-                    serialize_term(&left, info, &branch_bindings),
-                    serialize_term(&b.term, info, &branch_bindings)
-                ));
-            }
-
-            for Assertion(l, r) in &branch.assertions {
-                branch_asserts.push(format!(
-                    "{} == {}",
-                    serialize_term(l, info, &branch_bindings),
-                    serialize_term(r, info, &branch_bindings)
-                ));
-            }
-
-            for f in &branch.filters {
-                let expr = filter_to_noir(f, info, &branch_bindings, &mut hidden)?;
-                branch_asserts.push(expr);
-            }
-
-            union_assertions.push(branch_asserts);
-        }
-    } else {
-        for b in &info.pattern.bindings {
-            let left = Term::Variable(b.variable.clone());
-            assertions.push(format!(
-                "{} == {}",
-                serialize_term(&left, info, &binding_map),
-                serialize_term(&b.term, info, &binding_map)
-            ));
-        }
-
-        for Assertion(l, r) in &info.pattern.assertions {
-            assertions.push(format!(
-                "{} == {}",
-                serialize_term(l, info, &binding_map),
-                serialize_term(r, info, &binding_map)
-            ));
-        }
-
-        for f in &info.pattern.filters {
-            let expr = filter_to_noir(f, info, &binding_map, &mut hidden)?;
-            assertions.push(expr);
-        }
-    }
-
-    // Generate sparql.nr
-    let mut sparql_nr = String::new();
-    sparql_nr.push_str("// Generated by sparql_noir transform\n");
-    sparql_nr.push_str("use dep::consts;\n");
-    if options.skip_signing {
-        sparql_nr.push_str("use super::Triple;\n");
-    } else {
-        sparql_nr.push_str("use dep::utils;\n");
-        sparql_nr.push_str("use dep::types::Triple;\n");
-    }
-    
-    // Check if EBV is used by looking for ebv_value/ebv_datatype in hidden inputs
-    let needs_ebv = hidden.iter().any(|h| {
-        h.get("computedType").and_then(|v| v.as_str())
-            .map(|t| t == "ebv_value" || t == "ebv_datatype")
-            .unwrap_or(false)
-    });
-    if needs_ebv {
-        sparql_nr.push_str("use dep::ebv;\n");
-    }
-    
-    // Check if xpath functions are used in any assertions
-    let needs_xpath = assertions.iter().any(|a| a.contains("xpath::")) ||
-        union_assertions.iter().any(|branch| branch.iter().any(|a| a.contains("xpath::")));
-    if needs_xpath {
-        sparql_nr.push_str("use dep::xpath;\n");
-    }
-    
-    sparql_nr.push_str("\n");
-    sparql_nr.push_str(&format!(
-        "pub(crate) type BGP = [Triple; {}];\n",
-        info.pattern.patterns.len()
-    ));
-
-    sparql_nr.push_str("pub(crate) struct Variables {\n");
-    for v in &info.variables {
-        sparql_nr.push_str(&format!("  pub(crate) {}: Field,\n", v));
-    }
-    sparql_nr.push_str("}\n\n");
-
-    let has_hidden = !hidden.is_empty();
-    if has_hidden {
-        sparql_nr.push_str(&format!(
-            "pub(crate) type Hidden = [Field; {}];\n",
-            hidden.len()
-        ));
-    }
-
-    sparql_nr.push_str(&format!(
-        "pub(crate) fn checkBinding(bgp: BGP, variables: Variables{}) {{\n",
-        if has_hidden { ", hidden: Hidden" } else { "" }
-    ));
-
-    if !union_assertions.is_empty() {
-        for (idx, branch) in union_assertions.iter().enumerate() {
-            let expr = if branch.is_empty() {
-                "false".to_string()
-            } else {
-                branch.iter().map(|s| format!("({})", s)).collect::<Vec<_>>().join(" & ")
-            };
-            sparql_nr.push_str(&format!("  let branch_{} = {};\n", idx, expr));
-        }
-        let ors = (0..union_assertions.len())
-            .map(|i| format!("branch_{}", i))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        sparql_nr.push_str(&format!("  assert({});\n", ors));
-    } else {
-        for a in &assertions {
-            sparql_nr.push_str(&format!("  assert({});\n", a));
-        }
-    }
-    sparql_nr.push_str("}\n");
-
-    Ok((sparql_nr, hidden, has_hidden, needs_xpath))
-}
 
 /// Transform a SPARQL query into Noir circuit files.
 /// 
@@ -351,73 +103,24 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     let all_optionals = collect_all_optional_blocks(&info.pattern.optional_blocks);
     let num_optionals = all_optionals.len();
     
-    // Generate the base circuit (no optionals or all optionals matched based on strategy)
-    // We'll generate the "all optionals matched" case as the primary circuit
+    // Generate the base circuit (the "all optionals matched" variant).
     let (base_sparql_nr, base_hidden, has_hidden, needs_xpath) = generate_circuit_for_optional_combination(
         &info,
         &all_optionals,
-        &(0..num_optionals).collect::<Vec<_>>(), // All optionals matched
+        &(0..num_optionals).collect::<Vec<_>>(),
         &options,
     )?;
 
-    // Generate main.nr from embedded template
-    let template = if options.skip_signing { MAIN_TEMPLATE_SIMPLE } else { MAIN_TEMPLATE };
-    let mut main_nr = template.to_string();
-    if has_hidden {
-        main_nr = main_nr
-            .replace("{{h0}}", ", Hidden")
-            .replace("{{h1}}", ",\n    hidden: Hidden")
-            .replace("{{h2}}", ", hidden");
-    } else {
-        main_nr = main_nr
-            .replace("{{h0}}", "")
-            .replace("{{h1}}", "")
-            .replace("{{h2}}", "");
-    }
+    let main_nr = fill_main_nr_template(options.skip_signing, has_hidden);
 
-    // Nargo.toml - different dependencies when skip_signing is enabled
-    // Check if EBV is used by looking for ebv_value/ebv_datatype in hidden inputs
+    // EBV pulls in `dep::ebv`; that detection lives at the same layer as
+    // the `Nargo.toml` shape, so they share a derivation step.
     let needs_ebv = base_hidden.iter().any(|h| {
         h.get("computedType").and_then(|v| v.as_str())
             .map(|t| t == "ebv_value" || t == "ebv_datatype")
             .unwrap_or(false)
     });
-    
-    let nargo_toml = if options.skip_signing {
-        let mut toml = r#"[package]
-name = "sparql_proof"
-type = "bin"
-authors = [""]
-
-[dependencies]
-consts = { path = "../noir/lib/consts" }
-"#.to_string();
-        if needs_ebv {
-            toml.push_str("ebv = { path = \"../noir/lib/ebv\" }\n");
-        }
-        if needs_xpath {
-            toml.push_str("xpath = { path = \"../noir/lib/xpath\" }\n");
-        }
-        toml
-    } else {
-        let mut toml = r#"[package]
-name = "sparql_proof"
-type = "bin"
-authors = [""]
-
-[dependencies]
-consts = { path = "../noir/lib/consts" }
-types = { path = "../noir/lib/types" }
-utils = { path = "../noir/lib/utils" }
-"#.to_string();
-        if needs_ebv {
-            toml.push_str("ebv = { path = \"../noir/lib/ebv\" }\n");
-        }
-        if needs_xpath {
-            toml.push_str("xpath = { path = \"../noir/lib/xpath\" }\n");
-        }
-        toml
-    };
+    let nargo_toml = build_nargo_toml(options.skip_signing, needs_ebv, needs_xpath);
 
     // Calculate total patterns including all optionals
     let total_patterns: usize = info.pattern.patterns.len() 
