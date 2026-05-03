@@ -283,6 +283,8 @@ fn join_pattern_infos(
             merged.optional_blocks.extend(right.optional_blocks);
             merged.not_exists.extend(left.not_exists);
             merged.not_exists.extend(right.not_exists);
+            merged.easy_optionals.extend(left.easy_optionals);
+            merged.easy_optionals.extend(right.easy_optionals);
             Ok(merged)
         }
         (true, false) => {

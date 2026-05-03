@@ -877,20 +877,66 @@ fn optional_easy_case_inside_enclosing_graph_keeps_placeholders_wildcard() {
 /// `GRAPH ?g { ... }` wrapper. The transform must NOT reject this
 /// case (roborev finding 2026-05-03, fourth medium: an earlier
 /// over-aggressive rejection blocked it). The easy-case collapse
-/// either fires (preferred) or falls through to the existing
-/// power-set path; the important thing is the query doesn't error
-/// out, since `?g` is bound by the sibling triple and the round-3
-/// main-event NOT-EXISTS / round-3-follow-up easy-OPTIONAL
-/// machinery can both resolve it.
+/// fires; the matched-arm graph reference resolves to `variables.g`
+/// (bound by the sibling triple at the post-Join scope).
+///
+/// Roborev finding 2026-05-03 (sixth pass, medium): the regression
+/// must inspect the lowered output, not just check `Ok(_)`, so a
+/// silent fall-through wouldn't pass.
 #[test]
-fn optional_easy_case_graph_var_bound_by_sibling_does_not_reject() {
+fn optional_easy_case_graph_var_bound_by_sibling() {
     let q = "PREFIX ex: <http://example.org/>\n\
              SELECT ?x ?g WHERE { \
                ?x ex:g ?g . \
                GRAPH ?g { OPTIONAL { ex:a ex:p ex:b . } } \
              }";
-    transform_query(q).expect(
+    let result = transform_query(q).expect(
         "transform should succeed: ?g is bound by the sibling triple outside the GRAPH wrapper",
+    );
+
+    // The easy-case collapse MUST fire (single-triple ground inner,
+    // no inner-only variables, sibling triple binds the GRAPH
+    // variable at the surrounding Join level).
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(
+        easy.len(),
+        1,
+        "expected one collapsed easy OPTIONAL, got {:?}",
+        easy
+    );
+    // No power-set fall-through.
+    assert!(
+        result.optional_circuits.is_empty(),
+        "easy-case collapse must not also produce power-set variants"
+    );
+
+    // The matched-arm graph position must reference `variables.g`,
+    // not a stale empty-IRI default-graph constant. The presence of
+    // `variables.g` in the disjunction line is the binding the
+    // sibling-triple Join contributes; the absence of
+    // `consts::encode_string("")` against a `bgp[*].terms[3]` slot
+    // says we did NOT silently revert to default-graph soundness.
+    let or_line = result
+        .sparql_nr
+        .lines()
+        .find(|l| l.contains("verify_non_membership_no_inclusion_check"))
+        .expect("expected an `assert(matched | unmatched)` line");
+    assert!(
+        or_line.contains("variables.g"),
+        "matched-arm disjunction must reference variables.g (the sibling-bound \
+         GRAPH variable), got line:\n{}",
+        or_line
+    );
+    // `?g` ends up in the projected variables via the sibling
+    // triple's binding.
+    assert!(
+        result.sparql_nr.contains("pub(crate) g: Field"),
+        "?g must be projected (bound by sibling triple), got:\n{}",
+        result.sparql_nr
     );
 }
 
