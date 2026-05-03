@@ -10,6 +10,10 @@ on:
 
 jobs:
   benchmark:
+    # Skip the heavy Noir-installing benchmark on draft PRs (per
+    # workspace convention: draft PR minimal CI). Push-to-main and
+    # ready-for-review PRs still run the full benchmark.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
