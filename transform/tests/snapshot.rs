@@ -182,6 +182,24 @@ const CORPUS: &[Case] = &[
         name: "limit_offset",
         query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:knows ?o . } LIMIT 10 OFFSET 5",
     },
+    // EXISTS — round 3 spike (see spec/exists.md). The inner pattern
+    // `?o ex:age ?age` flattens into the outer BGP via the
+    // witness-supplied compatibility reformulation: the second triple
+    // is an ordinary `Triple` with full inclusion + signature checking;
+    // ?age is an inner-only variable and is not projected.
+    Case {
+        name: "exists_basic",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ex:age ?age . }) }",
+    },
+    // EXISTS with a fully ground inner pattern — every inner-position
+    // is fixed by the outer mapping. Smallest possible inner BGP cost
+    // (single-triple inclusion proof + 3 unification assertions).
+    Case {
+        name: "exists_grounded",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?s ex:type ex:Person . }) }",
+    },
 ];
 
 fn snapshots_dir() -> PathBuf {
@@ -209,6 +227,58 @@ fn check_or_update(path: &PathBuf, actual: &str, update: bool, label: &str, name
             actual_path.display()
         );
     }
+}
+
+/// `NOT EXISTS` is rejected at lowering — see `spec/exists.md` §3 / §6
+/// for the deferred sorted-Merkle-commitment design.
+#[test]
+fn not_exists_is_rejected_with_pointer_to_design_doc() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(NOT EXISTS { ?o ex:age ?age . }) }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected NOT EXISTS to be rejected, but transform succeeded"),
+        Err(err) => assert!(
+            err.contains("NOT EXISTS") && err.contains("spec/exists.md"),
+            "expected error to mention NOT EXISTS and spec/exists.md, got: {}",
+            err
+        ),
+    }
+}
+
+/// EXISTS nested under boolean operators is rejected for now (see
+/// `spec/exists.md` §7 open question 3).
+#[test]
+fn exists_inside_boolean_combinator_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ex:a ?a } && EXISTS { ?o ex:b ?b }) }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected nested EXISTS to be rejected, but transform succeeded"),
+        Err(err) => assert!(
+            err.contains("EXISTS") && err.contains("spec/exists.md"),
+            "expected error to mention EXISTS and spec/exists.md, got: {}",
+            err
+        ),
+    }
+}
+
+/// EXISTS with a fully-ground inner pattern lowers cleanly: the inner
+/// triple becomes an additional outer BGP entry with constant-position
+/// assertions and a unification of the shared variable.
+#[test]
+fn exists_grounded_lowers_to_two_triple_bgp() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?s ex:type ex:Person . }) }";
+    let result = transform_query(q).expect("transform should succeed");
+    // Two triples: the outer `?s ex:knows ?o` and the flattened inner
+    // `?s ex:type ex:Person`.
+    assert!(result.sparql_nr.contains("type BGP = [Triple; 2]"));
+    // The inner subject unifies with the outer-bound variable `?s`.
+    assert!(result.sparql_nr.contains("variables.s == bgp[1].terms[0]"));
+    // Inner predicate / object land as constant assertions.
+    assert!(result.sparql_nr.contains("http://example.org/type"));
+    assert!(result.sparql_nr.contains("http://example.org/Person"));
+    // The EXISTS expression itself collapsed to `true`.
+    assert!(result.sparql_nr.contains("assert(true);"));
 }
 
 #[test]

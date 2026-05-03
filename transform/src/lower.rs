@@ -13,7 +13,7 @@ use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
     PropertyPathExpression,
 };
-use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
+use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 
 use crate::{
     Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, GraphContext,
@@ -244,6 +244,211 @@ fn expand_path(
     }
 }
 
+/// Lower `Expression::Exists(P)` occurrences within a filter expression
+/// by flattening `P` into the outer `info` and rewriting the EXISTS node
+/// to a `true` literal. See `spec/exists.md` for the design rationale.
+///
+/// For the round 3 spike this only accepts EXISTS as the **root** filter
+/// expression (no nesting under `And`/`Or`/`Not`). NOT EXISTS is rejected
+/// outright. This is a deliberately narrow scope — the boolean-context
+/// integration of EXISTS within larger expressions, and the
+/// sorted-commitment NOT-EXISTS primitive, are the round-3-main-event
+/// scope.
+fn lower_exists_in_expression(
+    expr: &Expression,
+    info: &mut PatternInfo,
+) -> Result<Expression, String> {
+    match expr {
+        Expression::Exists(inner) => {
+            flatten_exists_into(inner, info)?;
+            Ok(true_literal())
+        }
+        // `NOT EXISTS` parses as `Not(Exists(_))` (spargebra parser.rs
+        // ~L2335). Reject explicitly with a pointer to the design doc.
+        Expression::Not(boxed) => {
+            if matches!(boxed.as_ref(), Expression::Exists(_)) {
+                Err(
+                    "NOT EXISTS is not yet implemented (round 3 spike shipped EXISTS only). \
+                     A sound NOT-EXISTS primitive requires upgrading the dataset commitment to a \
+                     sorted Merkle tree so the prover can supply non-membership proofs via \
+                     adjacent leaves; see spec/exists.md §3 / §6 for the deferred design."
+                        .into(),
+                )
+            } else {
+                // Recurse into nested EXISTS in non-NOT-EXISTS positions
+                // — also rejected for now; the spike's narrow scope is
+                // documented in spec/exists.md §7 (open question 3).
+                if expression_contains_exists(boxed) {
+                    Err(
+                        "EXISTS nested inside `!`/`&&`/`||` is not yet implemented (round 3 spike \
+                         supports `FILTER(EXISTS { … })` at the filter root only). \
+                         See spec/exists.md §7 open question 3."
+                            .into(),
+                    )
+                } else {
+                    Ok(expr.clone())
+                }
+            }
+        }
+        Expression::And(_, _)
+        | Expression::Or(_, _)
+        | Expression::If(_, _, _)
+        | Expression::Coalesce(_)
+        | Expression::FunctionCall(_, _)
+        | Expression::In(_, _) => {
+            if expression_contains_exists(expr) {
+                Err(
+                    "EXISTS nested inside `&&`/`||`/IF/COALESCE/IN/FunctionCall is not yet \
+                     implemented (round 3 spike supports `FILTER(EXISTS { … })` at the filter \
+                     root only). See spec/exists.md §7 open question 3."
+                        .into(),
+                )
+            } else {
+                Ok(expr.clone())
+            }
+        }
+        // Leaf and shape-preserving expressions that cannot transitively
+        // contain EXISTS — pass through untouched.
+        _ => Ok(expr.clone()),
+    }
+}
+
+/// True if the expression tree contains an `Expression::Exists` anywhere.
+fn expression_contains_exists(expr: &Expression) -> bool {
+    match expr {
+        Expression::Exists(_) => true,
+        Expression::Not(a) | Expression::UnaryPlus(a) | Expression::UnaryMinus(a) => {
+            expression_contains_exists(a)
+        }
+        Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            expression_contains_exists(a) || expression_contains_exists(b)
+        }
+        Expression::If(a, b, c) => {
+            expression_contains_exists(a)
+                || expression_contains_exists(b)
+                || expression_contains_exists(c)
+        }
+        Expression::Coalesce(args) | Expression::FunctionCall(_, args) => {
+            args.iter().any(expression_contains_exists)
+        }
+        Expression::In(a, args) => {
+            expression_contains_exists(a) || args.iter().any(expression_contains_exists)
+        }
+        _ => false,
+    }
+}
+
+fn true_literal() -> Expression {
+    let xsd_boolean =
+        NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean");
+    Expression::Literal(Literal::new_typed_literal("true", xsd_boolean))
+}
+
+/// Flatten an inner `GraphPattern` (the `P` in `EXISTS { P }`) into the
+/// outer `info`, treating it as a Join. This is the §2 reformulation
+/// from `spec/exists.md`: append the inner triples + assertions, unify
+/// shared variables with existing outer bindings, hide inner-only vars.
+fn flatten_exists_into(
+    inner: &GraphPattern,
+    info: &mut PatternInfo,
+) -> Result<(), String> {
+    let inner_info = process_graph_pattern(inner)?;
+
+    // Forbid features in the inner pattern that the spike doesn't yet
+    // support. Each of these has a clean follow-up but is out of scope.
+    if inner_info.union_branches.is_some() {
+        return Err(
+            "UNION inside EXISTS is not yet implemented (round 3 spike). \
+             See spec/exists.md §7."
+                .into(),
+        );
+    }
+    if !inner_info.optional_blocks.is_empty() {
+        return Err(
+            "OPTIONAL inside EXISTS is not yet implemented (round 3 spike). \
+             See spec/exists.md §7."
+                .into(),
+        );
+    }
+
+    let offset = info.patterns.len();
+
+    // Pre-compute the set of variables already bound in the outer info
+    // so we can decide whether each inner binding unifies (shared
+    // variable → assertion) or stays bound (inner-only variable →
+    // hidden binding via the same `bindings` slot it would normally
+    // occupy, just not projected).
+    let outer_bound: std::collections::BTreeSet<String> = info
+        .bindings
+        .iter()
+        .map(|b| b.variable.clone())
+        .collect();
+
+    info.patterns.extend(inner_info.patterns);
+
+    for binding in inner_info.bindings {
+        let adjusted_term = match binding.term {
+            Term::Input(i, j) => Term::Input(i + offset, j),
+            other => other,
+        };
+        if outer_bound.contains(&binding.variable) {
+            // Shared variable — emit a unification assertion against
+            // the existing outer binding.
+            info.assertions.push(Assertion(
+                Term::Variable(binding.variable),
+                adjusted_term,
+            ));
+        } else {
+            // Inner-only variable — keep it as a binding so subsequent
+            // inner triples that reference it stay tied. It is *not*
+            // projected because `process_query` only exposes variables
+            // listed in the SELECT projection.
+            info.bindings.push(Binding {
+                variable: binding.variable,
+                term: adjusted_term,
+            });
+        }
+    }
+
+    for assertion in inner_info.assertions {
+        let adj_left = match assertion.0 {
+            Term::Input(i, j) => Term::Input(i + offset, j),
+            other => other,
+        };
+        let adj_right = match assertion.1 {
+            Term::Input(i, j) => Term::Input(i + offset, j),
+            other => other,
+        };
+        info.assertions.push(Assertion(adj_left, adj_right));
+    }
+
+    // Inner filters keep their semantics, but they may not themselves
+    // contain EXISTS in the spike (forbidden via expression_contains_exists).
+    for inner_filter in inner_info.filters {
+        if expression_contains_exists(&inner_filter) {
+            return Err(
+                "Nested EXISTS inside an EXISTS-block's FILTER is not yet implemented \
+                 (round 3 spike). See spec/exists.md §7."
+                    .into(),
+            );
+        }
+        info.filters.push(inner_filter);
+    }
+
+    Ok(())
+}
+
 /// Helper to adjust input indices in an optional block by an offset
 fn adjust_optional_block_indices(block: &mut OptionalBlock, offset: usize) {
     for binding in &mut block.bindings {
@@ -328,7 +533,22 @@ pub(crate) fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, St
 
         GraphPattern::Filter { expr, inner } => {
             let mut info = process_graph_pattern(inner)?;
-            info.filters.push(expr.clone());
+            // EXISTS / NOT EXISTS — round 3 spike (see spec/exists.md).
+            //
+            // `FILTER(EXISTS { P })` flattens the inner pattern P into the
+            // outer BGP via the witness-supplied compatibility reformulation:
+            // each inner triple becomes an additional `Triple` in the outer
+            // `bgp`, with full Merkle inclusion + signature checking; the
+            // EXISTS expression itself collapses to `true`. Inner-only
+            // variables become hidden bindings that are not exposed in
+            // `Variables`.
+            //
+            // `FILTER(NOT EXISTS { P })` is rejected at lowering time:
+            // sound non-existence requires a sorted-Merkle-commitment
+            // primitive that is the round-3-main-event scope (spec/exists.md
+            // §3, §6).
+            let rewritten_expr = lower_exists_in_expression(expr, &mut info)?;
+            info.filters.push(rewritten_expr);
             Ok(info)
         }
 
