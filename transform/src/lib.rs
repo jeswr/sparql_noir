@@ -29,8 +29,8 @@ mod parse;
 
 pub use crate::expr::{ieee754_equal, ieee754_less_than, FloatSpecial};
 pub use crate::ir::{
-    Assertion, Binding, ContextualizedTriple, GraphContext, OptionalBlock, PatternInfo, QueryInfo,
-    Term,
+    Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, GraphContext, OptionalBlock,
+    OrderDirection, OrderKey, PatternInfo, QueryInfo, Term,
 };
 
 use crate::emit::{

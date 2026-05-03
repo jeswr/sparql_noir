@@ -1,4 +1,5 @@
 {
+  "aggregates": [],
   "hiddenInputs": [],
   "hidden_inputs": [],
   "inputPatterns": [
@@ -107,7 +108,9 @@
       }
     }
   ],
+  "limit": null,
   "num_optionals": 2,
+  "offset": null,
   "optionalPatterns": [
     {
       "id": 0,
@@ -200,6 +203,8 @@
       ]
     }
   ],
+  "orderBy": [],
+  "order_by": [],
   "skip_signing": false,
   "total_patterns": 3,
   "unionBranches": [],

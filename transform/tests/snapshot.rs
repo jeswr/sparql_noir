@@ -134,6 +134,54 @@ const CORPUS: &[Case] = &[
         name: "double_optional",
         query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?a ?b WHERE { ?s ex:p ?o . OPTIONAL { ?s ex:a ?a . } OPTIONAL { ?s ex:b ?b . } }",
     },
+    // Aggregates via the disclose-and-verify pattern (SPARQL_ROADMAP.md
+    // §8.6, Q6 decision 2026-05-03). The circuit body for each of these
+    // is identical to the underlying SELECT — the aggregate kind is
+    // metadata only.
+    Case {
+        name: "count",
+        query: "PREFIX ex: <http://example.org/>\nSELECT (COUNT(?s) AS ?n) WHERE { ?s ex:knows ?o . }",
+    },
+    Case {
+        name: "count_distinct",
+        query: "PREFIX ex: <http://example.org/>\nSELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s ex:knows ?o . }",
+    },
+    Case {
+        name: "count_star",
+        query: "PREFIX ex: <http://example.org/>\nSELECT (COUNT(*) AS ?n) WHERE { ?s ex:knows ?o . }",
+    },
+    Case {
+        name: "sum",
+        query: "PREFIX ex: <http://example.org/>\nSELECT (SUM(?o) AS ?total) WHERE { ?s ex:age ?o . }",
+    },
+    Case {
+        name: "min",
+        query: "PREFIX ex: <http://example.org/>\nSELECT (MIN(?o) AS ?lowest) WHERE { ?s ex:age ?o . }",
+    },
+    Case {
+        name: "max",
+        query: "PREFIX ex: <http://example.org/>\nSELECT (MAX(?o) AS ?highest) WHERE { ?s ex:age ?o . }",
+    },
+    Case {
+        name: "avg",
+        query: "PREFIX ex: <http://example.org/>\nSELECT (AVG(?o) AS ?mean) WHERE { ?s ex:age ?o . }",
+    },
+    Case {
+        name: "order_by",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows ?o . } ORDER BY ?s",
+    },
+    Case {
+        name: "order_by_desc",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows ?o . } ORDER BY DESC(?s)",
+    },
+    Case {
+        name: "limit",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:knows ?o . } LIMIT 10",
+    },
+    Case {
+        name: "limit_offset",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:knows ?o . } LIMIT 10 OFFSET 5",
+    },
 ];
 
 fn snapshots_dir() -> PathBuf {

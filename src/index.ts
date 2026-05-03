@@ -93,6 +93,18 @@ export { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
 export { generateProofs } from './scripts/prove.js';
 export { verifyProofs } from './scripts/verify.js';
 
+// Verifier-side post-processing for aggregates / ORDER BY / LIMIT
+// (disclose-and-verify pattern, SPARQL_ROADMAP.md §8.6 Q6 decision).
+export { applyPostProcessing } from './aggregates.js';
+export type {
+  AggregateKindTag,
+  AggregateMetadata,
+  OrderByMetadata,
+  PostProcessingMetadata,
+  DisclosedRow,
+  ResultRow,
+} from './aggregates.js';
+
 // Export types
 export type { SignedData, ProveResult, VerifyResult };
 

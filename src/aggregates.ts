@@ -1,0 +1,316 @@
+/**
+ * Verifier-side post-processing for SPARQL aggregates / ORDER BY / LIMIT
+ * under the disclose-and-verify pattern (SPARQL_ROADMAP.md §8.6, Q6
+ * decision 2026-05-03).
+ *
+ * The transform never emits in-circuit DISTINCT, sort, or count
+ * primitives. Instead, the circuit discloses the underlying multiset
+ * of source-variable bindings and tags `metadata.json` with the
+ * aggregate kind / order-by direction / limit / offset. This module
+ * applies those modifiers externally on the disclosed multiset.
+ *
+ * The principle is: information revealed in the disclosed output must
+ * not be ZK-proven inside the circuit. The verifier checks revealed
+ * properties directly. See the workspace memory note
+ * `feedback_zkp_no_proof_of_revealed_properties.md`.
+ */
+
+import type { Term } from '@rdfjs/types';
+
+/** Kinds the transform emits — see `AggregateKind::metadata_tag` in Rust. */
+export type AggregateKindTag =
+  | 'count'
+  | 'count_distinct'
+  | 'count_solutions'
+  | 'count_solutions_distinct'
+  | 'sum'
+  | 'sum_distinct'
+  | 'min'
+  | 'min_distinct'
+  | 'max'
+  | 'max_distinct'
+  | 'avg'
+  | 'avg_distinct';
+
+export interface AggregateMetadata {
+  kind: AggregateKindTag;
+  /** The disclosed multiset variable; `null` for `COUNT(*)`. */
+  source: string | null;
+  /** Variable name the aggregate result is bound to in the projection. */
+  output: string;
+}
+
+export interface OrderByMetadata {
+  variable: string;
+  direction: 'asc' | 'desc';
+}
+
+/** Subset of `metadata.json` consumed by `applyPostProcessing`. */
+export interface PostProcessingMetadata {
+  aggregates?: AggregateMetadata[];
+  order_by?: OrderByMetadata[];
+  orderBy?: OrderByMetadata[];
+  limit?: number | null;
+  offset?: number | null;
+}
+
+/** A single disclosed row: variable name -> RDF/JS term. */
+export type DisclosedRow = Record<string, Term>;
+
+/** A row returned after post-processing — aggregate columns are RDF terms. */
+export type ResultRow = Record<string, Term>;
+
+/**
+ * Stable string key for an RDF term, suitable for grouping / DISTINCT.
+ * Uses term-equality semantics: type + value + language tag + datatype.
+ */
+function termKey(t: Term | undefined): string {
+  if (!t) return '\u0000undef';
+  switch (t.termType) {
+    case 'NamedNode':
+      return `nn|${t.value}`;
+    case 'BlankNode':
+      return `bn|${t.value}`;
+    case 'Literal': {
+      const lang = (t as { language?: string }).language ?? '';
+      const dt = (t as { datatype?: { value: string } }).datatype?.value ?? '';
+      return `lt|${t.value}|${lang}|${dt}`;
+    }
+    case 'Variable':
+      return `vr|${t.value}`;
+    default:
+      return `??|${t.value}`;
+  }
+}
+
+/**
+ * Compare two terms under SPARQL's ORDER BY ordering. This is a
+ * deliberate simplification: numeric literals compare numerically,
+ * other literals lexicographically, IRIs lexicographically by their
+ * value. Real SPARQL ordering (§15.1) has more nuance around language
+ * tags and incompatible datatypes, but for round-2 the disclose-and-
+ * verify pattern just needs a deterministic total order.
+ */
+function compareTerms(a: Term | undefined, b: Term | undefined): number {
+  if (a === undefined && b === undefined) return 0;
+  if (a === undefined) return -1;
+  if (b === undefined) return 1;
+
+  const aIsNum = isNumericLiteral(a);
+  const bIsNum = isNumericLiteral(b);
+  if (aIsNum && bIsNum) {
+    const an = Number(a.value);
+    const bn = Number(b.value);
+    if (an < bn) return -1;
+    if (an > bn) return 1;
+    return 0;
+  }
+
+  if (a.value < b.value) return -1;
+  if (a.value > b.value) return 1;
+  return 0;
+}
+
+const XSD = 'http://www.w3.org/2001/XMLSchema#';
+const NUMERIC_DATATYPES = new Set<string>([
+  `${XSD}integer`,
+  `${XSD}decimal`,
+  `${XSD}double`,
+  `${XSD}float`,
+  `${XSD}long`,
+  `${XSD}int`,
+  `${XSD}short`,
+  `${XSD}byte`,
+  `${XSD}nonNegativeInteger`,
+  `${XSD}positiveInteger`,
+  `${XSD}negativeInteger`,
+  `${XSD}nonPositiveInteger`,
+  `${XSD}unsignedLong`,
+  `${XSD}unsignedInt`,
+  `${XSD}unsignedShort`,
+  `${XSD}unsignedByte`,
+]);
+
+function isNumericLiteral(t: Term): boolean {
+  if (t.termType !== 'Literal') return false;
+  const dt = (t as { datatype?: { value: string } }).datatype?.value;
+  return !!dt && NUMERIC_DATATYPES.has(dt);
+}
+
+function literal(value: string, datatype: string): Term {
+  return {
+    termType: 'Literal',
+    value,
+    language: '',
+    datatype: { termType: 'NamedNode', value: datatype } as Term,
+    equals: () => false,
+  } as unknown as Term;
+}
+
+function makeIntegerLiteral(n: number): Term {
+  return literal(Math.trunc(n).toString(), `${XSD}integer`);
+}
+
+function makeDecimalLiteral(n: number): Term {
+  return literal(n.toString(), `${XSD}decimal`);
+}
+
+function isDistinctKind(kind: AggregateKindTag): boolean {
+  return kind === 'count_distinct'
+    || kind === 'count_solutions_distinct'
+    || kind === 'sum_distinct'
+    || kind === 'min_distinct'
+    || kind === 'max_distinct'
+    || kind === 'avg_distinct';
+}
+
+function dedupeRows(rows: DisclosedRow[]): DisclosedRow[] {
+  const seen = new Set<string>();
+  const out: DisclosedRow[] = [];
+  for (const row of rows) {
+    const keys = Object.keys(row).sort();
+    const key = keys.map((k) => `${k}=${termKey(row[k])}`).join('\u0001');
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(row);
+    }
+  }
+  return out;
+}
+
+function dedupeTerms(terms: Term[]): Term[] {
+  const seen = new Set<string>();
+  const out: Term[] = [];
+  for (const t of terms) {
+    const k = termKey(t);
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+function termsForAgg(rows: DisclosedRow[], source: string | null): Term[] {
+  if (source === null) return [];
+  return rows
+    .map((r) => r[source])
+    .filter((t): t is Term => t !== undefined);
+}
+
+function computeAggregate(
+  agg: AggregateMetadata,
+  rows: DisclosedRow[]
+): Term {
+  const distinct = isDistinctKind(agg.kind);
+
+  // COUNT(*) variants count solutions, not source bindings.
+  if (agg.kind === 'count_solutions' || agg.kind === 'count_solutions_distinct') {
+    const considered = distinct ? dedupeRows(rows) : rows;
+    return makeIntegerLiteral(considered.length);
+  }
+
+  let terms = termsForAgg(rows, agg.source);
+  if (distinct) terms = dedupeTerms(terms);
+
+  switch (agg.kind) {
+    case 'count':
+    case 'count_distinct':
+      return makeIntegerLiteral(terms.length);
+    case 'sum':
+    case 'sum_distinct': {
+      const total = terms.reduce((acc, t) => acc + Number(t.value), 0);
+      return makeDecimalLiteral(total);
+    }
+    case 'avg':
+    case 'avg_distinct': {
+      if (terms.length === 0) return makeIntegerLiteral(0);
+      const total = terms.reduce((acc, t) => acc + Number(t.value), 0);
+      return makeDecimalLiteral(total / terms.length);
+    }
+    case 'min':
+    case 'min_distinct': {
+      if (terms.length === 0) return makeIntegerLiteral(0);
+      return [...terms].sort(compareTerms)[0]!;
+    }
+    case 'max':
+    case 'max_distinct': {
+      if (terms.length === 0) return makeIntegerLiteral(0);
+      return [...terms].sort((a, b) => compareTerms(b, a))[0]!;
+    }
+    default:
+      throw new Error(`Unsupported aggregate kind: ${agg.kind}`);
+  }
+}
+
+function sortRows(
+  rows: DisclosedRow[],
+  keys: OrderByMetadata[]
+): DisclosedRow[] {
+  if (keys.length === 0) return rows;
+  return [...rows].sort((a, b) => {
+    for (const key of keys) {
+      const cmp = compareTerms(a[key.variable], b[key.variable]);
+      if (cmp !== 0) {
+        return key.direction === 'desc' ? -cmp : cmp;
+      }
+    }
+    return 0;
+  });
+}
+
+/**
+ * Apply the SPARQL-side post-processing modifiers (aggregates,
+ * ORDER BY, LIMIT, OFFSET) to a set of disclosed rows, externally to
+ * the circuit. The disclosed rows must already be the output of a
+ * successful proof verification.
+ *
+ * For `LIMIT k`, this *also* enforces `disclosed.length <= k` — the
+ * disclose-and-verify model leaves the cap as a verifier-side check.
+ *
+ * @param metadata The `metadata.json` produced by the transform.
+ * @param disclosedRows The rows extracted from successful proof
+ *   verifications, keyed by variable name.
+ * @returns The post-processed result rows.
+ * @throws if `LIMIT k` is set and `disclosedRows.length > k`.
+ */
+export function applyPostProcessing(
+  metadata: PostProcessingMetadata,
+  disclosedRows: DisclosedRow[]
+): ResultRow[] {
+  const aggregates = metadata.aggregates ?? [];
+  const orderBy = metadata.orderBy ?? metadata.order_by ?? [];
+  const limit = metadata.limit ?? null;
+  const offset = metadata.offset ?? null;
+
+  if (typeof limit === 'number' && disclosedRows.length > limit) {
+    throw new Error(
+      `Disclosed multiset of ${disclosedRows.length} rows exceeds LIMIT ${limit}`
+    );
+  }
+
+  // Aggregates produce one result row containing every aggregate
+  // column. ORDER BY / LIMIT / OFFSET on aggregate output is rare in
+  // practice but is applied uniformly afterwards.
+  let working: ResultRow[];
+  if (aggregates.length > 0) {
+    const aggRow: ResultRow = {};
+    for (const agg of aggregates) {
+      aggRow[agg.output] = computeAggregate(agg, disclosedRows);
+    }
+    working = [aggRow];
+  } else {
+    working = disclosedRows.slice();
+  }
+
+  working = sortRows(working, orderBy);
+
+  if (offset !== null && offset > 0) {
+    working = working.slice(offset);
+  }
+  if (limit !== null && working.length > limit) {
+    working = working.slice(0, limit);
+  }
+
+  return working;
+}
