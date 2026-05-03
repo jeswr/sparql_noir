@@ -14,7 +14,7 @@
 The three highest-leverage moves for the next quarter are:
 1. **Refactor the `transform/src/lib.rs` god-module** into a layered IR (parse → algebra-IR → constraint-IR → emit) so every subsequent feature lands cleanly rather than as another match arm in the 2,500-line file.
 2. **Reach a defensible baseline on SPARQL 1.1 §17 built-ins**: real string ops (CONTAINS/SUBSTR/REGEX), proper IEEE-754 numeric promotion for ABS/ROUND/CEIL/FLOOR, EXISTS/NOT EXISTS, IN/NOT IN, COALESCE, IF.
-3. **Stand up the `unconstrained` + `_verified` pattern** in `noir/lib/utils` and `noir/lib/arith`, starting with Merkle-path hashing and integer division — gate-cost wins compound across every generated circuit.
+3. **Stand up the `unconstrained` + `_verified` pattern** in `noir/lib/arith` (integer division, mantissa truncation) and as constant-folding in `noir/lib/{ebv,arith}` for datatype-IRI hashes. **Note:** Merkle-path hashing must stay constrained for soundness — the `unconstrained` pattern is for arithmetic, not the cryptographic chain. Gate-cost wins compound across every generated circuit.
 
 Property paths with Kleene closure, MINUS, subqueries, and aggregates are deferred to a second round once the IR refactor lands; SERVICE, NOW(), UUID(), and update/protocol/federation suites stay permanently out of scope for ZK.
 
@@ -207,7 +207,7 @@ The pattern (cf. `noir_IEEE754::unconstrained_ops.nr`): compute the answer in an
 
 | Function | Current shape | Unconstrained sketch | Eventual NAVe/Lampe story |
 |---|---|---|---|
-| `utils::verify_inclusion` (~L25–35) | Serial `for i in 1..MERKLE_DEPTH` of `consts::hash2`. ~MERKLE_DEPTH × pedersen_hash gates per triple, multiplied across BGP. | `unconstrained` recompute root from leaf+path; assert `current == root_value`. Constrained code only checks the final equality rather than every intermediate hash. **However:** Merkle paths are already in this canonical shape; the win comes from caching shared sub-paths across triples sharing prefixes (rare in BGP), and from skipping intermediate `assert_eq`s. Modest. | Lampe: would need to formalise the recursion; NAVe: not yet viable per parallel scout. |
+| `utils::verify_inclusion` (~L25–35) | Serial `for i in 1..MERKLE_DEPTH` of `consts::hash2`. ~MERKLE_DEPTH × pedersen_hash gates per triple, multiplied across BGP. | **Soundness note:** the Merkle hash chain itself MUST stay constrained — moving the hash computation unconstrained and only asserting the final root would be unsound (a malicious prover could supply the root directly without a real path). The legitimate wins here are micro-optimisations that don't change which arithmetic hashes are constrained: (a) skipping the intermediate `assert_eq(current, root_value)` line at the end of `verify_inclusion` (a no-op given the loop already builds the root) and (b) batching path verification across triples sharing a Merkle prefix in the BGP (rare). **Modest in practice; flagged here only because `verify_inclusion` is on every hot path.** | Not a Lampe candidate — the relation is already as tight as the security goal allows. |
 | `arith::div_floats` (~L283) | Long division loop over `FLOAT_PRECISION` digits, mantissa scaling. | `unconstrained` compute `(q, r) = a/b` with `r < b`; constrained check `q*b + r == a` and `r < b`. Classic integer-division-as-multiplication. **High win** — replaces a 7-iteration loop with a multiplication+comparison. | Lampe-friendly relation (single multiplicative identity); good first target. |
 | `arith::truncate` (~L168) | Loops to find leading-digit magnitude (`for i in 0..25`). | `unconstrained` returns `(magnitude, divisor)`; constrained checks `divisor ≤ mantissa < divisor*10`. Replaces 25-iteration loop with two range checks. | Lampe straightforward. |
 | `arith::pow10` (~L152) | Lookup for `n < 25`, iterative for ≥ 25. | `unconstrained` returns `pow10(n)`; constrained loop multiplies by 10 in unconstrained mode and asserts the result. Minor win because lookup already covers the common case. | Low priority. |
@@ -241,7 +241,7 @@ These are the structural changes that, if made, unblock everything else. Listed 
 
 3. **Re-design `Triple.terms[1]`'s "special encoding" to carry a bounded byte string when needed.** Today literals collapse to a single `Field` ("special_encoding") that is either an integer, an epoch-ms, or `consts::encode_string`. To support real string functions (CONTAINS, REGEX, SUBSTR, etc.) we need access to the actual bytes inside the circuit, behind a length witness. Proposal: the witness for a triple containing a string-typed object additionally provides a bounded `[u8; STRING_LEN_MAX]` and a `length: u32 < STRING_LEN_MAX`, plus a hash binding `assert(consts::encode_string_bytes(bytes, length) == terms[1])`. STRING_LEN_MAX is configurable, similar to MERKLE_DEPTH; default e.g. 64. **Cost:** 3–5 days (encoding changes in TS + Rust + Noir + verifier). **Impact:** unlocks all real string ops, REGEX, hash functions, IRI()/STRDT/STRLANG.
 
-4. **Fold the optional power-set generation into a single circuit with `is_matched` flags.** The current `2^n` circuit generation strategy in `transform_query_with_options` (~L2376) is correct for small n but doubles each time a new OPTIONAL is added. A single circuit with one `is_matched: bool` per optional block plus conditional assertions (`if is_matched_k { /* assertions for block k */ }`) collapses this to one circuit and one verifier path. Noir's `if`-on-witness-bool is supported at the cost of constraints in both arms — but at small n and with witness-side selection, it is far cheaper than `2^n` separately compiled circuits. **Cost:** 2–3 days. **Impact:** cleaner artefacts, faster compilation, no n-dependent explosion. **Caveat:** branch must still be sound — in particular, when `is_matched=false`, the optional triple slot must still be a valid `Triple` (something must occupy it). Standard pattern: prover provides any witness triple (e.g. the first triple in the dataset); circuit only enforces the optional's own assertions when `is_matched=true`.
+4. **Investigate folding the optional power-set generation into a single circuit with `is_matched` flags — but only if a sound non-existence proof can be wired in.** The current `2^n` circuit generation strategy in `transform_query_with_options` (~L2376) is correct for small n but doubles with each new OPTIONAL. A single circuit with one `is_matched: bool` per optional block sounds attractive in artefact-size terms — but **a naive "if `is_matched=false`, skip the inner assertions" is unsound under SPARQL OPTIONAL semantics**: per W3C §18.5 / PAG §3.2, when there exists at least one binding compatible with the inner OPTIONAL the result MUST extend with that binding. A prover who chooses `is_matched=false` despite a compatible match existing would produce an incorrect (but proof-validating) result, hiding rows that should appear. To collapse the power set we must therefore prove, in the unmatched arm, that **no compatible inner binding exists in the dataset** — i.e. an in-circuit NOT EXISTS over the inner pattern. That is essentially the same primitive needed for `MINUS` / `NOT EXISTS` (round 3 of §7). Concretely: do not collapse OPTIONAL until round 3 lands, at which point the same NOT-EXISTS witness format powers both. Until then, keep the power-set strategy and just add a sanity guard rejecting queries with too many OPTIONALs (configurable cap, default e.g. 4).
 
 5. **Constant-fold datatype-IRI hashes.** Lift the dozen `encode_datatype_iri("http://www.w3.org/2001/XMLSchema#X")` calls in `ebv::is_*_datatype` and `arith::get_numeric_type_level` to `global`s, ideally generated by `setup.ts` (which already configures `noir/lib/consts`). Removes a constant-but-significant overhead from every filter that tests a numeric/string/EBV type. **Cost:** half a day. **Impact:** measurable gate reduction across most generated circuits.
 
@@ -271,25 +271,26 @@ Land structural changes that unblock everything else, plus the cheap functional 
 Make the existing partial features actually correct, and clean up OPTIONAL so it scales.
 
 - §6.2: pick IEEE 754 (recommended) and delete `arith::Float`'s arithmetic; rewire ABS/ROUND/CEIL/FLOOR to type-aware float/double/integer paths.
-- §6.4: collapse OPTIONAL `2^n` power-set into a single circuit with `is_matched` flags. Update `optional_circuits` clients (the test runner and the prove path) accordingly.
 - §3 Kleene paths `+` and `*` with config-driven max depth (`path_segment_max`).
 - §3 NPS `!p` (small win, mostly mechanical).
 - §5 unconstrained `div_int`/`div_float` and `truncate` rewrites.
 - Wire numeric arithmetic in FILTER expressions (`?x + ?y > 5`, etc.) — `arith::add`/`sub`/`mul`/`div` already exist behind a clean API; just call them from the new `expr.rs`.
+- Defensive cap on the number of OPTIONAL blocks accepted by the transform (e.g. 4) to prevent accidental `2^n` circuit generation. Full collapse is deferred to round 3 because, per §6.4, it requires a sound NOT-EXISTS primitive.
 
-**Definition of done:** SPARQL 1.0 `type-promotion` and `cast` suites pass; OPTIONAL stops blowing up at n=4+; numeric arithmetic in filters works.
+**Definition of done:** SPARQL 1.0 `type-promotion` and `cast` suites pass; numeric arithmetic in filters works; queries with > N OPTIONALs are explicitly rejected with a clear error rather than silently exploding.
 
 ### Round 3 (~1–2 weeks): EXISTS, MINUS, BIND-expressions, sort proof scaffolding
 
 The harder semantic features, plus the foundation for aggregates / DISTINCT / ORDER BY in-circuit.
 
-- §3 EXISTS / NOT EXISTS as "witnessed inner-pattern compatibility". Bound the inner search by the BGP size of the inner pattern; this is the canonical reformulation.
+- §3 EXISTS / NOT EXISTS as "witnessed inner-pattern compatibility". Bound the inner search by the BGP size of the inner pattern; this is the canonical reformulation. Same primitive unlocks §6.4 (sound OPTIONAL collapse) and MINUS.
 - §3 MINUS as `Filter(NOT EXISTS)` once EXISTS is in.
+- §6.4: OPTIONAL collapse, now made sound by reusing the NOT-EXISTS primitive in the `is_matched=false` arm. Replace the power-set generation; update `optional_circuits` consumers (the test runner and the prove path) to the single-circuit shape.
 - §3 BIND with arbitrary expressions — `Extend` accepts any `Expression`; `expr.rs` already knows how to lower it; just thread the bound variable through subsequent triple patterns.
 - §5 sort proof scaffolding in `noir/lib/utils` (multiset-hash + monotone-pairs primitives), behind a `_verified`-style API. No SPARQL feature uses it yet; this builds the foundation.
 - §3 subqueries — once EXISTS is in, nested SELECT inside WHERE is mostly plumbing.
 
-**Definition of done:** EXISTS/MINUS tests pass; BIND with arithmetic works; sort-proof primitive lands with unit tests in `noir/lib/utils`, ready to be consumed by aggregates in a future round.
+**Definition of done:** EXISTS/MINUS tests pass; BIND with arithmetic works; OPTIONAL collapse lands with the soundness-critical NOT-EXISTS arm proven; sort-proof primitive lands with unit tests in `noir/lib/utils`, ready to be consumed by aggregates in a future round.
 
 (Aggregates and full in-circuit ORDER BY/DISTINCT / REGEX / general string functions / encoding redesign §6.3 are explicitly **not** in this 3-round plan. They are larger pieces of work each, to be sized once round 3 lands.)
 
