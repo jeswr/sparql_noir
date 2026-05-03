@@ -1668,27 +1668,41 @@ fn process_graph_pattern_inner(
                 let inner_pattern = &right_info.patterns[0];
                 let inner_terms = absent_terms_from_pattern(inner_pattern)?;
 
-                // Three appended BGP slots: the matched-arm inner
-                // triple followed by the two unmatched-arm bracket
-                // leaves. All three are inclusion-checked by
+                // Three appended BGP slots: a free placeholder for
+                // the matched arm followed by the two unmatched-arm
+                // bracket leaves. All three are inclusion-checked by
                 // `main.nr` regardless of which arm the prover
                 // actually witnesses — soundness lives in the
                 // `assert(matched | unmatched)` disjunction the emit
                 // layer produces.
+                //
+                // **All three slots are free placeholders** (not the
+                // concrete inner triple). This is load-bearing: the
+                // prover-side binding resolver iterates every
+                // `inputPatterns[i]` and matches it against the
+                // dataset. If we left a concrete pattern at the
+                // matched slot, the resolver would fail to produce a
+                // witness when the inner triple is *not* in the
+                // dataset (the unmatched case) — the very case the
+                // collapse is supposed to support. Free placeholders
+                // let the prover pick any valid leaf for each slot;
+                // the matched-arm position assertions in
+                // `checkBinding` then evaluate to true iff the
+                // prover happened to bind the matched slot to the
+                // substituted ground inner triple, which is only
+                // possible when that triple really is in the dataset
+                // — Merkle binding does the soundness work.
+                //
+                // Roborev finding 2026-05-03 (high) on the first
+                // round-3-follow-up commit: "easy-OPTIONAL slots
+                // appear as required input patterns".
                 let matched_idx = offset;
                 let bracket_left_idx = offset + 1;
                 let bracket_right_idx = offset + 2;
 
-                // Materialise all three slots in `left_info.patterns`
-                // so the metadata + per-triple inclusion loop see
-                // them. The matched slot reuses the inner triple's
-                // pattern shape (so metadata round-trips with the
-                // original syntax); the two brackets are
-                // free-variable placeholders (`?__br_*`) per the
-                // existing convention.
                 left_info
                     .patterns
-                    .push(inner_pattern.clone());
+                    .push(bracket_placeholder_pattern(&inner_pattern.graph));
                 left_info
                     .patterns
                     .push(bracket_placeholder_pattern(&inner_pattern.graph));

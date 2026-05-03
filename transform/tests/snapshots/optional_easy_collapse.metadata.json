@@ -47,23 +47,6 @@
         "termType": "DefaultGraph"
       },
       "object": {
-        "termType": "NamedNode",
-        "value": "http://example.org/Person"
-      },
-      "predicate": {
-        "termType": "NamedNode",
-        "value": "http://example.org/type"
-      },
-      "subject": {
-        "termType": "Variable",
-        "value": "s"
-      }
-    },
-    {
-      "graph": {
-        "termType": "DefaultGraph"
-      },
-      "object": {
         "termType": "Variable",
         "value": "__br_o_0"
       },
@@ -91,6 +74,23 @@
       "subject": {
         "termType": "Variable",
         "value": "__br_s_1"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__br_o_2"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "__br_p_2"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__br_s_2"
       }
     }
   ],
@@ -117,23 +117,6 @@
         "termType": "DefaultGraph"
       },
       "object": {
-        "termType": "NamedNode",
-        "value": "http://example.org/Person"
-      },
-      "predicate": {
-        "termType": "NamedNode",
-        "value": "http://example.org/type"
-      },
-      "subject": {
-        "termType": "Variable",
-        "value": "s"
-      }
-    },
-    {
-      "graph": {
-        "termType": "DefaultGraph"
-      },
-      "object": {
         "termType": "Variable",
         "value": "__br_o_0"
       },
@@ -161,6 +144,23 @@
       "subject": {
         "termType": "Variable",
         "value": "__br_s_1"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__br_o_2"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "__br_p_2"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__br_s_2"
       }
     }
   ],
