@@ -37,9 +37,15 @@ which is exactly `EXISTS`'s contribution to `[[Filter(EXISTS{P}, P_outer)]]_D` p
 
 ### 2.2 Disclosure / privacy implication
 
-Inner-only variables `v_j` are **not** in `Variables` and so are not exposed to the verifier. However, the **structure of the inner pattern is public** (it appears in `metadata.json` exactly as the outer triples do — it has to, so the verifier knows what shape the inclusion proofs are checking). This is the same disclosure level as the outer BGP. There is no additional privacy leakage beyond "the existence query was over this shape of pattern".
+Inner-only variables `v_j` are **not** in `Variables` and so are not exposed to the verifier. They are also **renamed** at lowering time to fresh `__exists_<orig>_<id>` identifiers, so they cannot collide with outer-scope variables nor with another EXISTS block's variables of the same source name. This matters because the projection-stripping step in `process_query` (`!v.starts_with("__")`, lower.rs ~L785) would otherwise leak an inner-only name into the result if it happened to share a name with an outer-projected variable.
 
-### 2.3 Cost
+The **structure of the inner pattern is public** (it appears in `metadata.json` exactly as the outer triples do — it has to, so the verifier knows what shape the inclusion proofs are checking). This is the same disclosure level as the outer BGP. There is no additional privacy leakage beyond "the existence query was over this shape of pattern".
+
+### 2.3 Outer-pattern restrictions
+
+The flattening reformulation requires `info.bindings` to reflect the outer scope's full binding environment. This holds when the outer pattern is a BGP / Join / Filter / Extend / Graph / Path / OPTIONAL chain — they all populate `bindings` directly. It **fails for `Union`**, which yields a `PatternInfo` with `union_branches: Some(_)` and an empty top-level `bindings` (each branch owns its own bindings). EXISTS over a UNION outer is therefore rejected at lowering with a clear error pointing to this section. Per-branch EXISTS lowering is the right fix and is round-3-main-event scope; the spike's narrow rejection is the safer behaviour.
+
+### 2.4 Cost
 
 For an inner pattern of `k` triples:
 - `k` additional `Triple` slots in `BGP`, each carrying a Merkle path.

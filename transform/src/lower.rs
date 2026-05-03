@@ -28,6 +28,7 @@ pub(crate) fn next_optional_id() -> usize {
 
 pub(crate) fn reset_optional_counter() {
     OPTIONAL_BLOCK_COUNTER.store(0, Ordering::SeqCst);
+    EXISTS_VAR_COUNTER.store(0, Ordering::SeqCst);
 }
 
 static VAR_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -355,14 +356,44 @@ fn true_literal() -> Expression {
     Expression::Literal(Literal::new_typed_literal("true", xsd_boolean))
 }
 
+/// Counter for generating fresh inner-only EXISTS variable names. We
+/// re-use the optional-id space's counter pattern; using a separate
+/// counter (rather than the optional one) keeps the IDs independent if
+/// either category resets later.
+static EXISTS_VAR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn fresh_exists_var(orig: &str) -> String {
+    let id = EXISTS_VAR_COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("__exists_{}_{}", orig, id)
+}
+
 /// Flatten an inner `GraphPattern` (the `P` in `EXISTS { P }`) into the
 /// outer `info`, treating it as a Join. This is the §2 reformulation
 /// from `spec/exists.md`: append the inner triples + assertions, unify
-/// shared variables with existing outer bindings, hide inner-only vars.
+/// shared variables with existing outer bindings, and rename inner-only
+/// variables to fresh `__exists_*` names so they cannot clash with the
+/// outer scope's projection or another EXISTS block's vars.
+///
+/// **Rejects EXISTS over a UNION outer.** When the outer pattern lowered
+/// to `union_branches`, `info.bindings` is empty (UNION's branches each
+/// own their bindings) — naive flattening would treat every shared
+/// variable as inner-only and silently corrupt the constraint shape
+/// (a correlated EXISTS reduces to a global "some matching triple
+/// exists somewhere" check). Per-branch EXISTS lowering is the right
+/// fix but is out of scope for this spike.
 fn flatten_exists_into(
     inner: &GraphPattern,
     info: &mut PatternInfo,
 ) -> Result<(), String> {
+    if info.union_branches.is_some() {
+        return Err(
+            "EXISTS inside a FILTER over a UNION outer pattern is not yet implemented \
+             (round 3 spike). The current lowering has no per-branch binding scope to \
+             correlate against. See spec/exists.md §7."
+                .into(),
+        );
+    }
+
     let inner_info = process_graph_pattern(inner)?;
 
     // Forbid features in the inner pattern that the spike doesn't yet
@@ -386,14 +417,25 @@ fn flatten_exists_into(
 
     // Pre-compute the set of variables already bound in the outer info
     // so we can decide whether each inner binding unifies (shared
-    // variable → assertion) or stays bound (inner-only variable →
-    // hidden binding via the same `bindings` slot it would normally
-    // occupy, just not projected).
+    // variable → assertion) or is renamed to a fresh hidden inner-only
+    // variable.
     let outer_bound: std::collections::BTreeSet<String> = info
         .bindings
         .iter()
         .map(|b| b.variable.clone())
         .collect();
+
+    // Map from original inner variable name to its rewritten name (for
+    // inner-only variables). Shared variables aren't in the map — the
+    // inner_info's references to them stay as-is and pick up the outer
+    // binding via `Term::Variable` lookup at emit time.
+    let mut rename: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for b in &inner_info.bindings {
+        if !outer_bound.contains(&b.variable) {
+            rename.insert(b.variable.clone(), fresh_exists_var(&b.variable));
+        }
+    }
 
     info.patterns.extend(inner_info.patterns);
 
@@ -404,32 +446,29 @@ fn flatten_exists_into(
         };
         if outer_bound.contains(&binding.variable) {
             // Shared variable — emit a unification assertion against
-            // the existing outer binding.
+            // the existing outer binding. The LHS keeps the original
+            // name so the existing outer binding is reused.
             info.assertions.push(Assertion(
                 Term::Variable(binding.variable),
                 adjusted_term,
             ));
         } else {
-            // Inner-only variable — keep it as a binding so subsequent
-            // inner triples that reference it stay tied. It is *not*
-            // projected because `process_query` only exposes variables
-            // listed in the SELECT projection.
+            // Inner-only variable — rename to a fresh `__exists_*`
+            // identifier so it cannot collide with outer-scope or other
+            // EXISTS-block names. It stays in `bindings` (for emit-time
+            // serialise_term lookup) but is excluded from projection by
+            // `process_query`'s `__`-prefix filter (lower.rs ~L785).
+            let renamed = rename.get(&binding.variable).expect("rename built above");
             info.bindings.push(Binding {
-                variable: binding.variable,
+                variable: renamed.clone(),
                 term: adjusted_term,
             });
         }
     }
 
     for assertion in inner_info.assertions {
-        let adj_left = match assertion.0 {
-            Term::Input(i, j) => Term::Input(i + offset, j),
-            other => other,
-        };
-        let adj_right = match assertion.1 {
-            Term::Input(i, j) => Term::Input(i + offset, j),
-            other => other,
-        };
+        let adj_left = rename_term_in_assertion(assertion.0, &rename, offset);
+        let adj_right = rename_term_in_assertion(assertion.1, &rename, offset);
         info.assertions.push(Assertion(adj_left, adj_right));
     }
 
@@ -443,10 +482,140 @@ fn flatten_exists_into(
                     .into(),
             );
         }
-        info.filters.push(inner_filter);
+        // Filter expressions may reference the inner-only variables we
+        // just renamed, so substitute through.
+        info.filters.push(rename_variables_in_expression(&inner_filter, &rename));
     }
 
     Ok(())
+}
+
+/// Adjust an inner-pattern `Term` for the outer offset, and rename
+/// inner-only `Term::Variable` references to their fresh `__exists_*`
+/// names.
+fn rename_term_in_assertion(
+    term: Term,
+    rename: &std::collections::BTreeMap<String, String>,
+    offset: usize,
+) -> Term {
+    match term {
+        Term::Input(i, j) => Term::Input(i + offset, j),
+        Term::Variable(name) => {
+            if let Some(fresh) = rename.get(&name) {
+                Term::Variable(fresh.clone())
+            } else {
+                Term::Variable(name)
+            }
+        }
+        other => other,
+    }
+}
+
+/// Substitute renamed inner-only variables inside a SPARQL expression.
+/// Conservative: only `Expression::Variable` is rewritten; all other
+/// shapes recurse structurally. EXISTS / NOT EXISTS expressions inside
+/// `expr` are left untouched here — `flatten_exists_into` already
+/// rejects them via `expression_contains_exists`.
+fn rename_variables_in_expression(
+    expr: &Expression,
+    rename: &std::collections::BTreeMap<String, String>,
+) -> Expression {
+    use Expression::{
+        Add, And, Bound as BoundE, Coalesce, Divide, Equal, FunctionCall, Greater,
+        GreaterOrEqual, If, In, Less, LessOrEqual, Multiply, Not, Or, SameTerm, Subtract,
+        UnaryMinus, UnaryPlus, Variable as VariableE,
+    };
+    match expr {
+        VariableE(v) => {
+            if let Some(fresh) = rename.get(v.as_str()) {
+                VariableE(Variable::new_unchecked(fresh.clone()))
+            } else {
+                expr.clone()
+            }
+        }
+        BoundE(v) => {
+            if let Some(fresh) = rename.get(v.as_str()) {
+                BoundE(Variable::new_unchecked(fresh.clone()))
+            } else {
+                expr.clone()
+            }
+        }
+        Or(a, b) => Or(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        And(a, b) => And(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Equal(a, b) => Equal(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        SameTerm(a, b) => SameTerm(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Greater(a, b) => Greater(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        GreaterOrEqual(a, b) => GreaterOrEqual(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Less(a, b) => Less(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        LessOrEqual(a, b) => LessOrEqual(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Add(a, b) => Add(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Subtract(a, b) => Subtract(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Multiply(a, b) => Multiply(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        Divide(a, b) => Divide(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+        ),
+        UnaryPlus(a) => UnaryPlus(Box::new(rename_variables_in_expression(a, rename))),
+        UnaryMinus(a) => UnaryMinus(Box::new(rename_variables_in_expression(a, rename))),
+        Not(a) => Not(Box::new(rename_variables_in_expression(a, rename))),
+        If(a, b, c) => If(
+            Box::new(rename_variables_in_expression(a, rename)),
+            Box::new(rename_variables_in_expression(b, rename)),
+            Box::new(rename_variables_in_expression(c, rename)),
+        ),
+        In(a, args) => In(
+            Box::new(rename_variables_in_expression(a, rename)),
+            args.iter()
+                .map(|e| rename_variables_in_expression(e, rename))
+                .collect(),
+        ),
+        Coalesce(args) => Coalesce(
+            args.iter()
+                .map(|e| rename_variables_in_expression(e, rename))
+                .collect(),
+        ),
+        FunctionCall(f, args) => FunctionCall(
+            f.clone(),
+            args.iter()
+                .map(|e| rename_variables_in_expression(e, rename))
+                .collect(),
+        ),
+        // Leaf: literal / named node / Exists (rejected upstream).
+        _ => expr.clone(),
+    }
 }
 
 /// Helper to adjust input indices in an optional block by an offset

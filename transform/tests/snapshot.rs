@@ -261,6 +261,49 @@ fn exists_inside_boolean_combinator_is_rejected() {
     }
 }
 
+/// `FILTER(EXISTS{P})` over a UNION-shaped outer pattern is rejected
+/// (per roborev finding 2026-05-03). Naively flattening would corrupt
+/// the constraint shape because UNION's branches each own their
+/// bindings; EXISTS would then see no outer bindings at all and treat
+/// every variable as inner-only.
+#[test]
+fn exists_over_union_outer_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               { ?s ex:a ?o . } UNION { ?s ex:b ?o . } \
+               FILTER(EXISTS { ?o ex:age ?age . }) \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected EXISTS over UNION outer to be rejected"),
+        Err(err) => assert!(
+            err.contains("UNION") && err.contains("spec/exists.md"),
+            "expected error to mention UNION and spec/exists.md, got: {}",
+            err
+        ),
+    }
+}
+
+/// Inner-only EXISTS variables are renamed to `__exists_<orig>_<id>` so
+/// they cannot collide with the outer scope or another EXISTS block's
+/// vars. Verifies the medium-severity roborev fix: prevents an EXISTS
+/// witness's inner variable from accidentally correlating with a real
+/// outer binding of the same name.
+#[test]
+fn inner_only_exists_variables_are_renamed() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ex:age ?age . }) }";
+    let result = transform_query(q).expect("transform should succeed");
+    // ?age is inner-only — the original name must not appear in the
+    // generated Noir code (would imply it leaked into outer scope).
+    assert!(
+        !result.sparql_nr.contains("variables.age"),
+        "?age should not be projected as a variable: {}",
+        result.sparql_nr
+    );
+    // Variables struct should only contain ?s.
+    assert!(result.sparql_nr.contains("pub(crate) struct Variables {\n  pub(crate) s: Field,\n}"));
+}
+
 /// EXISTS with a fully-ground inner pattern lowers cleanly: the inner
 /// triple becomes an additional outer BGP entry with constant-position
 /// assertions and a unification of the shared variable.
