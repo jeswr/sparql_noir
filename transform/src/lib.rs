@@ -15,6 +15,8 @@ mod lower;
 mod emit;
 mod metadata;
 
+use crate::metadata::{contextualized_pattern_to_json, ground_term_to_json};
+
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -1904,83 +1906,6 @@ fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
             Ok(QueryInfo { variables: vars, pattern })
         }
     }
-}
-
-// =============================================================================
-// JSON SERIALIZATION
-// =============================================================================
-
-fn ground_term_to_json(gt: &GroundTerm) -> serde_json::Value {
-    match gt {
-        GroundTerm::NamedNode(nn) => serde_json::json!({
-            "termType": "NamedNode",
-            "value": nn.as_str()
-        }),
-        GroundTerm::Literal(l) => serde_json::json!({
-            "termType": "Literal",
-            "value": l.value(),
-            "language": l.language(),
-            "datatype": {
-                "termType": "NamedNode",
-                "value": l.datatype().as_str()
-            }
-        }),
-    }
-}
-
-fn term_pattern_to_json(tp: &TermPattern) -> serde_json::Value {
-    match tp {
-        TermPattern::NamedNode(nn) => serde_json::json!({
-            "termType": "NamedNode",
-            "value": nn.as_str()
-        }),
-        TermPattern::Variable(v) => serde_json::json!({
-            "termType": "Variable",
-            "value": v.as_str()
-        }),
-        TermPattern::BlankNode(b) => serde_json::json!({
-            "termType": "BlankNode",
-            "value": b.as_str()
-        }),
-        TermPattern::Literal(l) => serde_json::json!({
-            "termType": "Literal",
-            "value": l.value(),
-            "language": l.language(),
-            "datatype": {
-                "termType": "NamedNode",
-                "value": l.datatype().as_str()
-            }
-        }),
-        #[allow(unreachable_patterns)]
-        _ => serde_json::json!({"termType": "DefaultGraph"}),
-    }
-}
-
-fn named_node_pattern_to_json(nnp: &NamedNodePattern) -> serde_json::Value {
-    match nnp {
-        NamedNodePattern::NamedNode(nn) => serde_json::json!({
-            "termType": "NamedNode",
-            "value": nn.as_str()
-        }),
-        NamedNodePattern::Variable(v) => serde_json::json!({
-            "termType": "Variable",
-            "value": v.as_str()
-        }),
-    }
-}
-
-fn contextualized_pattern_to_json(ct: &ContextualizedTriple) -> serde_json::Value {
-    let graph = match &ct.graph {
-        GraphContext::Default => serde_json::json!({"termType": "DefaultGraph"}),
-        GraphContext::NamedNode(iri) => serde_json::json!({"termType": "NamedNode", "value": iri}),
-        GraphContext::Variable(name) => serde_json::json!({"termType": "Variable", "value": name}),
-    };
-    serde_json::json!({
-        "subject": term_pattern_to_json(&ct.pattern.subject),
-        "predicate": named_node_pattern_to_json(&ct.pattern.predicate),
-        "object": term_pattern_to_json(&ct.pattern.object),
-        "graph": graph
-    })
 }
 
 // =============================================================================
