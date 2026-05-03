@@ -1,0 +1,689 @@
+{
+  "aggregates": [],
+  "hiddenInputs": [],
+  "hidden_inputs": [],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "x"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/flag"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__v3"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__v4"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__v3"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__v5"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__v4"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__v5"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "x"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/flag"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__v3"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__v4"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__v3"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__v5"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__v4"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__v5"
+      }
+    }
+  ],
+  "limit": null,
+  "num_optionals": 0,
+  "offset": null,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "orderBy": [],
+  "order_by": [],
+  "skip_signing": false,
+  "total_patterns": 5,
+  "unionBranches": [
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      }
+    ],
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v0"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v0"
+        }
+      }
+    ],
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v1"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v2"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v1"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v2"
+        }
+      }
+    ],
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v3"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v4"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v3"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v5"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v4"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v5"
+        }
+      }
+    ]
+  ],
+  "union_branches": [
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      }
+    ],
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v0"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v0"
+        }
+      }
+    ],
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v1"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v2"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v1"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v2"
+        }
+      }
+    ],
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v3"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v4"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v3"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "__v5"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v4"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "__v5"
+        }
+      }
+    ]
+  ],
+  "variables": [
+    "s",
+    "o",
+    "x"
+  ]
+}

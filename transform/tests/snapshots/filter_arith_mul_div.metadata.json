@@ -1,0 +1,171 @@
+{
+  "aggregates": [],
+  "hiddenInputs": [
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "n"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "2"
+        }
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "3"
+        }
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "4"
+        }
+      },
+      "type": "customComputed"
+    }
+  ],
+  "hidden_inputs": [
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "n"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "2"
+        }
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "3"
+        }
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "4"
+        }
+      },
+      "type": "customComputed"
+    }
+  ],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "n"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/n"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "n"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/n"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "limit": null,
+  "num_optionals": 0,
+  "offset": null,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "orderBy": [],
+  "order_by": [],
+  "skip_signing": false,
+  "total_patterns": 1,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s"
+  ]
+}

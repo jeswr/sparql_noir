@@ -1,0 +1,98 @@
+{
+  "aggregates": [],
+  "hiddenInputs": [
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "__np0"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        }
+      },
+      "type": "customComputed"
+    }
+  ],
+  "hidden_inputs": [
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "__np0"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "termType": "NamedNode",
+          "value": "http://example.org/knows"
+        }
+      },
+      "type": "customComputed"
+    }
+  ],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "s"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "__np0"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "o"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "s"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "__np0"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "o"
+      }
+    }
+  ],
+  "limit": null,
+  "num_optionals": 0,
+  "offset": null,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "orderBy": [],
+  "order_by": [],
+  "skip_signing": false,
+  "total_patterns": 1,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s",
+    "o"
+  ]
+}
