@@ -9,6 +9,23 @@
       },
       "object": {
         "termType": "Variable",
+        "value": "x"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/flag"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
         "value": "__v3"
       },
       "predicate": {
@@ -69,23 +86,6 @@
       "subject": {
         "termType": "Variable",
         "value": "__v5"
-      }
-    },
-    {
-      "graph": {
-        "termType": "DefaultGraph"
-      },
-      "object": {
-        "termType": "Variable",
-        "value": "x"
-      },
-      "predicate": {
-        "termType": "NamedNode",
-        "value": "http://example.org/flag"
-      },
-      "subject": {
-        "termType": "Variable",
-        "value": "s"
       }
     }
   ],
@@ -96,6 +96,23 @@
       },
       "object": {
         "termType": "Variable",
+        "value": "x"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/flag"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
         "value": "__v3"
       },
       "predicate": {
@@ -156,23 +173,6 @@
       "subject": {
         "termType": "Variable",
         "value": "__v5"
-      }
-    },
-    {
-      "graph": {
-        "termType": "DefaultGraph"
-      },
-      "object": {
-        "termType": "Variable",
-        "value": "x"
-      },
-      "predicate": {
-        "termType": "NamedNode",
-        "value": "http://example.org/flag"
-      },
-      "subject": {
-        "termType": "Variable",
-        "value": "s"
       }
     }
   ],
@@ -193,6 +193,23 @@
         },
         "object": {
           "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
           "value": "o"
         },
         "predicate": {
@@ -203,7 +220,9 @@
           "termType": "Variable",
           "value": "s"
         }
-      },
+      }
+    ],
+    [
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -220,9 +239,7 @@
           "termType": "Variable",
           "value": "s"
         }
-      }
-    ],
-    [
+      },
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -256,7 +273,9 @@
           "termType": "Variable",
           "value": "__v0"
         }
-      },
+      }
+    ],
+    [
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -273,9 +292,7 @@
           "termType": "Variable",
           "value": "s"
         }
-      }
-    ],
-    [
+      },
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -326,7 +343,9 @@
           "termType": "Variable",
           "value": "__v2"
         }
-      },
+      }
+    ],
+    [
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -343,9 +362,7 @@
           "termType": "Variable",
           "value": "s"
         }
-      }
-    ],
-    [
+      },
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -412,23 +429,6 @@
         "subject": {
           "termType": "Variable",
           "value": "__v5"
-        }
-      },
-      {
-        "graph": {
-          "termType": "DefaultGraph"
-        },
-        "object": {
-          "termType": "Variable",
-          "value": "x"
-        },
-        "predicate": {
-          "termType": "NamedNode",
-          "value": "http://example.org/flag"
-        },
-        "subject": {
-          "termType": "Variable",
-          "value": "s"
         }
       }
     ]
@@ -441,6 +441,23 @@
         },
         "object": {
           "termType": "Variable",
+          "value": "x"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/flag"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      },
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
           "value": "o"
         },
         "predicate": {
@@ -451,7 +468,9 @@
           "termType": "Variable",
           "value": "s"
         }
-      },
+      }
+    ],
+    [
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -468,9 +487,7 @@
           "termType": "Variable",
           "value": "s"
         }
-      }
-    ],
-    [
+      },
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -504,7 +521,9 @@
           "termType": "Variable",
           "value": "__v0"
         }
-      },
+      }
+    ],
+    [
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -521,9 +540,7 @@
           "termType": "Variable",
           "value": "s"
         }
-      }
-    ],
-    [
+      },
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -574,7 +591,9 @@
           "termType": "Variable",
           "value": "__v2"
         }
-      },
+      }
+    ],
+    [
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -591,9 +610,7 @@
           "termType": "Variable",
           "value": "s"
         }
-      }
-    ],
-    [
+      },
       {
         "graph": {
           "termType": "DefaultGraph"
@@ -660,23 +677,6 @@
         "subject": {
           "termType": "Variable",
           "value": "__v5"
-        }
-      },
-      {
-        "graph": {
-          "termType": "DefaultGraph"
-        },
-        "object": {
-          "termType": "Variable",
-          "value": "x"
-        },
-        "predicate": {
-          "termType": "NamedNode",
-          "value": "http://example.org/flag"
-        },
-        "subject": {
-          "termType": "Variable",
-          "value": "s"
         }
       }
     ]

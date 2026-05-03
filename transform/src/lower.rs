@@ -233,8 +233,9 @@ fn join_pattern_infos(
 ) -> Result<PatternInfo, String> {
     let offset = left.patterns.len();
 
-    // Shift the right side's input indices first so they refer to
-    // the merged BGP's positions.
+    // Shift the right side's input indices so they refer to the
+    // merged BGP's positions (left's patterns occupy `0..offset`,
+    // right's occupy `offset..`).
     let mut right = right;
     shift_pattern_inputs(&mut right, offset);
 
@@ -254,17 +255,23 @@ fn join_pattern_infos(
             merged.optional_blocks.extend(right.optional_blocks);
             Ok(merged)
         }
-        (true, false) => Ok(distribute_into_branches(left, right)),
+        (true, false) => {
+            // UNION-left + plain-right — left branch patterns come
+            // first, then plain right (matching the index shift we
+            // applied to right's patterns above).
+            Ok(distribute_into_branches(left, right, BranchOrder::FirstThenSecond))
+        }
         (false, true) => {
-            // Distribute the plain side into the UNION on the right.
-            // To keep input-index ordering monotonic we conceptually
-            // swap and re-shift; here we just distribute the plain
-            // (left) constraints into every branch of right.
-            Ok(distribute_into_branches(right, left))
+            // Plain-left + UNION-right — left's plain patterns come
+            // first; each branch must place plain left BEFORE the
+            // shifted union-right patterns so the assertions match
+            // the shifted indices.
+            Ok(distribute_into_branches(right, left, BranchOrder::SecondThenFirst))
         }
         (true, true) => {
             // Cross-product: every pair of branches becomes a single
-            // combined branch.
+            // combined branch. Left's patterns come first per the
+            // pre-shift offset.
             let left_branches = left.union_branches.clone().unwrap_or_default();
             let right_branches = right.union_branches.clone().unwrap_or_default();
             let mut combined: Vec<PatternInfo> = Vec::new();
@@ -302,24 +309,46 @@ fn join_pattern_infos(
     }
 }
 
-/// `with_branches` carries `union_branches`; `plain` does not. Merge
-/// the plain side's constraints into each branch.
+/// Whether the `with_branches` patterns or the `plain` patterns
+/// should appear first inside each merged branch. The choice is
+/// driven by which side was shifted to the higher index range in the
+/// BGP — patterns must appear in the same order as their indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchOrder {
+    /// `with_branches` patterns first, then `plain`. Used when the
+    /// UNION side is the join's left operand (so its patterns are
+    /// `0..offset`, plain right's are `offset..`).
+    FirstThenSecond,
+    /// `plain` first, then `with_branches`. Used when the UNION side
+    /// is the join's right operand (so plain left's patterns are
+    /// `0..offset`, the UNION's are `offset..`).
+    SecondThenFirst,
+}
+
+/// Distribute a plain-side `PatternInfo` into every branch of a
+/// UNION-side `PatternInfo`, preserving the BGP-index ordering
+/// dictated by `order`.
 fn distribute_into_branches(
     with_branches: PatternInfo,
     plain: PatternInfo,
+    order: BranchOrder,
 ) -> PatternInfo {
     let branches = with_branches.union_branches.clone().unwrap_or_default();
     let mut combined: Vec<PatternInfo> = Vec::with_capacity(branches.len());
     for b in &branches {
         let mut branch = PatternInfo::new();
-        branch.patterns.extend(b.patterns.clone());
-        branch.patterns.extend(plain.patterns.clone());
-        branch.bindings.extend(b.bindings.clone());
-        branch.bindings.extend(plain.bindings.clone());
-        branch.assertions.extend(b.assertions.clone());
-        branch.assertions.extend(plain.assertions.clone());
-        branch.filters.extend(b.filters.clone());
-        branch.filters.extend(plain.filters.clone());
+        let (first, second): (&PatternInfo, &PatternInfo) = match order {
+            BranchOrder::FirstThenSecond => (b, &plain),
+            BranchOrder::SecondThenFirst => (&plain, b),
+        };
+        branch.patterns.extend(first.patterns.clone());
+        branch.patterns.extend(second.patterns.clone());
+        branch.bindings.extend(first.bindings.clone());
+        branch.bindings.extend(second.bindings.clone());
+        branch.assertions.extend(first.assertions.clone());
+        branch.assertions.extend(second.assertions.clone());
+        branch.filters.extend(first.filters.clone());
+        branch.filters.extend(second.filters.clone());
         combined.push(branch);
     }
     let patterns = combined
