@@ -24,7 +24,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
-use spargebra::{Query, SparqlParser};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2104,16 +2103,8 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     // Reset the optional block counter for each new query
     reset_optional_counter();
     
-    let query = SparqlParser::new()
-        .parse_query(query_str)
-        .map_err(|e| format!("Parse error: {}", e))?;
-
-    let root = match &query {
-        Query::Select { pattern, .. }
-        | Query::Construct { pattern, .. }
-        | Query::Describe { pattern, .. }
-        | Query::Ask { pattern, .. } => pattern,
-    };
+    let query = crate::parse::parse_query(query_str)?;
+    let root = crate::parse::root_pattern(&query);
 
     let info = process_query(root)?;
 
