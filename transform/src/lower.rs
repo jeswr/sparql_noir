@@ -1941,17 +1941,21 @@ fn process_graph_pattern_inner(
                     let var_name = v.as_str().to_string();
                     // Find the first non-easy-slot to bind the graph
                     // variable from. If every slot is an easy-OPTIONAL
-                    // slot (degenerate but possible: a query whose
-                    // entire WHERE is `GRAPH ?g { OPTIONAL { ground } }`),
-                    // there is no real slot to bind `?g` against, but
-                    // we'd still have rewritten the easy-OPTIONAL's
-                    // `inner_terms[3]` to `Term::Variable(?g)` and the
-                    // matched-arm assertion would then reference
-                    // `variables.g` against an unbound variable. Reject
-                    // outright rather than silently corrupting the
-                    // matched-arm soundness — round-4 follow-up if a
-                    // real workload hits this. Roborev finding
-                    // 2026-05-03 (third high, sub-finding 1).
+                    // slot (degenerate: a query whose entire WHERE is
+                    // `GRAPH ?g { OPTIONAL { ground } }`), the
+                    // easy-OPTIONAL's `inner_terms[3]` was already
+                    // rewritten to `Term::Variable(?g)` by the loop
+                    // above. We do **not** error here because a sibling
+                    // pattern outside this `GRAPH` (e.g.
+                    // `?x ex:g ?g . GRAPH ?g { OPTIONAL { … } }`) may
+                    // bind `?g` later in the surrounding Join. The
+                    // post-Join `process_query` layer is the right
+                    // place to validate that `?g` ends up bound; if
+                    // not, noir codegen produces a `variables.g`
+                    // reference that fails to compile (loud failure,
+                    // not silent soundness corruption). Roborev
+                    // finding 2026-05-03 (fourth pass, medium):
+                    // earlier rejection was too aggressive.
                     let first_real = (0..info.patterns.len())
                         .find(|i| !easy_slot_indices.contains(i));
                     if let Some(first) = first_real {
@@ -1968,15 +1972,6 @@ fn process_graph_pattern_inner(
                                 Term::Input(i, 3),
                             ));
                         }
-                    } else if !info.easy_optionals.is_empty() {
-                        return Err(format!(
-                            "OPTIONAL inside `GRAPH ?{}`-only outer pattern is not yet \
-                             implemented. The easy-case collapse needs a non-easy outer \
-                             slot to bind the graph variable; this query has every BGP \
-                             slot owned by an easy-case OPTIONAL. Round-4 follow-up — \
-                             see spec/exists.md §4.1.",
-                            var_name
-                        ));
                     }
                 }
             }

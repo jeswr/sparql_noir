@@ -873,25 +873,25 @@ fn optional_easy_case_inside_enclosing_graph_keeps_placeholders_wildcard() {
     );
 }
 
-/// Round-3 follow-up — degenerate `GRAPH ?g { OPTIONAL { ground } }`.
-/// Every BGP slot is owned by the easy-case OPTIONAL, so no real slot
-/// is available to bind `?g`. We reject outright rather than silently
-/// corrupt the matched-arm soundness (roborev finding 2026-05-03,
-/// third high, sub-finding 1). Round-4 follow-up.
+/// Round-3 follow-up — `?g` bound by a sibling pattern outside the
+/// `GRAPH ?g { ... }` wrapper. The transform must NOT reject this
+/// case (roborev finding 2026-05-03, fourth medium: an earlier
+/// over-aggressive rejection blocked it). The easy-case collapse
+/// either fires (preferred) or falls through to the existing
+/// power-set path; the important thing is the query doesn't error
+/// out, since `?g` is bound by the sibling triple and the round-3
+/// main-event NOT-EXISTS / round-3-follow-up easy-OPTIONAL
+/// machinery can both resolve it.
 #[test]
-fn graph_var_only_easy_optional_is_rejected() {
+fn optional_easy_case_graph_var_bound_by_sibling_does_not_reject() {
     let q = "PREFIX ex: <http://example.org/>\n\
-             SELECT ?g WHERE { \
+             SELECT ?x ?g WHERE { \
+               ?x ex:g ?g . \
                GRAPH ?g { OPTIONAL { ex:a ex:p ex:b . } } \
              }";
-    match transform_query(q) {
-        Ok(_) => panic!("expected GRAPH ?g-only easy OPTIONAL to be rejected"),
-        Err(err) => assert!(
-            err.contains("GRAPH") && err.contains("OPTIONAL") && err.contains("Round-4"),
-            "expected error mentioning GRAPH / OPTIONAL / Round-4, got: {}",
-            err
-        ),
-    }
+    transform_query(q).expect(
+        "transform should succeed: ?g is bound by the sibling triple outside the GRAPH wrapper",
+    );
 }
 
 /// Multi-triple inner `OPTIONAL` falls through to power-set even when
