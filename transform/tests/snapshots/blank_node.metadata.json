@@ -1,0 +1,86 @@
+{
+  "hiddenInputs": [],
+  "hidden_inputs": [],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "BlankNode",
+        "value": "b"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "a"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/age"
+      },
+      "subject": {
+        "termType": "BlankNode",
+        "value": "b"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "BlankNode",
+        "value": "b"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "a"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/age"
+      },
+      "subject": {
+        "termType": "BlankNode",
+        "value": "b"
+      }
+    }
+  ],
+  "num_optionals": 0,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "skip_signing": false,
+  "total_patterns": 2,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s"
+  ]
+}

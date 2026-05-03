@@ -1,0 +1,130 @@
+{
+  "hiddenInputs": [],
+  "hidden_inputs": [],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/b"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/b"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "num_optionals": 0,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "skip_signing": false,
+  "total_patterns": 1,
+  "unionBranches": [
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/a"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      }
+    ],
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/b"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      }
+    ]
+  ],
+  "union_branches": [
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/a"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      }
+    ],
+    [
+      {
+        "graph": {
+          "termType": "DefaultGraph"
+        },
+        "object": {
+          "termType": "Variable",
+          "value": "o"
+        },
+        "predicate": {
+          "termType": "NamedNode",
+          "value": "http://example.org/b"
+        },
+        "subject": {
+          "termType": "Variable",
+          "value": "s"
+        }
+      }
+    ]
+  ],
+  "variables": [
+    "s"
+  ]
+}

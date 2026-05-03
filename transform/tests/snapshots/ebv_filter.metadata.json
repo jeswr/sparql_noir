@@ -1,0 +1,86 @@
+{
+  "hiddenInputs": [
+    {
+      "computedType": "ebv_value",
+      "input": {
+        "type": "variable",
+        "value": "f"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "ebv_datatype",
+      "input": {
+        "type": "variable",
+        "value": "f"
+      },
+      "type": "customComputed"
+    }
+  ],
+  "hidden_inputs": [
+    {
+      "computedType": "ebv_value",
+      "input": {
+        "type": "variable",
+        "value": "f"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "ebv_datatype",
+      "input": {
+        "type": "variable",
+        "value": "f"
+      },
+      "type": "customComputed"
+    }
+  ],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "f"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/flag"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "f"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/flag"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "num_optionals": 0,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "skip_signing": false,
+  "total_patterns": 1,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s"
+  ]
+}
