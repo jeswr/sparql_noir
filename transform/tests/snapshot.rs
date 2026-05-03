@@ -755,6 +755,106 @@ fn optional_easy_case_graph_scoped_uses_wildcard_placeholders() {
     );
 }
 
+/// Round-3 follow-up — easy-case OPTIONAL inheriting graph scope
+/// from an enclosing `GRAPH ex:g { ... }`. Roborev finding
+/// 2026-05-03 (third high): the GRAPH wrapper was overwriting the
+/// easy-OPTIONAL placeholders' graph context back to `ex:g`,
+/// reintroducing the witness-failure bug from finding 2.
+///
+/// The `Graph` lowering now skips the easy-OPTIONAL synthetic slots
+/// when rewriting `pattern.graph` and adding graph assertions.
+/// Separately, the `EasyOptional.inner_terms[3]` is rewritten from
+/// the default-graph empty-IRI to the effective graph term so the
+/// matched-arm assertion still pins the substituted graph to `ex:g`.
+#[test]
+fn optional_easy_case_inside_enclosing_graph_keeps_placeholders_wildcard() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               GRAPH ex:g { \
+                 ?s ex:knows ?o . \
+                 OPTIONAL { ?s ex:type ex:Person . } \
+               } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    // Easy-case lowering still fires.
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(
+        easy.len(),
+        1,
+        "OPTIONAL inside enclosing GRAPH must still collapse"
+    );
+
+    // Placeholder slots stay `DefaultGraph` (wildcard) in the
+    // metadata, even though the outer triple was rewritten to `ex:g`.
+    let patterns = result
+        .metadata
+        .get("inputPatterns")
+        .and_then(|v| v.as_array())
+        .expect("inputPatterns array");
+    assert_eq!(patterns.len(), 4, "expected 1 outer + 3 placeholder slots");
+    let outer_graph = patterns[0].get("graph").expect("outer graph");
+    assert_eq!(
+        outer_graph.get("termType").and_then(|v| v.as_str()),
+        Some("NamedNode"),
+        "outer triple's graph must be the enclosing GRAPH's IRI"
+    );
+    assert_eq!(
+        outer_graph.get("value").and_then(|v| v.as_str()),
+        Some("http://example.org/g"),
+        "outer triple's graph must be ex:g"
+    );
+    for i in 1..=3 {
+        let graph = patterns[i].get("graph").expect("graph field");
+        assert_eq!(
+            graph.get("termType").and_then(|v| v.as_str()),
+            Some("DefaultGraph"),
+            "placeholder slot {} must stay wildcard (DefaultGraph), got {:?}",
+            i,
+            graph
+        );
+    }
+
+    // The matched-arm assertion in `checkBinding` must still pin the
+    // graph position to `ex:g` (so the matched arm doesn't accept
+    // any-graph witnesses).
+    assert!(
+        result
+            .sparql_nr
+            .contains("http://example.org/g")
+            && result
+                .sparql_nr
+                .contains("bgp[1].terms[3]"),
+        "matched arm should pin bgp[1].terms[3] to ex:g, got:\n{}",
+        result.sparql_nr
+    );
+
+    // The Graph wrapper's per-slot graph assertion must NOT cover
+    // the easy-OPTIONAL placeholder slots (slots 1, 2, 3). Look for
+    // the assertion form: `consts::hash2([0, ... "ex:g"]) ==
+    // bgp[i].terms[3]`. It should appear for slot 0 only.
+    let graph_iri_count = result
+        .sparql_nr
+        .matches("== bgp[0].terms[3]")
+        .count();
+    assert_eq!(
+        graph_iri_count, 1,
+        "expected exactly one outer graph assertion at bgp[0].terms[3], got:\n{}",
+        result.sparql_nr
+    );
+    // No graph assertion on bgp[2] / bgp[3] (the bracket slots).
+    assert!(
+        !result.sparql_nr.contains("== bgp[2].terms[3]")
+            && !result.sparql_nr.contains("== bgp[3].terms[3]"),
+        "bracket slots must not have a graph-pinning assertion, got:\n{}",
+        result.sparql_nr
+    );
+}
+
 /// Multi-triple inner `OPTIONAL` falls through to power-set even when
 /// every variable is outer-bound — easy-case scope is single-triple
 /// inner only. Round-4's prefix-tree commitments will lift this.

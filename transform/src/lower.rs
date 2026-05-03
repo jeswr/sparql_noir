@@ -1870,13 +1870,67 @@ fn process_graph_pattern_inner(
                 NamedNodePattern::Variable(v) => GraphContext::Variable(v.as_str().to_string()),
             };
 
-            for pattern in &mut info.patterns {
-                pattern.graph = graph_context.clone();
+            // Easy-OPTIONAL synthetic slots (`matched_idx`,
+            // `bracket_left_idx`, `bracket_right_idx`) must remain
+            // wildcard in the graph dimension so the unmatched arm
+            // can witness any valid leaf. The matched-arm assertions
+            // in `checkBinding` already pin
+            // `bgp[matched_idx].terms[3]` to the substituted graph
+            // term, so the matched arm only succeeds when the
+            // prover witnessed a leaf in the right graph (and the
+            // bracket slots in the unmatched arm don't constrain the
+            // graph). Roborev finding 2026-05-03 (third high) — an
+            // enclosing `GRAPH ex:g { ... OPTIONAL { ... } }` was
+            // overwriting the placeholder graph back to `ex:g`,
+            // reintroducing the witness-failure bug from finding 2.
+            let easy_slot_indices: std::collections::BTreeSet<usize> = info
+                .easy_optionals
+                .iter()
+                .flat_map(|eo| {
+                    [eo.matched_idx, eo.bracket_left_idx, eo.bracket_right_idx]
+                })
+                .collect();
+
+            for (i, pattern) in info.patterns.iter_mut().enumerate() {
+                if !easy_slot_indices.contains(&i) {
+                    pattern.graph = graph_context.clone();
+                }
+            }
+
+            // The easy-OPTIONAL's `inner_terms[3]` (the graph
+            // position of the substituted ground inner triple) was
+            // computed against the inner pattern's own graph context
+            // — `GraphContext::Default` if the OPTIONAL inherits
+            // graph scope from this enclosing GRAPH. Rewrite it to
+            // the effective graph term so the matched-arm assertion
+            // pins to `ex:g` (or the bound variable), not to the
+            // empty-string IRI used for the default graph.
+            let effective_graph_term = match name {
+                NamedNodePattern::NamedNode(nn) => {
+                    Term::Static(GroundTerm::NamedNode(nn.clone()))
+                }
+                NamedNodePattern::Variable(v) => Term::Variable(v.as_str().to_string()),
+            };
+            for eo in &mut info.easy_optionals {
+                // Only rewrite the graph slot if the inner pattern
+                // saw the default graph (no inner GRAPH wrapper); a
+                // pre-existing inner GRAPH already substituted a
+                // concrete term.
+                let is_default = matches!(
+                    &eo.inner_terms[3],
+                    Term::Static(GroundTerm::NamedNode(nn)) if nn.as_str().is_empty()
+                );
+                if is_default {
+                    eo.inner_terms[3] = effective_graph_term.clone();
+                }
             }
 
             match name {
                 NamedNodePattern::NamedNode(nn) => {
                     for i in 0..info.patterns.len() {
+                        if easy_slot_indices.contains(&i) {
+                            continue;
+                        }
                         info.assertions.push(Assertion(
                             Term::Static(GroundTerm::NamedNode(nn.clone())),
                             Term::Input(i, 3),
@@ -1885,12 +1939,22 @@ fn process_graph_pattern_inner(
                 }
                 NamedNodePattern::Variable(v) => {
                     let var_name = v.as_str().to_string();
-                    if !info.patterns.is_empty() {
+                    // Find the first non-easy-slot to bind the graph
+                    // variable from. If every slot is an easy-OPTIONAL
+                    // slot (degenerate but possible: a query whose
+                    // entire WHERE is `GRAPH ?g { OPTIONAL { ... } }`)
+                    // we have no slot to bind from — skip the binding.
+                    let first_real = (0..info.patterns.len())
+                        .find(|i| !easy_slot_indices.contains(i));
+                    if let Some(first) = first_real {
                         info.bindings.push(Binding {
                             variable: var_name.clone(),
-                            term: Term::Input(0, 3),
+                            term: Term::Input(first, 3),
                         });
-                        for i in 1..info.patterns.len() {
+                        for i in (first + 1)..info.patterns.len() {
+                            if easy_slot_indices.contains(&i) {
+                                continue;
+                            }
                             info.assertions.push(Assertion(
                                 Term::Variable(var_name.clone()),
                                 Term::Input(i, 3),
