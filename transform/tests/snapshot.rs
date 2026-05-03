@@ -819,17 +819,35 @@ fn optional_easy_case_inside_enclosing_graph_keeps_placeholders_wildcard() {
         );
     }
 
-    // The matched-arm assertion in `checkBinding` must still pin the
-    // graph position to `ex:g` (so the matched arm doesn't accept
-    // any-graph witnesses).
+    // The matched-arm assertion in `checkBinding` must pin the
+    // matched-slot's graph position to `ex:g`. It should appear
+    // **inside the OR disjunction** (matched-arm branch), not as a
+    // free-standing assertion line. We check both: bgp[1].terms[3]
+    // is referenced AND it occurs in the disjunction line, NOT in a
+    // separate `assert(...)` line. Roborev finding 2026-05-03
+    // (third high, sub-finding 2): without this stronger check, a
+    // global graph assertion on bgp[1].terms[3] could slip through
+    // and silently force the matched-arm graph in both arms.
+    let bgp1_count = result
+        .sparql_nr
+        .matches("bgp[1].terms[3]")
+        .count();
+    assert_eq!(
+        bgp1_count, 1,
+        "bgp[1].terms[3] should appear exactly once (inside the matched-arm \
+         disjunction), got {} occurrences:\n{}",
+        bgp1_count, result.sparql_nr
+    );
+    // Sanity: that one occurrence must be inside the
+    // `assert(... | utils::verify_non_membership_no_inclusion_check)`
+    // line, not in a free-standing `assert(... == bgp[1].terms[3])`.
+    let or_line_with_bgp1 = result.sparql_nr.lines().any(|l| {
+        l.contains("bgp[1].terms[3]")
+            && l.contains("verify_non_membership_no_inclusion_check")
+    });
     assert!(
-        result
-            .sparql_nr
-            .contains("http://example.org/g")
-            && result
-                .sparql_nr
-                .contains("bgp[1].terms[3]"),
-        "matched arm should pin bgp[1].terms[3] to ex:g, got:\n{}",
+        or_line_with_bgp1,
+        "bgp[1].terms[3] must appear inside the matched|unmatched disjunction line, got:\n{}",
         result.sparql_nr
     );
 
@@ -853,6 +871,27 @@ fn optional_easy_case_inside_enclosing_graph_keeps_placeholders_wildcard() {
         "bracket slots must not have a graph-pinning assertion, got:\n{}",
         result.sparql_nr
     );
+}
+
+/// Round-3 follow-up — degenerate `GRAPH ?g { OPTIONAL { ground } }`.
+/// Every BGP slot is owned by the easy-case OPTIONAL, so no real slot
+/// is available to bind `?g`. We reject outright rather than silently
+/// corrupt the matched-arm soundness (roborev finding 2026-05-03,
+/// third high, sub-finding 1). Round-4 follow-up.
+#[test]
+fn graph_var_only_easy_optional_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?g WHERE { \
+               GRAPH ?g { OPTIONAL { ex:a ex:p ex:b . } } \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected GRAPH ?g-only easy OPTIONAL to be rejected"),
+        Err(err) => assert!(
+            err.contains("GRAPH") && err.contains("OPTIONAL") && err.contains("Round-4"),
+            "expected error mentioning GRAPH / OPTIONAL / Round-4, got: {}",
+            err
+        ),
+    }
 }
 
 /// Multi-triple inner `OPTIONAL` falls through to power-set even when

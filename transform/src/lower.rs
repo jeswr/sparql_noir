@@ -1942,8 +1942,16 @@ fn process_graph_pattern_inner(
                     // Find the first non-easy-slot to bind the graph
                     // variable from. If every slot is an easy-OPTIONAL
                     // slot (degenerate but possible: a query whose
-                    // entire WHERE is `GRAPH ?g { OPTIONAL { ... } }`)
-                    // we have no slot to bind from — skip the binding.
+                    // entire WHERE is `GRAPH ?g { OPTIONAL { ground } }`),
+                    // there is no real slot to bind `?g` against, but
+                    // we'd still have rewritten the easy-OPTIONAL's
+                    // `inner_terms[3]` to `Term::Variable(?g)` and the
+                    // matched-arm assertion would then reference
+                    // `variables.g` against an unbound variable. Reject
+                    // outright rather than silently corrupting the
+                    // matched-arm soundness — round-4 follow-up if a
+                    // real workload hits this. Roborev finding
+                    // 2026-05-03 (third high, sub-finding 1).
                     let first_real = (0..info.patterns.len())
                         .find(|i| !easy_slot_indices.contains(i));
                     if let Some(first) = first_real {
@@ -1960,6 +1968,15 @@ fn process_graph_pattern_inner(
                                 Term::Input(i, 3),
                             ));
                         }
+                    } else if !info.easy_optionals.is_empty() {
+                        return Err(format!(
+                            "OPTIONAL inside `GRAPH ?{}`-only outer pattern is not yet \
+                             implemented. The easy-case collapse needs a non-easy outer \
+                             slot to bind the graph variable; this query has every BGP \
+                             slot owned by an easy-case OPTIONAL. Round-4 follow-up — \
+                             see spec/exists.md §4.1.",
+                            var_name
+                        ));
                     }
                 }
             }
