@@ -14,5 +14,5 @@ pub(crate) fn checkBinding(bgp: BGP, variables: Variables, hidden: Hidden) {
   assert(variables.s == bgp[0].terms[0]);
   assert(bgp[0].terms[2] == bgp[0].terms[2]);
   assert(consts::hash2([0, consts::encode_string("http://example.org/n")]) == bgp[0].terms[1]);
-  assert(((xpath::abs_int(hidden[0] as i64) as Field) as i64) > (hidden[1] as i64));
+  assert(((xpath::abs_int((hidden[0]) as i64) as Field) as i64) > (hidden[1] as i64));
 }

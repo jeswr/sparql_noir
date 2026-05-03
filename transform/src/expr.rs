@@ -350,7 +350,12 @@ enum NumericSourceType {
     Double,
 }
 
-/// Infer the numeric type of an expression based on its structure
+/// Infer the numeric type of an expression based on its structure.
+///
+/// Used by the type-promotion logic to choose the IEEE 754 / integer
+/// path for arithmetic and comparisons (round 2 §6.2). Returns `None`
+/// when the expression carries no static type signal — variables and
+/// term references fall through to the integer path by default.
 fn infer_expression_type(expr: &Expression) -> Option<NumericSourceType> {
     match expr {
         Expression::Literal(l) => {
@@ -362,12 +367,32 @@ fn infer_expression_type(expr: &Expression) -> Option<NumericSourceType> {
             } else if dt.ends_with("decimal") {
                 // SPARQL treats decimal as double for comparisons
                 Some(NumericSourceType::Double)
-            } else if dt.ends_with("integer") || dt.ends_with("int") || 
+            } else if dt.ends_with("integer") || dt.ends_with("int") ||
                       dt.ends_with("long") || dt.ends_with("short") || dt.ends_with("byte") {
                 Some(NumericSourceType::Integer)
             } else {
                 None
             }
+        }
+        // Arithmetic — result is the wider of the operand types
+        // (SPARQL 1.1 §17.3 promotion).
+        Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            Some(promote_numeric_types(
+                infer_expression_type(a),
+                infer_expression_type(b),
+            ))
+        }
+        Expression::UnaryPlus(a) | Expression::UnaryMinus(a) => infer_expression_type(a),
+        // SPARQL numeric functions (ABS / ROUND / CEIL / FLOOR) preserve
+        // the operand type per SPARQL 1.1 §17.4.
+        Expression::FunctionCall(Function::Abs, args)
+        | Expression::FunctionCall(Function::Round, args)
+        | Expression::FunctionCall(Function::Ceil, args)
+        | Expression::FunctionCall(Function::Floor, args) => {
+            args.first().and_then(infer_expression_type)
         }
         // Handle XSD cast functions - they return the target type
         Expression::FunctionCall(Function::Custom(iri), _) => {
@@ -432,30 +457,39 @@ fn expr_to_noir_code(
         }
         
         // Function calls
+        // Numeric arithmetic — round 2 §6.2 wires these into FILTER
+        // expressions via xpath::numeric_*_{int,float,double}.
+        Expression::Add(a, b) => emit_numeric_binary("add", a, b, query, bindings, hidden),
+        Expression::Subtract(a, b) => emit_numeric_binary("subtract", a, b, query, bindings, hidden),
+        Expression::Multiply(a, b) => emit_numeric_binary("multiply", a, b, query, bindings, hidden),
+        Expression::Divide(a, b) => emit_numeric_binary("divide", a, b, query, bindings, hidden),
+        Expression::UnaryPlus(a) => emit_numeric_unary("plus", a, query, bindings, hidden),
+        Expression::UnaryMinus(a) => emit_numeric_unary("minus", a, query, bindings, hidden),
+
         Expression::FunctionCall(func, args) => {
             match func {
-                // Numeric functions
+                // Numeric functions — round 2 §6.2 makes these type-aware:
+                // integer / decimal → xpath::*_int (decimal floor at the
+                // prover's field-element width per Q7); xsd:float →
+                // xpath::*_float (binary32); xsd:double → xpath::*_double
+                // (binary64).
                 Function::Abs => {
                     if args.len() != 1 { return Err("ABS requires 1 argument".into()); }
-                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("(xpath::abs_int({} as i64) as Field)", arg_code))
+                    emit_numeric_unary_function("abs", &args[0], query, bindings, hidden)
                 }
                 Function::Round => {
                     if args.len() != 1 { return Err("ROUND requires 1 argument".into()); }
-                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("(xpath::round_int({} as i64) as Field)", arg_code))
+                    emit_numeric_unary_function("round", &args[0], query, bindings, hidden)
                 }
                 Function::Ceil => {
                     if args.len() != 1 { return Err("CEIL requires 1 argument".into()); }
-                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("(xpath::ceil_int({} as i64) as Field)", arg_code))
+                    emit_numeric_unary_function("ceil", &args[0], query, bindings, hidden)
                 }
                 Function::Floor => {
                     if args.len() != 1 { return Err("FLOOR requires 1 argument".into()); }
-                    let arg_code = expr_to_noir_code(&args[0], query, bindings, hidden)?;
-                    Ok(format!("(xpath::floor_int({} as i64) as Field)", arg_code))
+                    emit_numeric_unary_function("floor", &args[0], query, bindings, hidden)
                 }
-                
+
                 // DateTime functions
                 Function::Year => {
                     if args.len() != 1 { return Err("YEAR requires 1 argument".into()); }
@@ -812,35 +846,18 @@ pub(crate) fn filter_to_noir(
                     }
                 }
                 
-                // Numeric functions
-                Function::Abs => {
-                    if args.len() != 1 { return Err("ABS requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let value_idx = push_hidden(hidden, "abs_value", &term);
-                    let _datatype_idx = push_hidden(hidden, "abs_datatype", &term);
-                    // Use xpath::abs_int for integer types
-                    // The generated code should check numeric type and call appropriate function
-                    Ok(format!("xpath::abs_int(hidden[{}] as i64) as Field", value_idx))
+                // Numeric functions — type-aware per round 2 §6.2 (Q1
+                // decision). The expression-conversion path
+                // (`expr_to_noir_code`) does the type-dispatch; we
+                // delegate so that nested forms like
+                // `FILTER(ABS(xsd:double(?v)) > 5)` get the matching
+                // IEEE 754 path.
+                Function::Abs | Function::Round | Function::Ceil | Function::Floor => {
+                    let expr = Expression::FunctionCall(func.clone(), args.clone());
+                    expr_to_noir_code(&expr, query, bindings, hidden)
                 }
-                Function::Round => {
-                    if args.len() != 1 { return Err("ROUND requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let value_idx = push_hidden(hidden, "round_value", &term);
-                    Ok(format!("xpath::round_int(hidden[{}] as i64) as Field", value_idx))
-                }
-                Function::Ceil => {
-                    if args.len() != 1 { return Err("CEIL requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let value_idx = push_hidden(hidden, "ceil_value", &term);
-                    Ok(format!("xpath::ceil_int(hidden[{}] as i64) as Field", value_idx))
-                }
-                Function::Floor => {
-                    if args.len() != 1 { return Err("FLOOR requires 1 argument".into()); }
-                    let term = expr_to_term(&args[0])?;
-                    let value_idx = push_hidden(hidden, "floor_value", &term);
-                    Ok(format!("xpath::floor_int(hidden[{}] as i64) as Field", value_idx))
-                }
-                
+
+
                 // String functions (return numeric/boolean values only)
                 // Note: These are placeholder implementations that do not perform actual string operations
                 Function::StrLen => {
@@ -1240,3 +1257,188 @@ fn push_hidden_comparison(hidden: &mut Vec<serde_json::Value>, kind: &str, left:
     idx
 }
 
+// =============================================================================
+// NUMERIC ARITHMETIC — round 2 §6.2
+// =============================================================================
+//
+// SPARQL 1.1 §17.3 numeric promotion: the result type is the widest of
+// the operand types (integer < decimal < float < double). Here we:
+// 1. infer each operand's static type via `infer_expression_type`,
+// 2. promote both to the wider type,
+// 3. emit the matching `xpath::numeric_*_{int,float,double}` call.
+//
+// Per Q7 decision (2026-05-03) `xsd:decimal` shares the integer code
+// path — the precision floor is the prover's field-element width.
+
+fn promote_numeric_types(
+    a: Option<NumericSourceType>,
+    b: Option<NumericSourceType>,
+) -> NumericSourceType {
+    use NumericSourceType::*;
+    match (a, b) {
+        (Some(Double), _) | (_, Some(Double)) => Double,
+        (Some(Float), _) | (_, Some(Float)) => Float,
+        _ => Integer,
+    }
+}
+
+/// Coerce an operand to the result type's IEEE 754 wrapper. Integer
+/// operands are routed through `xpath::cast_integer_to_*`; float
+/// operands are widened to double when the result type is double.
+fn coerce_numeric_operand(
+    code: &str,
+    from: Option<NumericSourceType>,
+    to: NumericSourceType,
+) -> String {
+    use NumericSourceType::*;
+    match (from, to) {
+        (_, Integer) => format!("({}) as i64", code),
+        (Some(Double), Double) => format!("xpath::XsdDouble::from_bits({} as u64)", code),
+        (Some(Float), Double) => format!(
+            "xpath::XsdDouble::from_float(xpath::XsdFloat::from_bits({} as u32))",
+            code
+        ),
+        (Some(Integer), Double) | (None, Double) => {
+            format!("xpath::cast_integer_to_double(({}) as i64)", code)
+        }
+        (Some(Float), Float) => format!("xpath::XsdFloat::from_bits({} as u32)", code),
+        (Some(Integer), Float) | (None, Float) => {
+            format!("xpath::cast_integer_to_float(({}) as i64)", code)
+        }
+        // Double → Float is a narrowing cast we don't expect to hit
+        // because promotion always picks the wider; if it ever did we'd
+        // truncate via cast_double_to_float.
+        (Some(Double), Float) => format!(
+            "xpath::cast_double_to_float(xpath::XsdDouble::from_bits({} as u64))",
+            code
+        ),
+    }
+}
+
+/// Emit `?x ⊕ ?y` for ⊕ ∈ {add, subtract, multiply, divide}.
+fn emit_numeric_binary(
+    op: &str,
+    a: &Expression,
+    b: &Expression,
+    query: &QueryInfo,
+    bindings: &BTreeMap<String, Term>,
+    hidden: &mut Vec<serde_json::Value>,
+) -> Result<String, String> {
+    let left_code = expr_to_noir_code(a, query, bindings, hidden)?;
+    let right_code = expr_to_noir_code(b, query, bindings, hidden)?;
+
+    let type_a = infer_expression_type(a);
+    let type_b = infer_expression_type(b);
+    let result = promote_numeric_types(type_a, type_b);
+
+    let left = coerce_numeric_operand(&left_code, type_a, result);
+    let right = coerce_numeric_operand(&right_code, type_b, result);
+
+    let (suffix, returns_field) = match result {
+        NumericSourceType::Integer => ("int", true),
+        NumericSourceType::Float => ("float", false),
+        NumericSourceType::Double => ("double", false),
+    };
+
+    let inner = format!("xpath::numeric_{}_{}({}, {})", op, suffix, left, right);
+    if returns_field {
+        Ok(format!("(({}) as Field)", inner))
+    } else {
+        // Float / double: the SPARQL value is the IEEE 754 wrapper's
+        // bit pattern, packed into a Field for downstream consumers.
+        Ok(format!("(({}).to_bits() as Field)", inner))
+    }
+}
+
+/// Emit `+?x` / `-?x` (unary plus / minus).
+fn emit_numeric_unary(
+    op: &str, // "plus" or "minus"
+    a: &Expression,
+    query: &QueryInfo,
+    bindings: &BTreeMap<String, Term>,
+    hidden: &mut Vec<serde_json::Value>,
+) -> Result<String, String> {
+    let arg_code = expr_to_noir_code(a, query, bindings, hidden)?;
+    let type_a = infer_expression_type(a);
+    let inferred = type_a.unwrap_or(NumericSourceType::Integer);
+
+    match inferred {
+        NumericSourceType::Integer => {
+            let inner = format!(
+                "xpath::numeric_unary_{}_int(({}) as i64)",
+                op, arg_code
+            );
+            Ok(format!("(({}) as Field)", inner))
+        }
+        NumericSourceType::Float | NumericSourceType::Double => {
+            // noir_xpath does not currently expose `numeric_unary_*_float`
+            // / `_double`; emulate via subtract from zero (matches the
+            // pattern used in `arith::neg`).
+            let zero_ctor = match inferred {
+                NumericSourceType::Float => "xpath::cast_integer_to_float(0 as i8)",
+                NumericSourceType::Double => "xpath::cast_integer_to_double(0 as i8)",
+                _ => unreachable!(),
+            };
+            let wrap = match inferred {
+                NumericSourceType::Float => format!(
+                    "xpath::XsdFloat::from_bits({} as u32)", arg_code
+                ),
+                NumericSourceType::Double => format!(
+                    "xpath::XsdDouble::from_bits({} as u64)", arg_code
+                ),
+                _ => unreachable!(),
+            };
+            match op {
+                "plus" => Ok(format!("({}.to_bits() as Field)", wrap)),
+                "minus" => {
+                    let suffix = if matches!(inferred, NumericSourceType::Double) {
+                        "double"
+                    } else {
+                        "float"
+                    };
+                    let inner = format!(
+                        "xpath::numeric_subtract_{}({}, {})", suffix, zero_ctor, wrap
+                    );
+                    Ok(format!("(({}).to_bits() as Field)", inner))
+                }
+                _ => Err(format!("Unsupported unary op: {}", op)),
+            }
+        }
+    }
+}
+
+/// Emit a unary numeric function `ABS(?x)` / `ROUND(?x)` / `CEIL(?x)` /
+/// `FLOOR(?x)` with type-aware dispatch.
+fn emit_numeric_unary_function(
+    op: &str, // "abs" / "round" / "ceil" / "floor"
+    a: &Expression,
+    query: &QueryInfo,
+    bindings: &BTreeMap<String, Term>,
+    hidden: &mut Vec<serde_json::Value>,
+) -> Result<String, String> {
+    let arg_code = expr_to_noir_code(a, query, bindings, hidden)?;
+    let inferred = infer_expression_type(a).unwrap_or(NumericSourceType::Integer);
+
+    match inferred {
+        NumericSourceType::Integer => {
+            // integer / decimal → integer path (decimal floor is field-
+            // element width per Q7).
+            Ok(format!(
+                "(xpath::{}_int(({}) as i64) as Field)",
+                op, arg_code
+            ))
+        }
+        NumericSourceType::Float => {
+            Ok(format!(
+                "(xpath::{}_float(xpath::XsdFloat::from_bits({} as u32)).to_bits() as Field)",
+                op, arg_code
+            ))
+        }
+        NumericSourceType::Double => {
+            Ok(format!(
+                "(xpath::{}_double(xpath::XsdDouble::from_bits({} as u64)).to_bits() as Field)",
+                op, arg_code
+            ))
+        }
+    }
+}

@@ -35,24 +35,6 @@ After that, the originals go.
 | `check-tests.mjs` | Same. | Same. |
 | `test-wasm-compile.mjs` | One-off WASM compile probe; unclear whether it has a current consumer. | Verify-then-delete (no live caller). |
 
-## Q1-driven deletions (`arith::Float` arithmetic — IEEE 754 throughout)
-
-Per `SPARQL_ROADMAP.md` §8.1 (DECIDED 2026-05-03 — adopt IEEE 754
-throughout), the following surface is in the deletion path. Round 2
-§6.2 lands the rewire and the deletion in the same PR.
-
-| Path / surface | Reason | Trigger |
-| --- | --- | --- |
-| `noir/lib/arith/add_floats` | Replaced by `noir_xpath`'s IEEE 754 `XsdFloat` / `XsdDouble`. | Round 2 §6.2. |
-| `noir/lib/arith/sub_floats` | Same. | Same. |
-| `noir/lib/arith/mul_floats` | Same. | Same. |
-| `noir/lib/arith/div_floats` | Same. | Same. |
-| `noir/lib/arith/truncate*` | Same. | Same. |
-| `noir/lib/arith/encode_float` | Same. | Same. |
-| Most `arith` comparison helpers | Same. | Same. |
-
-Estimated volume: ~700 LoC removed in round 2.
-
 ## Doc / metadata candidates (verify before deleting)
 
 Several Markdown files at the repo root were AI-generated summaries.
@@ -81,7 +63,35 @@ the other test entry points may be redundant.
 
 ## Removed
 
-(empty — entries move here as the cleanup lands)
+### Q1-driven deletions (`arith::Float` arithmetic — IEEE 754 throughout)
+
+Per `SPARQL_ROADMAP.md` §8.1 (DECIDED 2026-05-03 — adopt IEEE 754
+throughout). Removed in round 2 §6.2 (commit `64e0466`).
+
+| Path / surface | Removed by |
+| --- | --- |
+| `noir/lib/arith/Float` struct + impl | `64e0466` |
+| `noir/lib/arith/add_floats` | `64e0466` |
+| `noir/lib/arith/sub_floats` | `64e0466` |
+| `noir/lib/arith/mul_floats` | `64e0466` |
+| `noir/lib/arith/div_floats` | `64e0466` |
+| `noir/lib/arith/truncate`, `truncate_float`, `truncate_double` | `64e0466` |
+| `noir/lib/arith/pow10`, `pow10_lookup` | `64e0466` |
+| `noir/lib/arith/encode_float`, `decode_float` | `64e0466` |
+| `noir/lib/arith/float_eq`, `float_gt`, `float_lt`, `float_gte`, `float_lte` | `64e0466` |
+| `noir/lib/arith/FloatSpecial` struct + impl | `64e0466` |
+| `noir/lib/arith/{add,sub,mul,div,neg,pos,abs}_float` (companion `Float`-typed overloads) | `64e0466` |
+| `noir/lib/arith/round_float`, `floor_float`, `ceil_float` | `64e0466` |
+| Float-internal globals (`MAX_MANTISSA`, `EXPONENT_BIAS`, `FLOAT_PRECISION`, `DOUBLE_PRECISION`) | `64e0466` |
+
+Net deletion: 1,039 LoC removed; 413 LoC of replacement IEEE 754 wiring
+added; net ‑626 LoC. The roadmap's "~700 LoC" estimate matches within a
+margin attributable to the refreshed test surface.
+
+The replacements (calls into `noir_xpath`'s IEEE 754 types) live at
+`noir/lib/arith/src/lib.nr`'s reshaped `add` / `sub` / `mul` / `div` /
+`neg` / `pos` / `abs` / `round` / `ceil` / `floor` and the new
+`coerce_to_float` / `coerce_to_double` helpers.
 
 ## Maintenance
 
