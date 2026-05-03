@@ -698,6 +698,74 @@ fn inner_only_exists_variables_are_renamed() {
     assert!(result.sparql_nr.contains("pub(crate) struct Variables {\n  pub(crate) s: Field,\n}"));
 }
 
+/// ORDER BY keys must be threaded into `circuit_vars` so the
+/// disclosed multiset has the columns the verifier needs to sort
+/// (audit item 3, sparql_noir #39 row, 2026-05-03).
+#[test]
+fn order_by_key_is_threaded_into_circuit_vars() {
+    // Order by ?o, project only ?s. Without the fix, ?o would be
+    // bound by the BGP but not disclosed, leaving the verifier
+    // unable to apply the ORDER BY direction.
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . } ORDER BY ?o";
+    let result = transform_query(q).expect("transform should succeed");
+    let variables = result
+        .metadata
+        .get("variables")
+        .and_then(|v| v.as_array())
+        .expect("variables array");
+    let names: Vec<&str> = variables.iter().filter_map(|v| v.as_str()).collect();
+    assert!(names.contains(&"o"), "?o (order-by key) must be in circuit_vars: {:?}", names);
+    assert!(names.contains(&"s"), "?s (projected) must be in circuit_vars: {:?}", names);
+}
+
+/// ORDER BY referencing an unbound variable is rejected — the
+/// verifier cannot sort by a variable that the BGP never assigned
+/// (audit follow-up to item 3).
+#[test]
+fn order_by_unbound_variable_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:knows ?o . } ORDER BY ?nowhere";
+    match transform_query(q) {
+        Ok(_) => panic!("expected ORDER BY ?nowhere to be rejected"),
+        Err(err) => assert!(
+            err.contains("ORDER BY") && err.contains("nowhere"),
+            "expected error to mention ORDER BY and the unbound name, got: {}",
+            err
+        ),
+    }
+}
+
+/// Top-level ORDER BY by a non-variable expression must propagate
+/// the `order_expression_to_key` error rather than silently dropping
+/// the key (audit item 5, sparql_noir #39 row).
+#[test]
+fn top_level_order_by_unsupported_expression_is_rejected() {
+    // `ORDER BY (?s + ?o)` is parsed by spargebra into an
+    // OrderExpression::Asc(Expression::Add(_, _)) — the IR layer
+    // only supports variable keys, so this must surface as an error
+    // rather than be silently dropped.
+    let q = "PREFIX ex: <http://example.org/>\n\
+             PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\
+             SELECT ?s ?o WHERE { ?s ex:knows ?o . } ORDER BY (?s)";
+    // The simple variable case still works.
+    transform_query(q).expect("ORDER BY (?s) should succeed");
+
+    // Now an expression that lower.rs's `order_expression_to_key` does
+    // not yet support: a function call. The error must surface.
+    let q2 = "PREFIX ex: <http://example.org/>\n\
+              PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\
+              SELECT ?s ?o WHERE { ?s ex:age ?o . } ORDER BY (xsd:integer(?o) + 1)";
+    match transform_query(q2) {
+        Ok(_) => panic!("expected ORDER BY by an expression to be rejected"),
+        Err(err) => assert!(
+            err.contains("ORDER BY") || err.contains("non-variable"),
+            "expected error to mention ORDER BY semantics, got: {}",
+            err
+        ),
+    }
+}
+
 /// Inner-only **predicate** variables must also be renamed in metadata
 /// (per roborev follow-up). A `?p` predicate inside EXISTS would
 /// otherwise leak its original name and let downstream matchers

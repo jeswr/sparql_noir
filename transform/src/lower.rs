@@ -1817,7 +1817,7 @@ fn aggregate_expression_to_kind(
 /// Slice { inner: Project { inner: OrderBy { inner: Extend* {
 ///     Group { inner: <pattern>, aggregates: [...] } } } } }
 /// ```
-fn strip_post_processing(gp: &GraphPattern) -> (&GraphPattern, PostProcessing) {
+fn strip_post_processing(gp: &GraphPattern) -> Result<(&GraphPattern, PostProcessing), String> {
     let mut post = PostProcessing::empty();
     let mut current = gp;
     loop {
@@ -1839,19 +1839,22 @@ fn strip_post_processing(gp: &GraphPattern) -> (&GraphPattern, PostProcessing) {
                 current = inner;
             }
             // Top-level ORDER BY is rare (it's normally inside the
-            // Project), but unwrap it defensively.
+            // Project), but unwrap it defensively. Propagate the
+            // error rather than silently dropping unsupported keys —
+            // an unsupported expression here would otherwise vanish
+            // and the verifier would receive an unsorted disclosed
+            // multiset (audit item 5, sparql_noir #39 row).
             GraphPattern::OrderBy { inner, expression } => {
                 for e in expression {
-                    if let Ok(key) = order_expression_to_key(e) {
-                        post.order_by.push(key);
-                    }
+                    let key = order_expression_to_key(e)?;
+                    post.order_by.push(key);
                 }
                 current = inner;
             }
             _ => break,
         }
     }
-    (current, post)
+    Ok((current, post))
 }
 
 /// Does the eventual leaf of this pattern (after stripping
@@ -1925,7 +1928,7 @@ pub(crate) fn process_query_with_options(
     gp: &GraphPattern,
     options: &TransformOptions,
 ) -> Result<QueryInfo, String> {
-    let (inner, mut post) = strip_post_processing(gp);
+    let (inner, mut post) = strip_post_processing(gp)?;
 
     match inner {
         GraphPattern::Project { inner, variables } => {
@@ -1972,7 +1975,7 @@ pub(crate) fn process_query_with_options(
             // circuit bindings. Replace each aggregate output in the
             // projected variable list with its source variable, then
             // dedupe while preserving the first-seen order.
-            let circuit_vars = if aggregates.is_empty() {
+            let mut circuit_vars: Vec<String> = if aggregates.is_empty() {
                 vars
             } else {
                 let agg_outputs: std::collections::HashSet<String> =
@@ -2013,6 +2016,41 @@ pub(crate) fn process_query_with_options(
                     result
                 }
             };
+
+            // ORDER BY keys must be disclosed too — otherwise the
+            // verifier can't sort the multiset (audit item 3,
+            // sparql_noir #39 row). Append any order-by variable not
+            // already in `circuit_vars`, preserving first-seen order
+            // and skipping `__`-prefixed witnesses.
+            let already: std::collections::HashSet<String> =
+                circuit_vars.iter().cloned().collect();
+            for key in &post.order_by {
+                if already.contains(&key.variable) || key.variable.starts_with("__") {
+                    continue;
+                }
+                // Reject ORDER BY references to a non-existent variable.
+                let bound = pattern
+                    .bindings
+                    .iter()
+                    .any(|b| b.variable == key.variable);
+                let in_branches = pattern
+                    .union_branches
+                    .as_ref()
+                    .map(|bs| {
+                        bs.iter()
+                            .any(|br| br.bindings.iter().any(|b| b.variable == key.variable))
+                    })
+                    .unwrap_or(false);
+                if !bound && !in_branches {
+                    return Err(format!(
+                        "ORDER BY key ?{} is not bound by the query body — \
+                         the verifier cannot sort the disclosed multiset by \
+                         an unknown variable",
+                        key.variable
+                    ));
+                }
+                circuit_vars.push(key.variable.clone());
+            }
 
             Ok(QueryInfo {
                 variables: circuit_vars,
