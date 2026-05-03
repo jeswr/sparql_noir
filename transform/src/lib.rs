@@ -43,87 +43,10 @@ fn reset_optional_counter() {
     OPTIONAL_BLOCK_COUNTER.store(0, Ordering::SeqCst);
 }
 
-// =============================================================================
-// DATA TYPES
-// =============================================================================
-
-/// Represents a term in the generated Noir circuit.
-#[derive(Clone, Debug)]
-pub enum Term {
-    Variable(String),
-    Input(usize, usize),
-    Static(GroundTerm),
-}
-
-#[derive(Clone, Debug)]
-pub struct Assertion(Term, Term);
-
-#[derive(Clone, Debug)]
-pub struct Binding {
-    variable: String,
-    term: Term,
-}
-
-#[derive(Clone, Debug)]
-pub enum GraphContext {
-    Default,
-    NamedNode(String),
-    Variable(String),
-}
-
-#[derive(Clone, Debug)]
-pub struct ContextualizedTriple {
-    pattern: TriplePattern,
-    graph: GraphContext,
-}
-
-/// Represents an OPTIONAL block with its patterns, bindings, assertions, and filters
-#[derive(Clone, Debug)]
-pub struct OptionalBlock {
-    /// Unique identifier for this optional block
-    pub id: usize,
-    /// Patterns in this optional block
-    pub patterns: Vec<ContextualizedTriple>,
-    /// Bindings in this optional block  
-    pub bindings: Vec<Binding>,
-    /// Assertions in this optional block
-    pub assertions: Vec<Assertion>,
-    /// Filters that apply when this optional is matched
-    pub filters: Vec<Expression>,
-    /// Nested optional blocks within this one
-    pub nested_optionals: Vec<OptionalBlock>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PatternInfo {
-    /// Required patterns (always present)
-    patterns: Vec<ContextualizedTriple>,
-    bindings: Vec<Binding>,
-    assertions: Vec<Assertion>,
-    filters: Vec<Expression>,
-    union_branches: Option<Vec<PatternInfo>>,
-    /// Optional blocks that may or may not be matched
-    optional_blocks: Vec<OptionalBlock>,
-}
-
-impl PatternInfo {
-    fn new() -> Self {
-        Self {
-            patterns: Vec::new(),
-            bindings: Vec::new(),
-            assertions: Vec::new(),
-            filters: Vec::new(),
-            union_branches: None,
-            optional_blocks: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct QueryInfo {
-    variables: Vec<String>,
-    pattern: PatternInfo,
-}
+pub use crate::ir::{
+    Assertion, Binding, ContextualizedTriple, GraphContext, OptionalBlock, PatternInfo,
+    QueryInfo, Term,
+};
 
 // =============================================================================
 // RESULT TYPES FOR WASM
