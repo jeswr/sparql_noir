@@ -1,0 +1,93 @@
+name: Require Copilot review
+
+# Gate: merge to `main` is blocked until `copilot-pull-request-reviewer[bot]`
+# has posted at least one review on the PR. This workflow exposes a required
+# status check (`copilot-review-posted`) consumed by the repo ruleset on
+# `~DEFAULT_BRANCH`.
+#
+# Rationale: per `notes/research/pr-review-audit-2026-05-03.md`, 15 of 56
+# merged-with-review PRs across the three sub-repos were merged BEFORE
+# Copilot's first review timestamp. This workflow closes that gap. It does
+# *not* enforce thread resolution — only that a review has been posted.
+#
+# Exemptions (the check passes without a review):
+#   - Author is `dependabot[bot]` — Copilot does not review dep bumps.
+#   - Author is `Copilot` (the coding agent) — Copilot does not review its
+#     own PRs.
+#   - PR is draft — Copilot only reviews ready-for-review PRs.
+#
+# This file is managed by `scripts/sync-standards.sh`. Edit the canonical at
+# `templates/sub-repo/ts-circuit/.github/workflows/require-copilot-review.yml`.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  copilot-review-posted:
+    name: copilot-review-posted
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "number=${{ github.event.pull_request.number }}" >>"$GITHUB_OUTPUT"
+          echo "author=${{ github.event.pull_request.user.login }}" >>"$GITHUB_OUTPUT"
+          echo "draft=${{ github.event.pull_request.draft }}" >>"$GITHUB_OUTPUT"
+
+      - name: Exempt automated / draft PRs
+        id: exempt
+        run: |
+          set -euo pipefail
+          author='${{ steps.pr.outputs.author }}'
+          draft='${{ steps.pr.outputs.draft }}'
+          if [[ "$author" == "dependabot[bot]" ]]; then
+            echo "reason=dependabot author — Copilot does not review dep bumps" >>"$GITHUB_OUTPUT"
+            echo "exempt=true" >>"$GITHUB_OUTPUT"
+          elif [[ "$author" == "Copilot" ]] || [[ "$author" == "copilot-swe-agent[bot]" ]]; then
+            echo "reason=Copilot-authored PR — Copilot does not review itself" >>"$GITHUB_OUTPUT"
+            echo "exempt=true" >>"$GITHUB_OUTPUT"
+          elif [[ "$draft" == "true" ]]; then
+            echo "reason=draft PR — Copilot reviews ready-for-review PRs only" >>"$GITHUB_OUTPUT"
+            echo "exempt=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "exempt=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip — exempt
+        if: steps.exempt.outputs.exempt == 'true'
+        run: |
+          echo "::notice::Exempt: ${{ steps.exempt.outputs.reason }}"
+
+      - name: Check that Copilot has posted a review
+        if: steps.exempt.outputs.exempt != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The review-summary endpoint reports the bot as
+          # `copilot-pull-request-reviewer[bot]`; the review-line-comments
+          # endpoint reports `Copilot` (same identity, different surface).
+          # We check `/reviews` which uses the bot login.
+          reviewers=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length')
+          if [[ "$reviewers" -ge 1 ]]; then
+            echo "::notice::Copilot has posted $reviewers review(s) on PR #$PR_NUMBER."
+            exit 0
+          fi
+          echo "::error::No review from copilot-pull-request-reviewer[bot] yet on PR #$PR_NUMBER."
+          echo "If Copilot review has not been requested, request one. The check"
+          echo "re-runs on each pull_request_review event, so it will turn green"
+          echo "once Copilot posts."
+          exit 1
