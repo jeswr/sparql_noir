@@ -14,18 +14,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync, spawnSync } from 'child_process';
 import N3 from 'n3';
-import dereferenceToStore from 'rdf-dereference-store';
-import { RDFC10 } from 'rdfjs-c14n';
 import type { Term, Quad, Literal } from '@rdfjs/types';
-import { quadToStringQuad, stringQuadToQuad } from 'rdf-string-ttl';
+import { stringQuadToQuad } from 'rdf-string-ttl';
 import { fileURLToPath } from 'url';
 
-// Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Dynamically import encode.ts
-const { getTermEncodingString, runJson } = await import('../../src/encode.js');
 
 // Re-export useful types
 export interface TermJson {
@@ -201,62 +195,6 @@ function quadMatchesPattern(
 }
 
 /**
- * Sign RDF data and get encoded triples with merkle proofs
- */
-export async function signData(dataPath: string): Promise<SignedData> {
-  const tempOutput = path.join('/tmp', `signed-${Date.now()}.json`);
-  
-  try {
-    // Use the sign script to process the data
-    execSync(`npx tsx src/scripts/sign.ts -i "${dataPath}" -o "${tempOutput}"`, {
-      cwd: path.resolve(__dirname, '../..'),
-      stdio: 'pipe',
-    });
-    
-    const signedData = JSON.parse(fs.readFileSync(tempOutput, 'utf-8')) as SignedData;
-    return signedData;
-  } finally {
-    if (fs.existsSync(tempOutput)) {
-      fs.unlinkSync(tempOutput);
-    }
-  }
-}
-
-/**
- * Transform a SPARQL query and get circuit metadata
- */
-export async function transformQuery(queryPath: string): Promise<CircuitMetadata> {
-  const projectRoot = path.resolve(__dirname, '../..');
-  const transformPath = path.join(projectRoot, 'transform', 'target', 'release', 'transform');
-  
-  // Ensure transform is built
-  if (!fs.existsSync(transformPath)) {
-    execSync('cargo build --release', {
-      cwd: path.join(projectRoot, 'transform'),
-      stdio: 'pipe',
-    });
-  }
-  
-  // Run transform (outputs to noir_prove/ in project root)
-  const result = spawnSync(transformPath, ['-q', queryPath], {
-    encoding: 'utf-8',
-    cwd: projectRoot,
-  });
-  
-  if (result.status !== 0) {
-    throw new Error(`Transform failed: ${result.stderr || result.stdout}`);
-  }
-  
-  // Read metadata from fixed output location
-  const metadataPath = path.join(projectRoot, 'noir_prove', 'metadata.json');
-  if (!fs.existsSync(metadataPath)) {
-    throw new Error('Transform did not produce metadata.json');
-  }
-  
-  return JSON.parse(fs.readFileSync(metadataPath, 'utf-8')) as CircuitMetadata;
-}
-
-/**
  * Convert a binding (map of variable names to string values) to RDF.js terms
  */
 export function parseBinding(binding: Record<string, string>): Map<string, Term> {
@@ -427,46 +365,25 @@ export function generateCheckBindingInputs(
 }
 
 /**
- * High-level function to generate all checkBinding inputs for a test case
- */
-export async function generateTestInputs(
-  queryPath: string,
-  dataPath: string,
-  bindings: Array<Record<string, string>>
-): Promise<Array<{ binding: Record<string, string>; inputs: CheckBindingInputs | null }>> {
-  // Transform query to get metadata
-  const metadata = await transformQuery(queryPath);
-  
-  // Sign data to get encoded triples
-  const signedData = await signData(dataPath);
-  
-  // Generate inputs for each binding
-  const results: Array<{ binding: Record<string, string>; inputs: CheckBindingInputs | null }> = [];
-  
-  for (const binding of bindings) {
-    const inputs = generateCheckBindingInputs(metadata, signedData, binding);
-    results.push({ binding, inputs });
-  }
-  
-  return results;
-}
-
-/**
- * Alternative: Sign data in-memory without writing to file
+ * Sign RDF data and return encoded triples with merkle proofs.
+ *
+ * The `format` parameter is currently accepted for forward compatibility but
+ * not propagated to the sign script (which auto-detects via the file
+ * extension we hand it).
  */
 export async function signDataInMemory(dataContent: string, format: string = 'text/turtle'): Promise<SignedData> {
-  // Write to temp file
+  void format;
   const tempInput = path.join('/tmp', `data-${Date.now()}.ttl`);
   const tempOutput = path.join('/tmp', `signed-${Date.now()}.json`);
-  
+
   try {
     fs.writeFileSync(tempInput, dataContent);
-    
+
     execSync(`npx tsx src/scripts/sign.ts -i "${tempInput}" -o "${tempOutput}"`, {
       cwd: path.resolve(__dirname, '../..'),
       stdio: 'pipe',
     });
-    
+
     return JSON.parse(fs.readFileSync(tempOutput, 'utf-8')) as SignedData;
   } finally {
     if (fs.existsSync(tempInput)) fs.unlinkSync(tempInput);
@@ -475,15 +392,38 @@ export async function signDataInMemory(dataContent: string, format: string = 'te
 }
 
 /**
- * Transform query in-memory without writing to file
+ * Transform a SPARQL query string and return its circuit metadata.
  */
 export async function transformQueryInMemory(queryContent: string): Promise<CircuitMetadata> {
   const projectRoot = path.resolve(__dirname, '../..');
+  const transformPath = path.join(projectRoot, 'transform', 'target', 'release', 'transform');
   const tempQuery = path.join('/tmp', `query-${Date.now()}.rq`);
-  
+
   try {
     fs.writeFileSync(tempQuery, queryContent);
-    return await transformQuery(tempQuery);
+
+    if (!fs.existsSync(transformPath)) {
+      execSync('cargo build --release', {
+        cwd: path.join(projectRoot, 'transform'),
+        stdio: 'pipe',
+      });
+    }
+
+    const result = spawnSync(transformPath, ['-q', tempQuery], {
+      encoding: 'utf-8',
+      cwd: projectRoot,
+    });
+
+    if (result.status !== 0) {
+      throw new Error(`Transform failed: ${result.stderr || result.stdout}`);
+    }
+
+    const metadataPath = path.join(projectRoot, 'noir_prove', 'metadata.json');
+    if (!fs.existsSync(metadataPath)) {
+      throw new Error('Transform did not produce metadata.json');
+    }
+
+    return JSON.parse(fs.readFileSync(metadataPath, 'utf-8')) as CircuitMetadata;
   } finally {
     if (fs.existsSync(tempQuery)) fs.unlinkSync(tempQuery);
   }
