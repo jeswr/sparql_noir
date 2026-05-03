@@ -15,6 +15,8 @@ mod lower;
 mod emit;
 mod metadata;
 
+pub use crate::expr::{ieee754_equal, ieee754_less_than, FloatSpecial};
+
 use crate::expr::{filter_to_noir, serialize_term};
 use crate::lower::{process_query, reset_optional_counter};
 use crate::metadata::contextualized_pattern_to_json;
