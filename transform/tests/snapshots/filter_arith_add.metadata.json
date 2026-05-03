@@ -1,0 +1,157 @@
+{
+  "aggregates": [],
+  "hiddenInputs": [
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "a"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "b"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "5"
+        }
+      },
+      "type": "customComputed"
+    }
+  ],
+  "hidden_inputs": [
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "a"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "b"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "5"
+        }
+      },
+      "type": "customComputed"
+    }
+  ],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "a"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/a"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "b"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/b"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "a"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/a"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "b"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/b"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "limit": null,
+  "num_optionals": 0,
+  "offset": null,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "orderBy": [],
+  "order_by": [],
+  "skip_signing": false,
+  "total_patterns": 2,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s"
+  ]
+}

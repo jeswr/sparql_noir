@@ -36,8 +36,8 @@ Sources cross-checked: `transform/src/lib.rs` (the only Rust transform body), `n
 | Minus | N | n/a | Rejected; algebraic negation not implemented. |
 | Graph | Y | `process_graph_pattern::Graph` (~L1796) | Stores graph IRI in 4th term of `Triple`; supports both `GRAPH <iri>` and `GRAPH ?g`. |
 | Path (link, inverse, alternative, ZeroOrOne) | Y | `expand_path` (~L1511) | Unfolds at transform time into BGP/Join/Union. `Sequence` only for direct named-node legs. |
-| Path (Sequence of paths, +, *) | Partial | spec/preprocessing.md | Documented as preprocessing; transform itself does not bound-unroll Kleene paths. |
-| Path (NPS `!p`) | N | n/a | Negated property set unsupported. |
+| Path (Sequence of paths, +, *) | Y | `lower::expand_path` / `kleene_unroll` | Bounded unrolling to `path_segment_max` (default 4) — `+` over depths 1..=N, `*` adds zero-step branch. Path-length leaks (documented disclosure). |
+| Path (NPS `!p`) | Y | `lower::expand_negated_property_set` | Single triple plus conjunction of `?p != p_i` filters. `^!P` handled via `normalise_path` push-down. |
 | Extend (BIND) | Partial | `process_graph_pattern::Extend` (~L1682) | Only Variable / NamedNode / Literal RHS. Arithmetic, function calls in BIND rejected. |
 | Group / Aggregate | N | rejected by `ts.js` skip-list | Out of scope as currently scoped. |
 | Service | N | rejected | Out of scope. |
@@ -270,12 +270,12 @@ Land structural changes that unblock everything else, plus the cheap functional 
 
 Make the existing partial features actually correct, and clean up OPTIONAL so it scales.
 
-- §6.2: pick IEEE 754 (recommended) and delete `arith::Float`'s arithmetic; rewire ABS/ROUND/CEIL/FLOOR to type-aware float/double/integer paths.
-- §3 Kleene paths `+` and `*` with config-driven max depth (`path_segment_max`).
-- §3 NPS `!p` (small win, mostly mechanical).
-- §5 unconstrained `div_int`/`div_float` and `truncate` rewrites.
-- Wire numeric arithmetic in FILTER expressions (`?x + ?y > 5`, etc.) — `arith::add`/`sub`/`mul`/`div` already exist behind a clean API; just call them from the new `expr.rs`.
-- Defensive cap on the number of OPTIONAL blocks accepted by the transform (e.g. 4) to prevent accidental `2^n` circuit generation. Full collapse is deferred to round 3 because, per §6.4, it requires a sound NOT-EXISTS primitive.
+- [x] §6.2: pick IEEE 754 (recommended) and delete `arith::Float`'s arithmetic; rewire ABS/ROUND/CEIL/FLOOR to type-aware float/double/integer paths. **Landed in PR #38.**
+- [x] §3 Kleene paths `+` and `*` with config-driven max depth (`path_segment_max`). **Landed in PR #40 (round 2 remaining).** Bounded unrolling to `TransformOptions::path_segment_max` (default 4); `+` is `UNION` over depths 1..=N, `*` adds an explicit zero-step branch (`FILTER(true)` for ground-equal endpoints, `FILTER(false)` for ground-unequal).
+- [x] §3 NPS `!p` (small win, mostly mechanical). **Landed in PR #40.** Single triple `s ?np o` plus a conjunction of inequality filters. `^!{…}` and Reverse-pushdown handled via `normalise_path`.
+- [ ] §5 unconstrained `div_int`/`div_float` and `truncate` rewrites. **Deferred** to a later round — out of scope for round 2 remaining; not on the critical path now that IEEE 754 has landed.
+- [x] Wire numeric arithmetic in FILTER expressions (`?x + ?y > 5`, etc.) — `arith::add`/`sub`/`mul`/`div` already exist behind a clean API; just call them from the new `expr.rs`. **Wired in PR #38** (IEEE 754 throughout); end-to-end snapshot coverage added in PR #40.
+- [x] Defensive cap on the number of OPTIONAL blocks accepted by the transform (e.g. 4) to prevent accidental `2^n` circuit generation. Full collapse is deferred to round 3 because, per §6.4, it requires a sound NOT-EXISTS primitive. **Landed in PR #40** as `TransformOptions::optional_cap` (default 4).
 
 **Definition of done:** SPARQL 1.0 `type-promotion` and `cast` suites pass; numeric arithmetic in filters works; queries with > N OPTIONALs are explicitly rejected with a clear error rather than silently exploding.
 
