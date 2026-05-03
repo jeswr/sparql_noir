@@ -1,0 +1,59 @@
+name: Round 3 CI (trimmed)
+
+# This workflow is the auto-merge gate for the round-3 main-event PR
+# (`feat/not-exists-sorted-commitment`). The full benchmark / circuit
+# build matrix is restored by the final commit on the branch
+# (`chore(ci): restore full CI matrix before merge`). Until then we
+# run only the test-bearing jobs that change in this PR — the Rust
+# transform tests (snapshots + behaviour) plus the TS build smoke.
+#
+# Per workspace memory feedback_offload_to_ci.md and
+# feedback_draft_pr_minimal_ci.md.
+
+on:
+  push:
+    branches:
+      - 'feat/not-exists-sorted-commitment'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  transform-tests:
+    name: cargo test transform
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: transform -> target
+      - run: cargo test --manifest-path transform/Cargo.toml --release
+
+  ts-build:
+    name: tsc smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm install
+      - run: npm run build:tsc
+
+  test-summary:
+    name: test-summary (auto-merge gate)
+    runs-on: ubuntu-latest
+    needs: [transform-tests, ts-build]
+    if: always()
+    steps:
+      - name: Aggregate gate
+        run: |
+          if [ "${{ needs.transform-tests.result }}" != "success" ] || \
+             [ "${{ needs.ts-build.result }}" != "success" ]; then
+            echo "One of the gating jobs failed."
+            exit 1
+          fi
+          echo "All gating jobs passed."

@@ -5,6 +5,14 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+    # Skip the heavy benchmark run on doc-only / spec-only PRs and on
+    # the round-3 main-event branch (which runs its own trimmed CI in
+    # round3-ci.yml). Full matrix restored by the final pre-merge commit.
+    paths-ignore:
+      - 'spec/**'
+      - 'SPARQL_ROADMAP.md'
+      - 'DELETION_CANDIDATES.md'
+      - 'questions/**'
   # Allow manual trigger
   workflow_dispatch:
 

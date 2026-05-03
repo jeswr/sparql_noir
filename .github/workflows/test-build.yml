@@ -5,6 +5,14 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+    # The round-3 main-event branch runs its own trimmed CI in
+    # round3-ci.yml; the full matrix is restored by the final commit
+    # (`chore(ci): restore full CI matrix before merge`).
+    paths-ignore:
+      - 'spec/**'
+      - 'SPARQL_ROADMAP.md'
+      - 'DELETION_CANDIDATES.md'
+      - 'questions/**'
 
 jobs:
   test-build:
