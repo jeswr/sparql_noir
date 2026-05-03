@@ -792,6 +792,16 @@ fn absent_terms_from_pattern(ct: &ContextualizedTriple) -> Result<[Term; 4], Str
 /// hash. We synthesise free-variable placeholders (`?__br_*`) so the
 /// metadata round-trips deterministically; their `__`-prefix excludes
 /// them from projections (`process_query` ~L780).
+///
+/// The `graph` argument fixes the placeholder's graph context. Pass
+/// `GraphContext::Default` when the placeholder must be free across
+/// all graphs (the round-3-follow-up easy-OPTIONAL collapse uses this
+/// mode so the unmatched-arm placeholders can witness ANY valid leaf
+/// regardless of which graph the inner pattern was scoped to —
+/// roborev finding 2026-05-03, second high). Pass the source pattern's
+/// graph context for legacy callers (NOT EXISTS / MINUS — already
+/// constrained to non-`GRAPH`-scoped inner patterns by the round-3
+/// main event).
 fn bracket_placeholder_pattern(graph: &GraphContext) -> ContextualizedTriple {
     use std::sync::atomic::Ordering as A;
     let id = BRACKET_COUNTER.fetch_add(1, A::SeqCst);
@@ -1700,15 +1710,29 @@ fn process_graph_pattern_inner(
                 let bracket_left_idx = offset + 1;
                 let bracket_right_idx = offset + 2;
 
+                // **Graph context is also free** — `GraphContext::Default`
+                // serialises as `DefaultGraph` in metadata, which the
+                // prover treats as a wildcard (alongside `Variable`-typed
+                // graph terms). Passing through `inner_pattern.graph`
+                // would, for `OPTIONAL { GRAPH ex:g { ... } }` blocks,
+                // pin the placeholder to graph `ex:g` and prevent the
+                // unmatched arm from witnessing any leaf when `ex:g`
+                // happens to be empty (roborev finding 2026-05-03,
+                // second high — same family as the first finding,
+                // generalised to the graph dimension). The matched-arm
+                // assertions in `checkBinding` still pin
+                // `bgp[matched_idx].terms[3]` to the substituted graph
+                // term, so the matched arm only succeeds when the
+                // prover actually witnessed a leaf in the right graph.
                 left_info
                     .patterns
-                    .push(bracket_placeholder_pattern(&inner_pattern.graph));
+                    .push(bracket_placeholder_pattern(&GraphContext::Default));
                 left_info
                     .patterns
-                    .push(bracket_placeholder_pattern(&inner_pattern.graph));
+                    .push(bracket_placeholder_pattern(&GraphContext::Default));
                 left_info
                     .patterns
-                    .push(bracket_placeholder_pattern(&inner_pattern.graph));
+                    .push(bracket_placeholder_pattern(&GraphContext::Default));
 
                 left_info.easy_optionals.push(EasyOptional {
                     id: next_optional_id(),

@@ -696,6 +696,65 @@ fn optional_inner_only_var_falls_through_to_power_set() {
     );
 }
 
+/// Round-3 follow-up — graph-scoped easy-case OPTIONAL. The
+/// placeholder slots' graph context must be `DefaultGraph` (a
+/// prover-side wildcard), NOT the inner pattern's named graph —
+/// otherwise the unmatched arm cannot witness when the named graph
+/// has no leaves (roborev finding 2026-05-03, second high). The
+/// matched-arm assertions in `checkBinding` still pin the graph
+/// position to the substituted graph term.
+#[test]
+fn optional_easy_case_graph_scoped_uses_wildcard_placeholders() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?o . \
+               OPTIONAL { GRAPH ex:g { ?s ex:type ex:Person . } } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(easy.len(), 1, "graph-scoped easy OPTIONAL must collapse");
+
+    // The placeholder slots in `inputPatterns` (slots 1-3 after the
+    // outer triple) must have `DefaultGraph` graph context, not the
+    // named graph `ex:g`. Otherwise the prover-side resolver would
+    // require quads from `ex:g` for those slots even in the
+    // unmatched arm.
+    let patterns = result
+        .metadata
+        .get("inputPatterns")
+        .and_then(|v| v.as_array())
+        .expect("inputPatterns array");
+    assert_eq!(patterns.len(), 4, "expected 1 outer + 3 placeholder slots");
+    for i in 1..=3 {
+        let graph = patterns[i].get("graph").expect("graph field");
+        let term_type = graph.get("termType").and_then(|v| v.as_str());
+        assert_eq!(
+            term_type,
+            Some("DefaultGraph"),
+            "placeholder slot {} must have wildcard (DefaultGraph) graph, got {:?}",
+            i,
+            graph
+        );
+    }
+    // The checkBinding body must still pin the matched-arm graph
+    // position to `ex:g`, otherwise the matched arm would accept
+    // any-graph witnesses and the disjunction would always be true.
+    assert!(
+        result
+            .sparql_nr
+            .contains("http://example.org/g")
+            && result
+                .sparql_nr
+                .contains("bgp[1].terms[3]"),
+        "matched arm should pin bgp[1].terms[3] to ex:g, got:\n{}",
+        result.sparql_nr
+    );
+}
+
 /// Multi-triple inner `OPTIONAL` falls through to power-set even when
 /// every variable is outer-bound — easy-case scope is single-triple
 /// inner only. Round-4's prefix-tree commitments will lift this.
