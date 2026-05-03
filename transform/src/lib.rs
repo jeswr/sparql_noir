@@ -2,6 +2,18 @@
 //!
 //! This library provides the core transformation functionality that can be
 //! compiled to WebAssembly for use in JavaScript/TypeScript environments.
+//!
+//! The crate is laid out as a layered IR (see SPARQL_ROADMAP.md §6.1):
+//! `parse` → `ir` → `lower` → `expr` → `emit` / `metadata`. The internal
+//! module skeletons are present but currently empty; subsequent commits move
+//! their contents out of this file one layer at a time.
+
+mod parse;
+mod ir;
+mod expr;
+mod lower;
+mod emit;
+mod metadata;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;

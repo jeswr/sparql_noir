@@ -1,0 +1,52 @@
+{
+  "hiddenInputs": [],
+  "hidden_inputs": [],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "p"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "p"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "num_optionals": 0,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "skip_signing": false,
+  "total_patterns": 1,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s"
+  ]
+}

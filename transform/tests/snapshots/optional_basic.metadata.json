@@ -1,0 +1,133 @@
+{
+  "hiddenInputs": [],
+  "hidden_inputs": [],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "p"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/age"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "p"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "p"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/age"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "p"
+      }
+    }
+  ],
+  "num_optionals": 1,
+  "optionalPatterns": [
+    {
+      "id": 0,
+      "patterns": [
+        {
+          "graph": {
+            "termType": "DefaultGraph"
+          },
+          "object": {
+            "termType": "Variable",
+            "value": "o"
+          },
+          "predicate": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          },
+          "subject": {
+            "termType": "Variable",
+            "value": "p"
+          }
+        }
+      ]
+    }
+  ],
+  "optional_patterns": [
+    {
+      "id": 0,
+      "patterns": [
+        {
+          "graph": {
+            "termType": "DefaultGraph"
+          },
+          "object": {
+            "termType": "Variable",
+            "value": "o"
+          },
+          "predicate": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          },
+          "subject": {
+            "termType": "Variable",
+            "value": "p"
+          }
+        }
+      ]
+    }
+  ],
+  "skip_signing": false,
+  "total_patterns": 2,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s",
+    "o"
+  ]
+}
