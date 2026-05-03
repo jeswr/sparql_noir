@@ -14,7 +14,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use transform::transform_query;
+use transform::{transform_query, transform_with_opts, TransformOptions};
 
 struct Case {
     name: &'static str,
@@ -182,7 +182,125 @@ const CORPUS: &[Case] = &[
         name: "limit_offset",
         query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:knows ?o . } LIMIT 10 OFFSET 5",
     },
+    // Round 2 §7 — Kleene `+` / `*`, NPS `!p`, FILTER arithmetic.
+    Case {
+        name: "path_one_or_more",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows+ ?o . }",
+    },
+    Case {
+        name: "path_zero_or_more",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows* ?o . }",
+    },
+    Case {
+        name: "path_nps_single",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s !ex:knows ?o . }",
+    },
+    Case {
+        name: "path_nps_set",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s !(ex:a|ex:b|ex:c) ?o . }",
+    },
+    Case {
+        name: "path_reverse_nps",
+        // `^!ex:knows` — exercises `normalise_path`'s push-down for
+        // `Reverse(NegatedPropertySet(_))` (single triple with subject /
+        // object swapped, plus the inequality filter).
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ^!ex:knows ?o . }",
+    },
+    Case {
+        name: "path_one_or_more_reverse",
+        // `^(ex:knows+)` ≡ `(^ex:knows)+` — exercises Kleene over a
+        // reversed leaf, validating `^(p+)` → `(^p)+`.
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ^(ex:knows+) ?o . }",
+    },
+    Case {
+        name: "filter_arith_add",
+        // `?a + ?b > 5` — wires xpath::numeric_add_int via expr.rs.
+        query: "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ex:a ?a . ?s ex:b ?b . FILTER(?a + ?b > \"5\"^^xsd:integer) }",
+    },
+    Case {
+        name: "filter_arith_mul_div",
+        query: "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ex:n ?n . FILTER((?n * \"2\"^^xsd:integer) / \"3\"^^xsd:integer > \"4\"^^xsd:integer) }",
+    },
 ];
+
+/// Round 2 §7 — defensive cap on OPTIONAL blocks. The transform must
+/// reject queries with more than `optional_cap` OPTIONAL blocks rather
+/// than silently generating `2^n` circuit variants.
+#[test]
+fn rejects_too_many_optionals() {
+    let q = "PREFIX ex: <http://example.org/>
+SELECT ?s ?a ?b ?c ?d ?e WHERE {
+  ?s ex:p ?o .
+  OPTIONAL { ?s ex:a ?a }
+  OPTIONAL { ?s ex:b ?b }
+  OPTIONAL { ?s ex:c ?c }
+  OPTIONAL { ?s ex:d ?d }
+  OPTIONAL { ?s ex:e ?e }
+}";
+    let err = match transform_query(q) {
+        Err(e) => e,
+        Ok(_) => panic!("expected OPTIONAL-cap rejection"),
+    };
+    assert!(
+        err.contains("OPTIONAL") && err.contains("cap"),
+        "error should mention OPTIONAL cap, got: {err}"
+    );
+}
+
+/// Bumping the cap must permit the same query through.
+#[test]
+fn raises_optional_cap() {
+    let q = "PREFIX ex: <http://example.org/>
+SELECT ?s ?a ?b ?c ?d ?e WHERE {
+  ?s ex:p ?o .
+  OPTIONAL { ?s ex:a ?a }
+  OPTIONAL { ?s ex:b ?b }
+  OPTIONAL { ?s ex:c ?c }
+  OPTIONAL { ?s ex:d ?d }
+  OPTIONAL { ?s ex:e ?e }
+}";
+    let opts = TransformOptions {
+        optional_cap: 8,
+        ..TransformOptions::default()
+    };
+    transform_with_opts(q, opts).expect("should succeed with raised cap");
+}
+
+/// `+` paths past `path_segment_max` must still work — but past the
+/// configured bound only the first `max` depths are explored.
+#[test]
+fn kleene_path_segment_max_configurable() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows+ ?o . }";
+    // depth = 1 ⇒ a single triple, no UNION
+    let opts = TransformOptions {
+        path_segment_max: 1,
+        ..TransformOptions::default()
+    };
+    let r = transform_with_opts(q, opts).expect("transform with depth 1");
+    assert!(
+        !r.sparql_nr.contains("branch_"),
+        "depth-1 unroll should have no UNION branches:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// `path_segment_max = 0` for a `+` path is rejected outright.
+#[test]
+fn kleene_zero_max_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows+ ?o . }";
+    let opts = TransformOptions {
+        path_segment_max: 0,
+        ..TransformOptions::default()
+    };
+    let err = match transform_with_opts(q, opts) {
+        Err(e) => e,
+        Ok(_) => panic!("expected path_segment_max rejection"),
+    };
+    assert!(
+        err.contains("path_segment_max"),
+        "error should mention path_segment_max, got: {err}"
+    );
+}
 
 fn snapshots_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots")

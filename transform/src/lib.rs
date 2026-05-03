@@ -37,7 +37,7 @@ use crate::emit::{
     build_nargo_toml, collect_all_optional_blocks, fill_main_nr_template,
     generate_circuit_for_optional_combination,
 };
-use crate::lower::{process_query, reset_optional_counter};
+use crate::lower::{process_query_with_options, reset_optional_counter};
 use crate::metadata::{build_base_metadata, build_variant_metadata};
 
 #[cfg(target_arch = "wasm32")]
@@ -73,11 +73,43 @@ pub struct TransformError {
     pub error: String,
 }
 
+/// Default cap on the number of OPTIONAL blocks accepted by the
+/// transform. Each OPTIONAL doubles the number of generated circuit
+/// variants (one per matched/unmatched bit-mask), so the practical
+/// limit is small. Round 3 will collapse the power-set into a single
+/// circuit (per SPARQL_ROADMAP.md §6.4 / Q2 decision); until then we
+/// reject queries above this bound rather than silently exploding.
+pub const DEFAULT_OPTIONAL_CAP: usize = 4;
+
+/// Default cap on the unrolled depth of `+` and `*` Kleene paths. The
+/// transform unrolls `path+` to `path | path/path | …` up to this many
+/// segments and rejects deeper unrolls. Trade-off: larger values match
+/// longer chains but inflate the BGP and (when nested in a UNION) the
+/// branch count quadratically. Configurable via
+/// [`TransformOptions::path_segment_max`].
+pub const DEFAULT_PATH_SEGMENT_MAX: usize = 4;
+
 /// Options for the transform operation
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct TransformOptions {
     /// If true, generate a simplified circuit without signature/Merkle verification
     pub skip_signing: bool,
+    /// Reject queries with more than this many flattened OPTIONAL
+    /// blocks. Defaults to [`DEFAULT_OPTIONAL_CAP`].
+    pub optional_cap: usize,
+    /// Maximum unrolled depth for `+` / `*` Kleene paths. Defaults to
+    /// [`DEFAULT_PATH_SEGMENT_MAX`].
+    pub path_segment_max: usize,
+}
+
+impl Default for TransformOptions {
+    fn default() -> Self {
+        Self {
+            skip_signing: false,
+            optional_cap: DEFAULT_OPTIONAL_CAP,
+            path_segment_max: DEFAULT_PATH_SEGMENT_MAX,
+        }
+    }
 }
 
 /// Transform a SPARQL query into Noir circuit files.
@@ -99,11 +131,26 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     let query = crate::parse::parse_query(query_str)?;
     let root = crate::parse::root_pattern(&query);
 
-    let info = process_query(root)?;
+    let info = process_query_with_options(root, &options)?;
 
     // Collect all optional blocks (flatten nested optionals for now)
     let all_optionals = collect_all_optional_blocks(&info.pattern.optional_blocks);
     let num_optionals = all_optionals.len();
+
+    // Defensive cap (round 2 — see SPARQL_ROADMAP.md §7 + §6.4). Each
+    // OPTIONAL doubles the variant count; collapse to a single circuit
+    // is round 3. Reject explicitly so users see a clear error rather
+    // than waiting on an exponential build.
+    if num_optionals > options.optional_cap {
+        return Err(format!(
+            "Query has {} OPTIONAL blocks, exceeding the configured cap of {}. \
+             Each OPTIONAL doubles the number of generated circuit variants \
+             (2^n); raise `TransformOptions::optional_cap` if you really need \
+             this, or refactor the query. Round 3 will collapse the power \
+             set into a single circuit.",
+            num_optionals, options.optional_cap
+        ));
+    }
     
     // Generate the base circuit (the "all optionals matched" variant).
     let (base_sparql_nr, base_hidden, has_hidden, needs_xpath) = generate_circuit_for_optional_combination(
