@@ -173,15 +173,32 @@ pub fn encode_string<let N: u32>(string: str<N>) -> Field {
 pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M, N> {
     // Capacity bound. Level-0 of the tree stores `N + 2` populated
     // leaves (sentinels at indices `0` and `N + 1` plus the `N` real
-    // leaves at `1..=N`). The tree is laid out in a fixed `[Field;
-    // 1024]` slab per level, so `N + 2` must not exceed that slab
-    // (otherwise the high-sentinel write at `tree[0][N + 1]` indexes
-    // out of bounds). Compile-time-checked here so a too-large `N`
-    // fails at circuit-compile time rather than producing silent
-    // out-of-range writes. Roborev finding 2026-05-03 (medium).
+    // leaves at `1..=N`). Two constraints apply:
+    //
+    // 1. The fixed `[Field; 1024]` slab per level limits writes to
+    //    indices `< 1024`, so `N + 2 <= 1024`.
+    // 2. The Merkle tree's logical level-0 capacity for depth `M` is
+    //    `2^(M - 1)`. For `M < 11` (e.g. shallower trees configured
+    //    via `setup.ts --depth 9`), the slab is larger than the
+    //    logical capacity -- writes beyond `2^(M - 1)` would land in
+    //    the slab but never get hashed into the root, producing an
+    //    incomplete commitment. Roborev finding 2026-05-03 (medium).
+    //
+    // Both bounds are checked at circuit-compile time so a too-large
+    // `N` fails before any silent miscommitment can happen.
     std::static_assert(
         N + 2 <= 1024,
         "merkle: N + 2 (real leaves + sentinels) exceeds the 1024-slot tree-level capacity",
+    );
+    // Compute `2^(M - 1)` as a `u32` using a small loop so the
+    // shift's type doesn't fight the `static_assert` comparison.
+    let mut logical_capacity: u32 = 1;
+    for _ in 0..(M - 1) {
+        logical_capacity *= 2;
+    }
+    std::static_assert(
+        N + 2 <= logical_capacity,
+        "merkle: N + 2 exceeds the logical level-0 capacity 2^(M - 1) of the tree",
     );
 
     let mut tree = [[0; 1024]; M];
