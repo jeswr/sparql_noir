@@ -25,8 +25,16 @@ pub fn verify_signature(public_key: consts::signature::PubKey, root: Root) {
 pub fn verify_inclusion(triple: Triple, root_value: Field) {
     let mut current = triple.path[0];
     for i in 1..consts::MERKLE_DEPTH {
+        // Constrain `directions[i - 1]` to be a Boolean (0 or 1). Any
+        // non-Boolean value would let a prover satisfy inclusion under
+        // "anything non-zero = right" semantics while making the
+        // index reconstruction in `verify_non_membership_no_inclusion`
+        // omit / mis-count the bit — breaking the adjacency proof's
+        // soundness. Roborev finding 2026-05-03 (high).
+        let dir = triple.directions[i - 1];
+        assert((dir == 0) | (dir == 1), "Merkle direction bit must be 0 or 1");
         current = consts::hash2(
-            if triple.directions[i - 1] == 0 { [current, triple.path[i]] } else { [triple.path[i], current] }
+            if dir == 0 { [current, triple.path[i]] } else { [triple.path[i], current] }
         );
     }
     // TODO: Cleanup - we shouldn't need this check
@@ -274,14 +282,26 @@ pub fn verify_non_membership_no_inclusion(
     // if the leaf is the left child at level j (i.e. index bit j is
     // 0), 1 otherwise. We reconstruct the indices and assert
     // `right_idx == left_idx + 1`.
+    //
+    // Directions are constrained to be Booleans by `verify_inclusion`
+    // (which runs over both leaves before this no-inclusion variant
+    // is called from the transform-emitted body, or as part of the
+    // composite `verify_non_membership` above). We re-assert here as
+    // defence in depth — the no-inclusion variant is exposed publicly
+    // and a future caller that bypasses `verify_inclusion` would
+    // otherwise be exposed to the high-severity 2026-05-03 finding.
     let mut left_idx: u64 = 0;
     let mut right_idx: u64 = 0;
     let mut bit: u64 = 1;
     for j in 0..(consts::MERKLE_DEPTH - 1) {
-        if left.directions[j] == 1 {
+        let l = left.directions[j];
+        let r = right.directions[j];
+        assert((l == 0) | (l == 1), "non-membership: left direction bit must be 0 or 1");
+        assert((r == 0) | (r == 1), "non-membership: right direction bit must be 0 or 1");
+        if l == 1 {
             left_idx += bit;
         }
-        if right.directions[j] == 1 {
+        if r == 1 {
             right_idx += bit;
         }
         bit *= 2;
