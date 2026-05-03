@@ -54,6 +54,7 @@ pub(crate) fn generate_circuit_for_optional_combination(
         filters: base_info.pattern.filters.clone(),
         union_branches: base_info.pattern.union_branches.clone(),
         optional_blocks: Vec::new(),
+        not_exists: base_info.pattern.not_exists.clone(),
     };
 
     let mut optional_only_vars: std::collections::HashSet<String> =
@@ -116,6 +117,14 @@ pub(crate) fn generate_sparql_nr_from_query_info(
     info: &QueryInfo,
     options: &TransformOptions,
 ) -> Result<(String, Vec<serde_json::Value>, bool, bool), String> {
+    if options.skip_signing && !info.pattern.not_exists.is_empty() {
+        return Err(
+            "NOT EXISTS / MINUS / collapsed-OPTIONAL queries cannot run in skip-signing mode \
+             — non-membership soundness depends on the sorted Merkle commitment, which is \
+             absent when signing is skipped."
+                .into(),
+        );
+    }
     let mut binding_map: BTreeMap<String, Term> = BTreeMap::new();
     for b in &info.pattern.bindings {
         if !info.variables.contains(&b.variable) && !binding_map.contains_key(&b.variable) {
@@ -186,6 +195,28 @@ pub(crate) fn generate_sparql_nr_from_query_info(
             let expr = filter_to_noir(f, info, &binding_map, &mut hidden)?;
             assertions.push(expr);
         }
+    }
+
+    // Non-existence constraints (NOT EXISTS / MINUS / unmatched-arm of
+    // collapsed OPTIONAL — see spec/exists.md §3.3, §6.4). Each emits
+    // a call to `utils::verify_non_membership_no_inclusion` with the
+    // absent triple's hash computed inline from the outer μ. Bracket
+    // leaves at `bgp[bracket_left_idx]` / `bgp[bracket_right_idx]` are
+    // already inclusion-checked by the generic per-triple loop in
+    // `main.nr`.
+    let mut not_exists_calls: Vec<String> = Vec::new();
+    for ne in &info.pattern.not_exists {
+        let absent = format!(
+            "consts::hash4([{}, {}, {}, {}])",
+            serialize_term(&ne.absent_terms[0], info, &binding_map),
+            serialize_term(&ne.absent_terms[1], info, &binding_map),
+            serialize_term(&ne.absent_terms[2], info, &binding_map),
+            serialize_term(&ne.absent_terms[3], info, &binding_map),
+        );
+        not_exists_calls.push(format!(
+            "utils::verify_non_membership_no_inclusion(bgp[{}], bgp[{}], {})",
+            ne.bracket_left_idx, ne.bracket_right_idx, absent
+        ));
     }
 
     let mut sparql_nr = String::new();
@@ -263,6 +294,9 @@ pub(crate) fn generate_sparql_nr_from_query_info(
         for a in &assertions {
             sparql_nr.push_str(&format!("  assert({});\n", a));
         }
+    }
+    for call in &not_exists_calls {
+        sparql_nr.push_str(&format!("  {};\n", call));
     }
     sparql_nr.push_str("}\n");
 

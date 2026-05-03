@@ -160,6 +160,20 @@ pub(crate) fn build_base_metadata(
     let order_by_json: Vec<serde_json::Value> =
         info.order_by.iter().map(order_key_to_json).collect();
 
+    let not_exists_json: Vec<serde_json::Value> = info
+        .pattern
+        .not_exists
+        .iter()
+        .map(|ne| {
+            serde_json::json!({
+                "bracketLeftIdx": ne.bracket_left_idx,
+                "bracketRightIdx": ne.bracket_right_idx,
+                "bracket_left_idx": ne.bracket_left_idx,
+                "bracket_right_idx": ne.bracket_right_idx,
+            })
+        })
+        .collect();
+
     serde_json::json!({
         "variables": info.variables,
         "skip_signing": skip_signing,
@@ -178,6 +192,8 @@ pub(crate) fn build_base_metadata(
         "order_by": order_by_json,
         "limit": info.limit,
         "offset": info.offset,
+        "notExists": not_exists_json,
+        "not_exists": not_exists_json,
     })
 }
 

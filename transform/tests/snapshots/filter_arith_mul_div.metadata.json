@@ -155,6 +155,8 @@
     }
   ],
   "limit": null,
+  "notExists": [],
+  "not_exists": [],
   "num_optionals": 0,
   "offset": null,
   "optionalPatterns": [],

@@ -29,15 +29,15 @@ mod parse;
 
 pub use crate::expr::{ieee754_equal, ieee754_less_than, FloatSpecial};
 pub use crate::ir::{
-    Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, GraphContext, OptionalBlock,
-    OrderDirection, OrderKey, PatternInfo, QueryInfo, Term,
+    Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, GraphContext,
+    NonExistenceConstraint, OptionalBlock, OrderDirection, OrderKey, PatternInfo, QueryInfo, Term,
 };
 
 use crate::emit::{
     build_nargo_toml, collect_all_optional_blocks, fill_main_nr_template,
     generate_circuit_for_optional_combination,
 };
-use crate::lower::{process_query_with_options, reset_optional_counter};
+use crate::lower::{process_query_with_options, reset_bracket_counter, reset_optional_counter};
 use crate::metadata::{build_base_metadata, build_variant_metadata};
 
 #[cfg(target_arch = "wasm32")]
@@ -125,8 +125,10 @@ pub fn transform_query(query_str: &str) -> Result<TransformResult, String> {
 
 /// Transform a SPARQL query into Noir circuit files with options.
 pub fn transform_query_with_options(query_str: &str, options: TransformOptions) -> Result<TransformResult, String> {
-    // Reset the optional block counter for each new query
+    // Reset per-query counters so snapshot fixtures stay stable across
+    // many-queries-in-one-process runs.
     reset_optional_counter();
+    reset_bracket_counter();
     
     let query = crate::parse::parse_query(query_str)?;
     let root = crate::parse::root_pattern(&query);

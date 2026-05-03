@@ -250,14 +250,29 @@ pub fn verify_non_membership(
     verify_inclusion(left, root_value);
     verify_inclusion(right, root_value);
 
+    verify_non_membership_no_inclusion(left, right, absent_hash);
+}
+
+/// The ordering / adjacency half of `verify_non_membership`. Use this
+/// when the bracketing leaves are already passed through
+/// `verify_inclusion` elsewhere (e.g. they live in `bgp` and the
+/// generated `main.nr` walks `bgp` for inclusion). The transform-layer
+/// lowering for `NOT EXISTS` and `MINUS` uses this variant — it places
+/// the bracketing leaves at dedicated `bgp[k]` slots and emits the
+/// ordering / adjacency check inside `sparql.nr::checkBinding`.
+pub fn verify_non_membership_no_inclusion(
+    left: Triple,
+    right: Triple,
+    absent_hash: Field,
+) {
     // Ordering: left < absent < right (strict).
     assert(left.path[0].lt(absent_hash), "non-membership: left leaf hash >= absent hash");
     assert(absent_hash.lt(right.path[0]), "non-membership: absent hash >= right leaf hash");
 
-    // Adjacency: right's sorted index = left's sorted index + 1.
-    // The directions vector encodes the index in little-endian: bit j
-    // is 0 if the leaf is the left child at level j (i.e. index bit j
-    // is 0), 1 otherwise. We reconstruct the indices and assert
+    // Adjacency: right's sorted index = left's sorted index + 1. The
+    // directions vector encodes the index in little-endian: bit j is 0
+    // if the leaf is the left child at level j (i.e. index bit j is
+    // 0), 1 otherwise. We reconstruct the indices and assert
     // `right_idx == left_idx + 1`.
     let mut left_idx: u64 = 0;
     let mut right_idx: u64 = 0;

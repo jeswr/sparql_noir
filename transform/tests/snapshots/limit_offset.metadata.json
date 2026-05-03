@@ -41,6 +41,8 @@
     }
   ],
   "limit": 10,
+  "notExists": [],
+  "not_exists": [],
   "num_optionals": 0,
   "offset": 5,
   "optionalPatterns": [],
