@@ -6,6 +6,29 @@ pub struct Triple {
   pub directions: [u8; MERKLE_DEPTH - 1],
 }
 
+/// A synthetic sentinel leaf in the sorted Merkle commitment.
+///
+/// The signer's `utils::merkle` injects two such leaves into every
+/// commitment: a low sentinel at sorted index `0` with leaf-hash
+/// `consts::LOW_SENTINEL_HASH = 0`, and a high sentinel at sorted
+/// index `N + 1` with leaf-hash `consts::HIGH_SENTINEL_HASH = -1`
+/// (= the BN254 prime minus one). They make every `absent_hash`
+/// witnessable by `verify_non_membership_*` -- including ones that
+/// fall below the smallest real leaf or above the largest. See
+/// `spec/exists.md` Sec.3.3.
+///
+/// Sentinels have **no `terms`** (the leaf hash is fixed by ABI, not
+/// derived from a quad), so the standard `verify_inclusion` step
+/// `assert_eq(hash4(terms), path[0])` is replaced by a direct
+/// `path[0] == consts::LOW_SENTINEL_HASH` /
+/// `consts::HIGH_SENTINEL_HASH` check via the
+/// `verify_low_sentinel_inclusion` /
+/// `verify_high_sentinel_inclusion` primitives in `dep::utils`.
+pub struct SentinelLeaf {
+  pub path: [Field; MERKLE_DEPTH],
+  pub directions: [u8; MERKLE_DEPTH - 1],
+}
+
 pub struct Root {
   pub value: Field,
   pub signature: Signature,
