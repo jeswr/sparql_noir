@@ -171,6 +171,19 @@ pub fn encode_string<let N: u32>(string: str<N>) -> Field {
 /// `verify_high_sentinel_inclusion` primitives skip the
 /// `hash4(terms) == path[0]` step.
 pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M, N> {
+    // Capacity bound. Level-0 of the tree stores `N + 2` populated
+    // leaves (sentinels at indices `0` and `N + 1` plus the `N` real
+    // leaves at `1..=N`). The tree is laid out in a fixed `[Field;
+    // 1024]` slab per level, so `N + 2` must not exceed that slab
+    // (otherwise the high-sentinel write at `tree[0][N + 1]` indexes
+    // out of bounds). Compile-time-checked here so a too-large `N`
+    // fails at circuit-compile time rather than producing silent
+    // out-of-range writes. Roborev finding 2026-05-03 (medium).
+    std::static_assert(
+        N + 2 <= 1024,
+        "merkle: N + 2 (real leaves + sentinels) exceeds the 1024-slot tree-level capacity",
+    );
+
     let mut tree = [[0; 1024]; M];
     let mut paths = [[0; M]; N];
     let mut direction = [[0; M - 1]; N];
