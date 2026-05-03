@@ -802,6 +802,17 @@ pub(crate) fn reset_bracket_counter() {
     BRACKET_COUNTER.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Collect the set of in-scope variable names of a `GraphPattern`.
+/// Used by the `MINUS` lowering to detect the W3C variable-disjoint
+/// no-op case (§18.5: when `dom(μ) ∩ dom(μ') = ∅` the row is kept).
+fn collect_in_scope_variables(gp: &GraphPattern) -> BTreeSet<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    gp.on_in_scope_variable(|v| {
+        out.insert(v.as_str().to_string());
+    });
+    out
+}
+
 /// True if the expression tree contains an `Expression::Exists` anywhere.
 fn expression_contains_exists(expr: &Expression) -> bool {
     match expr {
@@ -1413,19 +1424,31 @@ fn process_graph_pattern_inner(
             Ok(info)
         }
 
-        // `Minus(Po, Pi)` — W3C SPARQL 1.1 §18.5. Rewrite to
+        // `Minus(Po, Pi)` — W3C SPARQL 1.1 §18.5. The W3C definition is
+        //   `{ μ ∈ ⟦Po⟧ | ∀ μ' ∈ ⟦Pi⟧ : μ ≁ μ' ∨ dom(μ) ∩ dom(μ') = ∅ }`
+        // i.e. MINUS only excludes rows whose μ' is compatible AND
+        // shares at least one variable with μ. When Pi shares no
+        // variables with Po, every μ' is variable-disjoint, so MINUS
+        // keeps all rows — it is a no-op.
+        //
+        // We detect the variable-disjoint case syntactically: if the
+        // sets of in-scope variables of `left` and `right` are
+        // disjoint, lower as `left` alone. Otherwise rewrite to
         // `Filter(NOT EXISTS { Pi }, Po)` and reuse the NOT-EXISTS
-        // lowering. Note: the W3C definition has a freshness side
-        // condition — rows where `dom(μ) ∩ dom(μ') = ∅` are *not*
-        // excluded by MINUS even when μ' is compatible. Our rewrite
-        // currently shares the variable-disjoint case with NOT EXISTS,
-        // which means MINUS over disjoint-variable inner patterns
-        // applies stricter semantics than W3C strictly requires. This
-        // is a small over-restriction (filters out rows that W3C would
-        // keep) and is documented as a follow-up at spec/exists.md §7.
-        // For our typical workload — MINUS with shared outer
-        // variables — the rewrite is exact.
+        // lowering — exact W3C semantics for the shared-variable case.
+        //
+        // Roborev finding 2026-05-03 (medium): the previous
+        // unconditional rewrite mishandled the disjoint case (e.g.
+        // `MINUS { ex:a ex:p ex:b }` would have removed every row when
+        // that ground triple existed; correct semantics keep them).
         GraphPattern::Minus { left, right } => {
+            let left_vars = collect_in_scope_variables(left);
+            let right_vars = collect_in_scope_variables(right);
+            let shared = left_vars.intersection(&right_vars).count();
+            if shared == 0 {
+                // Variable-disjoint MINUS — W3C no-op.
+                return process_graph_pattern_inner(left, options, fresh);
+            }
             let outer = GraphPattern::Filter {
                 expr: Expression::Not(Box::new(Expression::Exists(right.clone()))),
                 inner: left.clone(),
@@ -1451,6 +1474,48 @@ fn process_graph_pattern_inner(
         GraphPattern::LeftJoin { left, right, expression } => {
             let mut left_info = process_graph_pattern_inner(left, options, fresh)?;
             let right_info = process_graph_pattern_inner(right, options, fresh)?;
+
+            // NOT EXISTS / MINUS / EXISTS inside an OPTIONAL (right-
+            // side of a LeftJoin) is not yet supported. The
+            // OptionalBlock IR doesn't carry non-membership
+            // constraints, and the power-set variant emitter doesn't
+            // know how to lower EXISTS / NOT-EXISTS inside the
+            // OPTIONAL's filter expression either. Round-4 follow-up
+            // — same family of constraints as the deferred OPTIONAL-
+            // collapse work in
+            // `questions/optional-collapse-pattern-non-membership.md`.
+            if !right_info.not_exists.is_empty() {
+                return Err(
+                    "NOT EXISTS / MINUS inside an OPTIONAL inner pattern is not yet \
+                     implemented. The branch-local non-membership constraints would be \
+                     silently dropped by the variant emitter. Round-4 follow-up — see \
+                     spec/exists.md §7."
+                        .into(),
+                );
+            }
+            // The OPTIONAL's outer filter expression (if any) lives
+            // alongside `right_info.filters` and must be EXISTS-free —
+            // spargebra's `OPTIONAL { … FILTER(…) }` normalisation
+            // hoists the filter into the LeftJoin's `expression`, so
+            // we check it here too.
+            if let Some(expr) = expression {
+                if expression_contains_exists(expr) {
+                    return Err(
+                        "EXISTS / NOT EXISTS inside an OPTIONAL filter expression is not yet \
+                         implemented. Round-4 follow-up — see spec/exists.md §7."
+                            .into(),
+                    );
+                }
+            }
+            for f in &right_info.filters {
+                if expression_contains_exists(f) {
+                    return Err(
+                        "EXISTS / NOT EXISTS inside an OPTIONAL inner pattern's FILTER is not \
+                         yet implemented. Round-4 follow-up — see spec/exists.md §7."
+                            .into(),
+                    );
+                }
+            }
 
             let offset = left_info.patterns.len();
 
@@ -1534,6 +1599,25 @@ fn process_graph_pattern_inner(
             let mut branches: Vec<PatternInfo> = Vec::new();
             collect_branches(left, &mut branches, options, fresh)?;
             collect_branches(right, &mut branches, options, fresh)?;
+
+            // NOT EXISTS / MINUS inside a UNION branch is not yet
+            // supported. The branch-local `not_exists` entries reference
+            // BGP slots in the branch's own index space, but the emit
+            // layer's branch handler doesn't currently emit them
+            // (verify_non_membership_no_inclusion's asserts can't be
+            // composed inside the per-branch `branch_X = (...) & (...)`
+            // boolean form). Round-4 follow-up — see roborev finding
+            // 2026-05-03 (high).
+            for branch in &branches {
+                if !branch.not_exists.is_empty() {
+                    return Err(
+                        "NOT EXISTS / MINUS inside a UNION branch is not yet implemented. \
+                         The branch-local non-membership constraints would be silently dropped \
+                         by the emit layer. Round-4 follow-up — see spec/exists.md §7."
+                            .into(),
+                    );
+                }
+            }
 
             let patterns = branches
                 .iter()
