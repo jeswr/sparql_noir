@@ -9,7 +9,7 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "p"
+        "value": "o"
       },
       "predicate": {
         "termType": "NamedNode",
@@ -26,15 +26,32 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "o"
+        "value": "__br_o_0"
       },
       "predicate": {
-        "termType": "NamedNode",
-        "value": "http://example.org/age"
+        "termType": "Variable",
+        "value": "__br_p_0"
       },
       "subject": {
         "termType": "Variable",
-        "value": "p"
+        "value": "__br_s_0"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__br_o_1"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "__br_p_1"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__br_s_1"
       }
     }
   ],
@@ -45,7 +62,7 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "p"
+        "value": "o"
       },
       "predicate": {
         "termType": "NamedNode",
@@ -62,75 +79,60 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "o"
+        "value": "__br_o_0"
       },
       "predicate": {
-        "termType": "NamedNode",
-        "value": "http://example.org/age"
+        "termType": "Variable",
+        "value": "__br_p_0"
       },
       "subject": {
         "termType": "Variable",
-        "value": "p"
+        "value": "__br_s_0"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__br_o_1"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "__br_p_1"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__br_s_1"
       }
     }
   ],
   "limit": null,
-  "notExists": [],
-  "not_exists": [],
-  "num_optionals": 1,
+  "notExists": [
+    {
+      "bracketLeftIdx": 1,
+      "bracketRightIdx": 2,
+      "bracket_left_idx": 1,
+      "bracket_right_idx": 2
+    }
+  ],
+  "not_exists": [
+    {
+      "bracketLeftIdx": 1,
+      "bracketRightIdx": 2,
+      "bracket_left_idx": 1,
+      "bracket_right_idx": 2
+    }
+  ],
+  "num_optionals": 0,
   "offset": null,
-  "optionalPatterns": [
-    {
-      "id": 0,
-      "patterns": [
-        {
-          "graph": {
-            "termType": "DefaultGraph"
-          },
-          "object": {
-            "termType": "Variable",
-            "value": "o"
-          },
-          "predicate": {
-            "termType": "NamedNode",
-            "value": "http://example.org/age"
-          },
-          "subject": {
-            "termType": "Variable",
-            "value": "p"
-          }
-        }
-      ]
-    }
-  ],
-  "optional_patterns": [
-    {
-      "id": 0,
-      "patterns": [
-        {
-          "graph": {
-            "termType": "DefaultGraph"
-          },
-          "object": {
-            "termType": "Variable",
-            "value": "o"
-          },
-          "predicate": {
-            "termType": "NamedNode",
-            "value": "http://example.org/age"
-          },
-          "subject": {
-            "termType": "Variable",
-            "value": "p"
-          }
-        }
-      ]
-    }
-  ],
+  "optionalPatterns": [],
+  "optional_patterns": [],
   "orderBy": [],
   "order_by": [],
   "skip_signing": false,
-  "total_patterns": 2,
+  "total_patterns": 3,
   "unionBranches": [],
   "union_branches": [],
   "variables": [

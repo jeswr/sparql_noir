@@ -48,6 +48,39 @@ pub struct OptionalBlock {
     pub nested_optionals: Vec<OptionalBlock>,
 }
 
+/// One non-membership obligation, lowered from a `FILTER(NOT EXISTS { t })`
+/// block (or, equivalently, from `MINUS` after the algebra rewrite). The
+/// circuit asserts:
+///
+/// 1. Both `bgp[bracket_left_idx]` and `bgp[bracket_right_idx]` are valid
+///    sorted-tree leaves (handled by the generic per-triple inclusion check
+///    in `main.nr`).
+/// 2. `hash4(absent_terms) ≠ leaf_hash` for every leaf in the dataset, via
+///    the strict-ordering / adjacency invariants checked by
+///    `noir::utils::verify_non_membership_no_inclusion`.
+///
+/// `absent_terms` are themselves `Term`s (typically `Term::Variable` for
+/// outer-bound positions and `Term::Static` for ground positions) — the
+/// emit layer serialises them in-line so the outer μ is substituted at
+/// constraint-evaluation time.
+///
+/// Currently restricted to **single-triple ground-inner** NOT EXISTS — the
+/// inner pattern is a single triple whose free variables are all bound in
+/// the outer scope. Multi-triple / non-ground inner patterns are
+/// rejected at lowering time (see `spec/exists.md` §7).
+#[derive(Clone, Debug)]
+pub struct NonExistenceConstraint {
+    /// BGP index of the left bracket leaf.
+    pub(crate) bracket_left_idx: usize,
+    /// BGP index of the right bracket leaf.
+    pub(crate) bracket_right_idx: usize,
+    /// Subject / predicate / object / graph terms whose `hash4` is the
+    /// would-be absent leaf. Each term is substituted at emit time —
+    /// outer-bound variables resolve via `Term::Variable` lookup;
+    /// constants are inlined.
+    pub(crate) absent_terms: [Term; 4],
+}
+
 #[derive(Clone, Debug)]
 pub struct PatternInfo {
     pub(crate) patterns: Vec<ContextualizedTriple>,
@@ -56,6 +89,9 @@ pub struct PatternInfo {
     pub(crate) filters: Vec<Expression>,
     pub(crate) union_branches: Option<Vec<PatternInfo>>,
     pub(crate) optional_blocks: Vec<OptionalBlock>,
+    /// Non-membership obligations from `FILTER(NOT EXISTS { t })` /
+    /// `MINUS { … } { t }`. Empty when the query has no negation.
+    pub(crate) not_exists: Vec<NonExistenceConstraint>,
 }
 
 impl PatternInfo {
@@ -67,6 +103,7 @@ impl PatternInfo {
             filters: Vec::new(),
             union_branches: None,
             optional_blocks: Vec::new(),
+            not_exists: Vec::new(),
         }
     }
 }

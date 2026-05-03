@@ -221,6 +221,15 @@ fn shift_pattern_inputs(info: &mut PatternInfo, offset: usize) {
     for opt in &mut info.optional_blocks {
         adjust_optional_block_indices(opt, offset);
     }
+    for ne in &mut info.not_exists {
+        ne.bracket_left_idx += offset;
+        ne.bracket_right_idx += offset;
+        for term in &mut ne.absent_terms {
+            if let Term::Input(i, j) = term {
+                *term = Term::Input(*i + offset, *j);
+            }
+        }
+    }
 }
 
 /// Compute `Join(left, right)` over two `PatternInfo`s with the
@@ -262,6 +271,8 @@ fn join_pattern_infos(
             merged.filters.extend(right.filters);
             merged.optional_blocks.extend(left.optional_blocks);
             merged.optional_blocks.extend(right.optional_blocks);
+            merged.not_exists.extend(left.not_exists);
+            merged.not_exists.extend(right.not_exists);
             Ok(merged)
         }
         (true, false) => {
@@ -310,9 +321,12 @@ fn join_pattern_infos(
                 filters: Vec::new(),
                 union_branches: Some(combined),
                 optional_blocks: Vec::new(),
+                not_exists: Vec::new(),
             };
             merged.optional_blocks.extend(left.optional_blocks);
             merged.optional_blocks.extend(right.optional_blocks);
+            merged.not_exists.extend(left.not_exists);
+            merged.not_exists.extend(right.not_exists);
             Ok(merged)
         }
     }
@@ -372,11 +386,14 @@ fn distribute_into_branches(
         filters: Vec::new(),
         union_branches: Some(combined),
         optional_blocks: Vec::new(),
+        not_exists: Vec::new(),
     };
-    // Optionals are top-level concerns — preserve them outside the
-    // branches.
+    // Optionals and non-existence obligations are top-level concerns —
+    // preserve them outside the branches.
     merged.optional_blocks.extend(with_branches.optional_blocks);
     merged.optional_blocks.extend(plain.optional_blocks);
+    merged.not_exists.extend(with_branches.not_exists);
+    merged.not_exists.extend(plain.not_exists);
     merged
 }
 
@@ -548,16 +565,18 @@ fn expand_normalised_path(
     }
 }
 
-/// Lower `Expression::Exists(P)` occurrences within a filter expression
-/// by flattening `P` into the outer `info` and rewriting the EXISTS node
-/// to a `true` literal. See `spec/exists.md` for the design rationale.
+/// Lower `Expression::Exists(P)` and `Expression::Not(Expression::Exists(P))`
+/// occurrences within a filter expression. EXISTS flattens via the §2
+/// reformulation (each inner triple is added to the outer BGP under
+/// inclusion + unification); NOT EXISTS lowers via the §3.3
+/// sorted-commitment non-membership primitive (each inner triple
+/// becomes a `NonExistenceConstraint` with two bracket leaves placed in
+/// the BGP and an absent-hash assertion derived from the outer μ).
 ///
-/// For the round 3 spike this only accepts EXISTS as the **root** filter
-/// expression (no nesting under `And`/`Or`/`Not`). NOT EXISTS is rejected
-/// outright. This is a deliberately narrow scope — the boolean-context
-/// integration of EXISTS within larger expressions, and the
-/// sorted-commitment NOT-EXISTS primitive, are the round-3-main-event
-/// scope.
+/// Both forms are accepted as the **root** of the filter expression
+/// only (no nesting under `And`/`Or`/`Not` outside the canonical
+/// `Not(Exists(_))` parse-shape). The boolean-context integration is a
+/// follow-up — see `spec/exists.md` §7.
 fn lower_exists_in_expression(
     expr: &Expression,
     info: &mut PatternInfo,
@@ -570,30 +589,20 @@ fn lower_exists_in_expression(
             Ok(true_literal())
         }
         // `NOT EXISTS` parses as `Not(Exists(_))` (spargebra parser.rs
-        // ~L2335). Reject explicitly with a pointer to the design doc.
+        // ~L2335). Lower to a `NonExistenceConstraint`.
         Expression::Not(boxed) => {
-            if matches!(boxed.as_ref(), Expression::Exists(_)) {
+            if let Expression::Exists(inner) = boxed.as_ref() {
+                lower_not_exists_into(inner, info, options, fresh)?;
+                Ok(true_literal())
+            } else if expression_contains_exists(boxed) {
                 Err(
-                    "NOT EXISTS is not yet implemented (round 3 spike shipped EXISTS only). \
-                     A sound NOT-EXISTS primitive requires upgrading the dataset commitment to a \
-                     sorted Merkle tree so the prover can supply non-membership proofs via \
-                     adjacent leaves; see spec/exists.md §3 / §6 for the deferred design."
+                    "EXISTS nested inside `!`/`&&`/`||` is not yet implemented \
+                     (round 3 supports `FILTER(EXISTS { … })` and `FILTER(NOT EXISTS { … })` \
+                     at the filter root only). See spec/exists.md §7 open question 3."
                         .into(),
                 )
             } else {
-                // Recurse into nested EXISTS in non-NOT-EXISTS positions
-                // — also rejected for now; the spike's narrow scope is
-                // documented in spec/exists.md §7 (open question 3).
-                if expression_contains_exists(boxed) {
-                    Err(
-                        "EXISTS nested inside `!`/`&&`/`||` is not yet implemented (round 3 spike \
-                         supports `FILTER(EXISTS { … })` at the filter root only). \
-                         See spec/exists.md §7 open question 3."
-                            .into(),
-                    )
-                } else {
-                    Ok(expr.clone())
-                }
+                Ok(expr.clone())
             }
         }
         Expression::And(_, _)
@@ -604,9 +613,9 @@ fn lower_exists_in_expression(
         | Expression::In(_, _) => {
             if expression_contains_exists(expr) {
                 Err(
-                    "EXISTS nested inside `&&`/`||`/IF/COALESCE/IN/FunctionCall is not yet \
-                     implemented (round 3 spike supports `FILTER(EXISTS { … })` at the filter \
-                     root only). See spec/exists.md §7 open question 3."
+                    "EXISTS / NOT EXISTS nested inside `&&`/`||`/IF/COALESCE/IN/FunctionCall \
+                     is not yet implemented (round 3 supports them at the filter root only). \
+                     See spec/exists.md §7 open question 3."
                         .into(),
                 )
             } else {
@@ -617,6 +626,199 @@ fn lower_exists_in_expression(
         // contain EXISTS — pass through untouched.
         _ => Ok(expr.clone()),
     }
+}
+
+/// Lower `FILTER(NOT EXISTS { P })` into a `NonExistenceConstraint`.
+///
+/// Restricted to **single-triple ground-inner** patterns: `P` must be a
+/// BGP with exactly one triple, and every variable in that triple must
+/// already be bound in the outer scope (i.e. the substitution by the
+/// outer μ produces a fully ground triple at prove time). Multi-triple
+/// or non-ground inner patterns are rejected with a clear error.
+///
+/// Witness shape: two adjacent bracket leaves are appended to
+/// `info.patterns` (so they pick up the standard per-triple inclusion
+/// check in `main.nr`); the absent-hash position assertions land via
+/// the new `NonExistenceConstraint` whose `absent_terms` reference the
+/// outer-bound variables / inline literals; the emit layer adds a call
+/// to `noir::utils::verify_non_membership_no_inclusion`.
+fn lower_not_exists_into(
+    inner: &GraphPattern,
+    info: &mut PatternInfo,
+    options: &TransformOptions,
+    fresh: &mut FreshSource,
+) -> Result<(), String> {
+    if info.union_branches.is_some() {
+        return Err(
+            "NOT EXISTS inside a FILTER over a UNION outer pattern is not yet implemented. \
+             The current lowering has no per-branch binding scope to correlate against. \
+             See spec/exists.md §7."
+                .into(),
+        );
+    }
+
+    let inner_info = process_graph_pattern_inner(inner, options, fresh)?;
+    if inner_info.union_branches.is_some()
+        || !inner_info.optional_blocks.is_empty()
+        || !inner_info.not_exists.is_empty()
+    {
+        return Err(
+            "NOT EXISTS with UNION / OPTIONAL / nested NOT-EXISTS inner patterns is not yet \
+             implemented (round 3 main event ships single-triple ground-inner only). \
+             See spec/exists.md §7."
+                .into(),
+        );
+    }
+    if inner_info.patterns.len() != 1 {
+        return Err(format!(
+            "NOT EXISTS supports single-triple inner patterns only (got {} triples). \
+             Multi-triple non-membership requires either bounded enumeration over candidate \
+             inner bindings (does not scale) or a per-substitution branching design (round-4 \
+             follow-up). See spec/exists.md §7.",
+            inner_info.patterns.len()
+        ));
+    }
+
+    // Inner triple's variables must all be bound in the outer scope —
+    // enforced by checking `inner_info.bindings` (which `process_patterns`
+    // populates with one entry per fresh-to-this-pattern variable). Any
+    // entry there is an inner-only variable: reject.
+    let outer_bound: std::collections::BTreeSet<String> = info
+        .bindings
+        .iter()
+        .map(|b| b.variable.clone())
+        .collect();
+    for binding in &inner_info.bindings {
+        if !outer_bound.contains(&binding.variable) {
+            return Err(format!(
+                "NOT EXISTS supports ground-inner patterns only (variable `?{}` in the inner \
+                 pattern is not bound by the outer mapping). Non-ground-inner NOT EXISTS \
+                 requires a per-substitution branching design. See spec/exists.md §7.",
+                binding.variable
+            ));
+        }
+    }
+    if !inner_info.filters.is_empty() {
+        return Err(
+            "NOT EXISTS with inner FILTER expressions is not yet implemented. \
+             See spec/exists.md §7."
+                .into(),
+        );
+    }
+
+    // Build absent_terms[0..4] from the inner triple's spargebra
+    // patterns: variables become `Term::Variable(name)` (resolved via
+    // the outer scope at emit time), constants become `Term::Static`,
+    // graph context follows `info`'s lowering convention. We don't read
+    // from `inner_info.assertions` because the inner triple was processed
+    // with its own offset; instead we extract directly from the
+    // spargebra `TriplePattern` to get a clean `[Term; 4]`.
+    let inner_pattern = &inner_info.patterns[0];
+    let absent_terms = absent_terms_from_pattern(inner_pattern)?;
+
+    // Append the bracket leaves: they live in the outer BGP at indices
+    // `outer_n` and `outer_n + 1`, picking up the standard per-triple
+    // Merkle-inclusion check from `main.nr`. They have no
+    // position-binding assertions to outer variables — the prover
+    // chooses which two adjacent leaves to supply, constrained only by
+    // the strict-ordering / adjacency check `verify_non_membership`
+    // emits in `checkBinding`.
+    let outer_n = info.patterns.len();
+    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph));
+    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph));
+
+    info.not_exists.push(crate::ir::NonExistenceConstraint {
+        bracket_left_idx: outer_n,
+        bracket_right_idx: outer_n + 1,
+        absent_terms,
+    });
+
+    Ok(())
+}
+
+/// Build a `[Term; 4]` from a spargebra `TriplePattern` for use as the
+/// absent-hash positions of a `NonExistenceConstraint`. Variables map
+/// to `Term::Variable(name)` so the emit layer substitutes the outer
+/// μ; literals / IRIs / blank nodes map to `Term::Static`.
+fn absent_terms_from_pattern(ct: &ContextualizedTriple) -> Result<[Term; 4], String> {
+    let subj = match &ct.pattern.subject {
+        TermPattern::NamedNode(nn) => Term::Static(GroundTerm::NamedNode(nn.clone())),
+        TermPattern::Variable(v) => Term::Variable(v.as_str().to_string()),
+        TermPattern::BlankNode(bn) => Term::Variable(format!("__blank_{}", bn.as_str())),
+        TermPattern::Literal(_) => return Err("Literal in NOT EXISTS subject position".into()),
+    };
+    let pred = match &ct.pattern.predicate {
+        NamedNodePattern::NamedNode(nn) => Term::Static(GroundTerm::NamedNode(nn.clone())),
+        NamedNodePattern::Variable(v) => Term::Variable(v.as_str().to_string()),
+    };
+    let obj = match &ct.pattern.object {
+        TermPattern::NamedNode(nn) => Term::Static(GroundTerm::NamedNode(nn.clone())),
+        TermPattern::Variable(v) => Term::Variable(v.as_str().to_string()),
+        TermPattern::BlankNode(bn) => Term::Variable(format!("__blank_{}", bn.as_str())),
+        TermPattern::Literal(l) => Term::Static(GroundTerm::Literal(l.clone())),
+    };
+    let graph = match &ct.graph {
+        GraphContext::Default => Term::Static(GroundTerm::NamedNode(
+            // Default graph is encoded as the empty-string IRI per
+            // the existing `getTermEncodingString` convention.
+            NamedNode::new_unchecked(""),
+        )),
+        GraphContext::NamedNode(iri) => {
+            Term::Static(GroundTerm::NamedNode(NamedNode::new_unchecked(iri.clone())))
+        }
+        GraphContext::Variable(name) => Term::Variable(name.clone()),
+    };
+    Ok([subj, pred, obj, graph])
+}
+
+/// A bracket-leaf BGP slot has no syntactic SPARQL pattern to attach
+/// to — the prover picks which two adjacent leaves bracket the absent
+/// hash. We synthesise free-variable placeholders (`?__br_*`) so the
+/// metadata round-trips deterministically; their `__`-prefix excludes
+/// them from projections (`process_query` ~L780).
+fn bracket_placeholder_pattern(graph: &GraphContext) -> ContextualizedTriple {
+    use std::sync::atomic::Ordering as A;
+    let id = BRACKET_COUNTER.fetch_add(1, A::SeqCst);
+    let s = Variable::new_unchecked(format!("__br_s_{}", id));
+    let p = Variable::new_unchecked(format!("__br_p_{}", id));
+    let o = Variable::new_unchecked(format!("__br_o_{}", id));
+    ContextualizedTriple {
+        pattern: TriplePattern {
+            subject: TermPattern::Variable(s),
+            predicate: NamedNodePattern::Variable(p),
+            object: TermPattern::Variable(o),
+        },
+        graph: graph.clone(),
+    }
+}
+
+/// Per-query bracket placeholder counter. Reset at the start of each
+/// `transform_query` call so snapshot fixtures stay stable across
+/// many-queries-in-one-process runs.
+static BRACKET_COUNTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn reset_bracket_counter() {
+    BRACKET_COUNTER.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Collect the set of in-scope variable names of a `GraphPattern`.
+/// Used by the `MINUS` lowering to detect the W3C variable-disjoint
+/// no-op case (§18.5: when `dom(μ) ∩ dom(μ') = ∅` the row is kept).
+fn collect_in_scope_variables(gp: &GraphPattern) -> BTreeSet<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    gp.on_in_scope_variable(|v| {
+        out.insert(v.as_str().to_string());
+    });
+    out
+}
+
+/// True if the pattern is a plain BGP (no UNION / OPTIONAL / Filter /
+/// nested algebra constructs that could produce variable-disjoint
+/// solutions). Used by the `MINUS` lowering to reject RHS shapes
+/// where the `NOT EXISTS` rewrite is not exact under W3C §18.5.
+fn is_single_bgp(gp: &GraphPattern) -> bool {
+    matches!(gp, GraphPattern::Bgp { .. })
 }
 
 /// True if the expression tree contains an `Expression::Exists` anywhere.
@@ -1221,14 +1423,61 @@ fn process_graph_pattern_inner(
             // variables become hidden bindings that are not exposed in
             // `Variables`.
             //
-            // `FILTER(NOT EXISTS { P })` is rejected at lowering time:
-            // sound non-existence requires a sorted-Merkle-commitment
-            // primitive that is the round-3-main-event scope (spec/exists.md
-            // §3, §6).
+            // `FILTER(NOT EXISTS { P })` lowers (round-3 main event) to a
+            // `NonExistenceConstraint` against the sorted-Merkle commitment
+            // — see `spec/exists.md` §3.3.
             let rewritten_expr =
                 lower_exists_in_expression(expr, &mut info, options, fresh)?;
             info.filters.push(rewritten_expr);
             Ok(info)
+        }
+
+        // `Minus(Po, Pi)` — W3C SPARQL 1.1 §18.5. The W3C definition is
+        //   `{ μ ∈ ⟦Po⟧ | ∀ μ' ∈ ⟦Pi⟧ : μ ≁ μ' ∨ dom(μ) ∩ dom(μ') = ∅ }`
+        // i.e. MINUS only excludes rows whose μ' is compatible AND
+        // shares at least one variable with μ. When **every** μ'
+        // produced by the RHS necessarily binds at least one
+        // outer-shared variable, the rewrite to
+        // `Filter(NOT EXISTS { Pi }, Po)` is exact. When some μ' may
+        // be variable-disjoint (RHS contains UNION / OPTIONAL with a
+        // disjoint-variables branch), the rewrite would remove rows
+        // W3C strictly keeps.
+        //
+        // Round-3 main event handles two cases conservatively:
+        //
+        //   1. RHS in-scope variables disjoint from LHS → MINUS is a
+        //      W3C no-op; lower as the outer alone.
+        //   2. RHS is a single BGP (no UNION / OPTIONAL) with at
+        //      least one shared variable → the rewrite is exact;
+        //      reuse the NOT-EXISTS lowering.
+        //   3. Anything else (RHS contains UNION / OPTIONAL etc.) →
+        //      rejected with a pointer to round-4 follow-up.
+        //
+        // Roborev findings 2026-05-03 (medium): the unconditional
+        // rewrite mishandled the disjoint case (case 1) and the
+        // partially-disjoint UNION-RHS case (case 3).
+        GraphPattern::Minus { left, right } => {
+            let left_vars = collect_in_scope_variables(left);
+            let right_vars = collect_in_scope_variables(right);
+            let shared = left_vars.intersection(&right_vars).count();
+            if shared == 0 {
+                return process_graph_pattern_inner(left, options, fresh);
+            }
+            if !is_single_bgp(right) {
+                return Err(
+                    "MINUS with a UNION / OPTIONAL / non-BGP RHS is not yet implemented. \
+                     The Filter(NOT EXISTS { Pi }, Po) rewrite is only exact when every \
+                     μ' produced by Pi necessarily binds at least one outer-shared \
+                     variable; UNION / OPTIONAL branches can violate this. Round-4 \
+                     follow-up — see spec/exists.md §7."
+                        .into(),
+                );
+            }
+            let outer = GraphPattern::Filter {
+                expr: Expression::Not(Box::new(Expression::Exists(right.clone()))),
+                inner: left.clone(),
+            };
+            process_graph_pattern_inner(&outer, options, fresh)
         }
 
         GraphPattern::Extend { inner, variable, expression } => {
@@ -1249,6 +1498,48 @@ fn process_graph_pattern_inner(
         GraphPattern::LeftJoin { left, right, expression } => {
             let mut left_info = process_graph_pattern_inner(left, options, fresh)?;
             let right_info = process_graph_pattern_inner(right, options, fresh)?;
+
+            // NOT EXISTS / MINUS / EXISTS inside an OPTIONAL (right-
+            // side of a LeftJoin) is not yet supported. The
+            // OptionalBlock IR doesn't carry non-membership
+            // constraints, and the power-set variant emitter doesn't
+            // know how to lower EXISTS / NOT-EXISTS inside the
+            // OPTIONAL's filter expression either. Round-4 follow-up
+            // — same family of constraints as the deferred OPTIONAL-
+            // collapse work in
+            // `questions/optional-collapse-pattern-non-membership.md`.
+            if !right_info.not_exists.is_empty() {
+                return Err(
+                    "NOT EXISTS / MINUS inside an OPTIONAL inner pattern is not yet \
+                     implemented. The branch-local non-membership constraints would be \
+                     silently dropped by the variant emitter. Round-4 follow-up — see \
+                     spec/exists.md §7."
+                        .into(),
+                );
+            }
+            // The OPTIONAL's outer filter expression (if any) lives
+            // alongside `right_info.filters` and must be EXISTS-free —
+            // spargebra's `OPTIONAL { … FILTER(…) }` normalisation
+            // hoists the filter into the LeftJoin's `expression`, so
+            // we check it here too.
+            if let Some(expr) = expression {
+                if expression_contains_exists(expr) {
+                    return Err(
+                        "EXISTS / NOT EXISTS inside an OPTIONAL filter expression is not yet \
+                         implemented. Round-4 follow-up — see spec/exists.md §7."
+                            .into(),
+                    );
+                }
+            }
+            for f in &right_info.filters {
+                if expression_contains_exists(f) {
+                    return Err(
+                        "EXISTS / NOT EXISTS inside an OPTIONAL inner pattern's FILTER is not \
+                         yet implemented. Round-4 follow-up — see spec/exists.md §7."
+                            .into(),
+                    );
+                }
+            }
 
             let offset = left_info.patterns.len();
 
@@ -1333,6 +1624,25 @@ fn process_graph_pattern_inner(
             collect_branches(left, &mut branches, options, fresh)?;
             collect_branches(right, &mut branches, options, fresh)?;
 
+            // NOT EXISTS / MINUS inside a UNION branch is not yet
+            // supported. The branch-local `not_exists` entries reference
+            // BGP slots in the branch's own index space, but the emit
+            // layer's branch handler doesn't currently emit them
+            // (verify_non_membership_no_inclusion's asserts can't be
+            // composed inside the per-branch `branch_X = (...) & (...)`
+            // boolean form). Round-4 follow-up — see roborev finding
+            // 2026-05-03 (high).
+            for branch in &branches {
+                if !branch.not_exists.is_empty() {
+                    return Err(
+                        "NOT EXISTS / MINUS inside a UNION branch is not yet implemented. \
+                         The branch-local non-membership constraints would be silently dropped \
+                         by the emit layer. Round-4 follow-up — see spec/exists.md §7."
+                            .into(),
+                    );
+                }
+            }
+
             let patterns = branches
                 .iter()
                 .max_by_key(|b| b.patterns.len())
@@ -1346,6 +1656,7 @@ fn process_graph_pattern_inner(
                 filters: Vec::new(),
                 union_branches: Some(branches),
                 optional_blocks: Vec::new(),
+                not_exists: Vec::new(),
             })
         }
 

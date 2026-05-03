@@ -19,6 +19,26 @@ use crate::{Assertion, OptionalBlock, PatternInfo, QueryInfo, Term, TransformOpt
 const MAIN_TEMPLATE: &str = include_str!("../template/main-verify.template.nr");
 const MAIN_TEMPLATE_SIMPLE: &str = include_str!("../template/main-simple.template.nr");
 
+/// True if any part of the pattern tree carries a `NonExistenceConstraint`.
+/// The lowering currently rejects NOT EXISTS inside UNION branches and
+/// OPTIONAL right-sides (per round-3 scope), so in practice only the
+/// top-level `pat.not_exists` matters; the recursive walk is a
+/// defence-in-depth check should those rejections ever loosen without
+/// an emit-side update. Used by the skip-signing guard.
+fn pattern_has_not_exists(pat: &PatternInfo) -> bool {
+    if !pat.not_exists.is_empty() {
+        return true;
+    }
+    if let Some(branches) = &pat.union_branches {
+        for b in branches {
+            if pattern_has_not_exists(b) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Recursively collect all optional blocks from a pattern, flattening nested optionals.
 pub(crate) fn collect_all_optional_blocks(optionals: &[OptionalBlock]) -> Vec<OptionalBlock> {
     let mut result = Vec::new();
@@ -54,6 +74,7 @@ pub(crate) fn generate_circuit_for_optional_combination(
         filters: base_info.pattern.filters.clone(),
         union_branches: base_info.pattern.union_branches.clone(),
         optional_blocks: Vec::new(),
+        not_exists: base_info.pattern.not_exists.clone(),
     };
 
     let mut optional_only_vars: std::collections::HashSet<String> =
@@ -116,6 +137,14 @@ pub(crate) fn generate_sparql_nr_from_query_info(
     info: &QueryInfo,
     options: &TransformOptions,
 ) -> Result<(String, Vec<serde_json::Value>, bool, bool), String> {
+    if options.skip_signing && pattern_has_not_exists(&info.pattern) {
+        return Err(
+            "NOT EXISTS / MINUS / collapsed-OPTIONAL queries cannot run in skip-signing mode \
+             — non-membership soundness depends on the sorted Merkle commitment, which is \
+             absent when signing is skipped."
+                .into(),
+        );
+    }
     let mut binding_map: BTreeMap<String, Term> = BTreeMap::new();
     for b in &info.pattern.bindings {
         if !info.variables.contains(&b.variable) && !binding_map.contains_key(&b.variable) {
@@ -186,6 +215,28 @@ pub(crate) fn generate_sparql_nr_from_query_info(
             let expr = filter_to_noir(f, info, &binding_map, &mut hidden)?;
             assertions.push(expr);
         }
+    }
+
+    // Non-existence constraints (NOT EXISTS / MINUS / unmatched-arm of
+    // collapsed OPTIONAL — see spec/exists.md §3.3, §6.4). Each emits
+    // a call to `utils::verify_non_membership_no_inclusion` with the
+    // absent triple's hash computed inline from the outer μ. Bracket
+    // leaves at `bgp[bracket_left_idx]` / `bgp[bracket_right_idx]` are
+    // already inclusion-checked by the generic per-triple loop in
+    // `main.nr`.
+    let mut not_exists_calls: Vec<String> = Vec::new();
+    for ne in &info.pattern.not_exists {
+        let absent = format!(
+            "consts::hash4([{}, {}, {}, {}])",
+            serialize_term(&ne.absent_terms[0], info, &binding_map),
+            serialize_term(&ne.absent_terms[1], info, &binding_map),
+            serialize_term(&ne.absent_terms[2], info, &binding_map),
+            serialize_term(&ne.absent_terms[3], info, &binding_map),
+        );
+        not_exists_calls.push(format!(
+            "utils::verify_non_membership_no_inclusion(bgp[{}], bgp[{}], {})",
+            ne.bracket_left_idx, ne.bracket_right_idx, absent
+        ));
     }
 
     let mut sparql_nr = String::new();
@@ -263,6 +314,9 @@ pub(crate) fn generate_sparql_nr_from_query_info(
         for a in &assertions {
             sparql_nr.push_str(&format!("  assert({});\n", a));
         }
+    }
+    for call in &not_exists_calls {
+        sparql_nr.push_str(&format!("  {};\n", call));
     }
     sparql_nr.push_str("}\n");
 

@@ -109,6 +109,8 @@
     }
   ],
   "limit": null,
+  "notExists": [],
+  "not_exists": [],
   "num_optionals": 2,
   "offset": null,
   "optionalPatterns": [

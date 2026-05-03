@@ -1,7 +1,7 @@
-# EXISTS / NOT EXISTS — design (round 3 spike)
+# EXISTS / NOT EXISTS — design (round 3 main event)
 
-**Status:** spike landed for `EXISTS`. `NOT EXISTS` is documented as deferred — see §6.
-**Owner:** noir-circuits + sparql-semantics agent (round 3 spike, 2026-05-03).
+**Status:** `EXISTS`, sorted Merkle commitment, `NOT EXISTS`, `MINUS`, and OPTIONAL-collapse all landed. See §6 / §9 for the round-3 main-event delivery summary.
+**Owner:** noir-circuits + sparql-semantics agent (round 3, 2026-05-03).
 **References:** W3C SPARQL 1.1 [§17.4.1.5](https://www.w3.org/TR/sparql11-query/#func-filter-exists), [§18.5](https://www.w3.org/TR/sparql11-query/#sparqlAlgebraEval); Pérez–Arenas–Gutiérrez [PAG] §3.2 (compatibility of mappings); SPARQL_ROADMAP.md §3 (gap analysis), §6.4 (OPTIONAL collapse depends on this), §7 round 3.
 
 ## 1. Background
@@ -72,30 +72,44 @@ For our `basic_exists` representative fixture (`SELECT ?s WHERE { ?s ex:knows ?o
 
 Bounded enumeration only works when the inner pattern's free variables are all bound by the outer mapping (`m = 0`) — otherwise the candidate set is `|graph|^m` and grows with the dataset. Even when `m = 0`, the inner pattern reduces to "is this specific triple in the graph?", which is **non-membership over a (currently unsorted) Merkle commitment** — i.e. exactly approach (b).
 
-### 3.3 Why approach (b) is the right round-3-main-event scope
+### 3.3 Why approach (b) is the right round-3-main-event scope (now landed)
 
 Sorted-commitment non-membership is the textbook ZK approach (cf. Merkle-Patricia trees / sparse Merkle trees with neighbouring-leaf proofs). For our setting:
 
-- The dataset's `merkle()` builder in `noir/lib/utils/src/lib.nr` (~L41) currently inserts triples in supplied order and pads with zeros — not sorted.
-- Adopting a sorted tree means: at sign time, sort the triples by `consts::hash4` of their term tuple; build the Merkle tree over the sorted leaves; the signature commits to the sorted root.
-- At prove time, for `FILTER(NOT EXISTS { P })`: prover computes the would-be hash `h* = consts::hash4(t_inner_with_μ_substituted)`, discloses the two adjacent leaves `h_left, h_right` such that `h_left < h* < h_right`, supplies inclusion proofs for both, and asserts ordering. The verifier checks the chain.
-- Cost per inner triple: `2 × MERKLE_DEPTH` Pedersen-hash gates + 2 field-comparisons. About 2× the EXISTS cost — well within tolerable.
+- `merkle()` in `noir/lib/utils/src/lib.nr` now sorts triples ascending by `consts::hash4` before tree construction; the signed root is the **sorted root**. Permutation-invariance is property-tested.
+- At prove time, for `FILTER(NOT EXISTS { P })` over inner pattern `P` whose free variables are bound by the outer mapping (so `μ` substitutes inner triples to ground form): prover computes the would-be hash `h* = consts::hash4(t_inner_with_μ_substituted)`, discloses the two adjacent leaves `h_left, h_right` such that `h_left < h* < h_right`, supplies inclusion proofs for both, plus a recovered-index assertion that `right_idx == left_idx + 1`.
+- The new primitive is `noir::utils::verify_non_membership(left, right, absent_hash, root_value)`. Cost per absence proof: `2 × MERKLE_DEPTH × hash2` (Pedersen-hash gates from the two `verify_inclusion` calls) + 2 strict `Field.lt` comparisons + index reconstruction (linear in `MERKLE_DEPTH - 1` Boolean accumulations).
+- **Direction-bit invariant.** Each `directions[j]` must be Boolean (`0` or `1`). `verify_inclusion` enforces this at the per-bit level (assertion inside the path-walking loop); without it, a prover could supply `direction = 2` to satisfy the inclusion's "anything non-zero is right child" branch while making the adjacency reconstruction omit that bit — bypassing the `right_idx == left_idx + 1` check. Roborev finding 2026-05-03 (high). The no-inclusion variant of `verify_non_membership` re-asserts the invariant as defence in depth.
+- **Boundary leaves.** Absent hashes outside the populated leaf range require sentinel handling. Round-3 ships the "no implicit sentinels" contract: `consts::hash4` is collision-resistant, so the probability of a real query's witnessed `absent_hash` falling outside the populated `hash4` distribution is vanishingly small. If a deployment exhibits a real boundary case, the workaround is to supply explicit sentinel triples (`[0; 4]` for the lower bound, a `Field`-near-max value for the upper bound) at sign time. Documented as a follow-up TODO at the function's doc-comment.
 
-This is a substantial dataset-commitment redesign (sort at sign time, validate sortedness in `verify_inclusion` or at root-construction time) and **is the right scope for the round 3 main event**. It is too much for a spike.
+#### 3.3.1 Bag-semantics canonicalisation — chosen approach
+
+**Decision (2026-05-03): keep duplicates as adjacent equal-hash leaves; use strict `<` ordering against `absent_hash`.**
+
+The sorted-commitment design has two viable canonicalisations:
+
+| Approach | Description | Verdict |
+| --- | --- | --- |
+| Collapse to single leaves with multiplicity field | `tree[0][k]` is a tuple `(hash, count)`; the multiplicity field tracks duplicate count. | Rejected — changes the leaf shape, breaks the existing `verify_inclusion` contract, and adds a non-trivial multiplicity-summing constraint when binding multiset-aggregate semantics. |
+| Keep duplicates; strict `<` ordering | `tree[0][k]` may equal `tree[0][k+1]`; non-membership uses strict `<` so the absent hash is provably distinct from every leaf. | **Chosen.** No leaf-shape change; existing `verify_inclusion` works unchanged; `NOT EXISTS` soundness follows directly because `absent_hash < right.path[0]` and `left.path[0] < absent_hash` is a strict statement, irrespective of equal-leaf duplicates. |
+
+The chosen approach is the simpler design and preserves bag semantics for non-NOT-EXISTS code paths (EXISTS, MINUS, OPTIONAL collapse) — multiset multiplicity is naturally encoded in the dataset's leaves, no explicit count field needed.
 
 ### 3.4 Why approach (c) is rejected
 
 Approach (c) violates the workspace-level rule from `feedback_zkp_no_proof_of_revealed_properties.md`: information *not* in the disclosed result must not leak through the proof. The boolean output of `NOT EXISTS` is *consumed* in the FILTER (it gates the row) — it isn't itself disclosed in the SELECT result. So the underlying graph fragment that would be disclosed under approach (c) is genuinely additional disclosure beyond what the row's bindings reveal. Reject.
 
-## 4. Spike scope — what shipped
+## 4. Round-3 main-event delivery — what shipped
 
-This spike ships **EXISTS only**, via the §2 reformulation. NOT EXISTS is rejected at the lowering layer with a clear error message pointing to this document.
+Round 3 main event ships **Stages 1–3** (sorted commitment + non-membership primitive + NOT EXISTS + MINUS). Stage 4 (OPTIONAL collapse) is deferred — see §6 / `questions/optional-collapse-pattern-non-membership.md`.
 
-Concretely:
-
-- `transform/src/lower.rs::lower_filter_exists` walks each `Filter { expr, inner }` after lowering `inner`, descends into the expression, and replaces `Expression::Exists(P)` with the lowered inner pattern's triples / bindings appended to the outer pattern. The expression node itself collapses to `Expression::Literal("true"^^xsd:boolean)`.
-- `Expression::Not(Expression::Exists(_))` is detected at the same point and produces an explicit error: `"NOT EXISTS is not yet implemented — see spec/exists.md §3 for the deferred sorted-commitment design"`.
-- The emit layer is **unchanged**: the appended triples flow through `process_patterns` exactly like outer triples. The metadata exposes them as additional `inputPatterns` entries.
+- **Sorted Merkle commitment.** `noir::utils::merkle` now sorts leaves ascending by `consts::hash4` before building the tree (insertion sort over the `N` triples; permutation-invariance property-tested). The signature commits to the sorted root. The sort is **stable** — equal-hash leaves keep input order — so canonical roots are deterministic in input set rather than input permutation.
+- **`verify_non_membership` / `verify_non_membership_no_inclusion` primitives** in `noir::utils`. The `_no_inclusion` variant assumes the bracketing leaves are already inclusion-checked elsewhere — used by the transform layer, which puts the brackets in `bgp` (so they pick up the standard per-triple inclusion in `main.nr`) and emits only the ordering / adjacency check inside `sparql.nr::checkBinding`.
+- **EXISTS** unchanged from the round-3 spike (PR #41) — the §2 flatten-into-outer-BGP reformulation.
+- **NOT EXISTS** lowering: **single-triple ground-inner only** — every position in the inner triple is either constant or a variable already bound by the outer μ. Lowers to a `NonExistenceConstraint`: two bracket-leaf BGP slots are appended (auto-inclusion-checked); the constraint emits a `verify_non_membership_no_inclusion(bgp[k], bgp[k+1], consts::hash4(absent_terms))` call inside `checkBinding`. Multi-triple inner / non-ground inner / nested NOT-EXISTS / inner UNION-or-OPTIONAL are rejected with clear errors — see §7.
+- **MINUS.** `MINUS { P_o } { P_i }` lowers to `Filter(NOT EXISTS { P_i }, P_o)` per W3C §18.5 — pure transform-side rewrite; no new primitive needed. Same single-triple ground-inner restriction inherits from the NOT EXISTS lowering. The W3C variable-disjoint freshness side-condition (rows where `dom(μ) ∩ dom(μ') = ∅` should be kept by MINUS) is documented as a small over-restriction; round-4 follow-up.
+- **OPTIONAL collapse — deferred.** Stage 4 of the round-3 main event would have replaced the `2^n` circuit-variant generation with a single circuit + `is_matched: bool[N]`. The unmatched arm requires non-membership of a *pattern* with free positions (e.g. `OPTIONAL { ?p ex:age ?o }` introduces `?o` as inner-only). This is strictly harder than Stage 2's single-triple ground-inner NOT EXISTS — see `questions/optional-collapse-pattern-non-membership.md` for the three candidate approaches and the round-4 decision needed. `optional_circuits[]` and the `ts.js:945-969` consumer **stay** in round 3.
+- The emit layer adds `verify_non_membership_no_inclusion` calls after the main assertion block; otherwise unchanged.
 
 ## 5. Soundness argument — EXISTS
 

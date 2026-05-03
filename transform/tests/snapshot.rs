@@ -254,6 +254,31 @@ const CORPUS: &[Case] = &[
         query: "PREFIX ex: <http://example.org/>\n\
                 SELECT ?s WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ?p \"hello\" . }) }",
     },
+    // NOT EXISTS — round 3 main event (see spec/exists.md §3.3, §4).
+    // Single-triple ground-inner: every inner position is fixed by
+    // outer μ or constant. Lowers to a NonExistenceConstraint with
+    // two bracket-leaf BGP slots and a verify_non_membership call.
+    Case {
+        name: "not_exists_grounded",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?o . FILTER(NOT EXISTS { ?s ex:type ex:Person . }) }",
+    },
+    // NOT EXISTS with the absent-triple's object position taken from
+    // the outer scope (?o). Validates that absent_terms threads
+    // outer-bound variables through to the absent-hash computation.
+    Case {
+        name: "not_exists_outer_var",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s ?o WHERE { ?s ex:knows ?o . FILTER(NOT EXISTS { ?s ex:hates ?o . }) }",
+    },
+    // MINUS — round 3 main event (see spec/exists.md §6 / W3C §18.5).
+    // `MINUS { Po } { Pi }` lowers to `Filter(NOT EXISTS { Pi }, Po)`.
+    // Same NonExistenceConstraint shape as the corresponding NOT EXISTS.
+    Case {
+        name: "minus_basic",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s ?o WHERE { ?s ex:knows ?o . MINUS { ?s ex:hates ?o . } }",
+    },
 ];
 
 /// Round 2 §7 — defensive cap on OPTIONAL blocks. The transform must
@@ -443,20 +468,175 @@ fn check_or_update(path: &PathBuf, actual: &str, update: bool, label: &str, name
     }
 }
 
-/// `NOT EXISTS` is rejected at lowering — see `spec/exists.md` §3 / §6
-/// for the deferred sorted-Merkle-commitment design.
+/// Non-ground-inner `NOT EXISTS` is rejected — round 3 main event ships
+/// single-triple ground-inner only. See `spec/exists.md` §7.
 #[test]
-fn not_exists_is_rejected_with_pointer_to_design_doc() {
+fn not_exists_non_ground_inner_is_rejected() {
     let q = "PREFIX ex: <http://example.org/>\n\
              SELECT ?s WHERE { ?s ex:knows ?o . FILTER(NOT EXISTS { ?o ex:age ?age . }) }";
     match transform_query(q) {
-        Ok(_) => panic!("expected NOT EXISTS to be rejected, but transform succeeded"),
+        Ok(_) => panic!("expected non-ground-inner NOT EXISTS to be rejected"),
         Err(err) => assert!(
-            err.contains("NOT EXISTS") && err.contains("spec/exists.md"),
-            "expected error to mention NOT EXISTS and spec/exists.md, got: {}",
+            err.contains("NOT EXISTS") && err.contains("ground-inner") && err.contains("?age"),
+            "expected error to mention NOT EXISTS, ground-inner, and ?age, got: {}",
             err
         ),
     }
+}
+
+/// `NOT EXISTS` inside a UNION branch is rejected — branch-local
+/// non-membership constraints would be silently dropped by the emit
+/// layer (roborev finding 2026-05-03 high). Round-4 follow-up.
+#[test]
+fn not_exists_inside_union_branch_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               { ?s ex:a ?o . FILTER(NOT EXISTS { ?s ex:type ex:Person . }) } \
+               UNION \
+               { ?s ex:b ?o . } \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected NOT EXISTS inside UNION branch to be rejected"),
+        Err(err) => assert!(
+            err.contains("UNION") && err.contains("NOT EXISTS"),
+            "expected error to mention UNION and NOT EXISTS, got: {}",
+            err
+        ),
+    }
+}
+
+/// `NOT EXISTS` inside an OPTIONAL right-side is rejected — the
+/// OptionalBlock IR doesn't carry non-membership constraints (roborev
+/// finding 2026-05-03 high, generalised). Round-4 follow-up.
+#[test]
+fn not_exists_inside_optional_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?a . FILTER(NOT EXISTS { ?p ex:type ex:Person . }) } \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected NOT EXISTS inside OPTIONAL right-side to be rejected"),
+        Err(err) => assert!(
+            err.contains("OPTIONAL") && err.contains("NOT EXISTS"),
+            "expected error to mention OPTIONAL and NOT EXISTS, got: {}",
+            err
+        ),
+    }
+}
+
+/// `MINUS` with a UNION right-side is rejected — partially-disjoint
+/// branches need exact W3C §18.5 semantics that single-triple-ground
+/// NOT EXISTS doesn't provide (roborev follow-up 2026-05-03 medium).
+/// Round-4 follow-up — once OPTIONAL collapse (and its prefix-tree
+/// commitment) lands, MINUS over arbitrary RHS becomes tractable.
+#[test]
+fn minus_with_union_rhs_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { \
+               ?s ex:p ?o . \
+               MINUS { { ?s ex:q ?x } UNION { ?y ex:r ?z } } \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected MINUS over UNION-RHS to be rejected"),
+        Err(err) => {
+            // The current lowering rejects this via the NOT EXISTS
+            // rewrite catching the inner UNION ("UNION inside an
+            // EXISTS pattern" is the existing reject path) — either
+            // error path is acceptable, the important property is
+            // that the query does not silently lower with incorrect
+            // semantics.
+            assert!(
+                err.contains("NOT EXISTS")
+                    || err.contains("MINUS")
+                    || err.contains("UNION"),
+                "expected error mentioning NOT EXISTS / MINUS / UNION, got: {}",
+                err
+            );
+        }
+    }
+}
+
+/// Variable-disjoint `MINUS` is a no-op per W3C §18.5 — when the inner
+/// pattern shares no variables with the outer, every row is kept (roborev
+/// finding 2026-05-03 medium). Verifies the lowering produces the
+/// outer alone, with no NonExistenceConstraint.
+#[test]
+fn minus_variable_disjoint_is_noop() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { \
+               ?s ex:knows ?o . \
+               MINUS { ex:bob ex:type ex:Spy . } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+    assert!(
+        result.sparql_nr.contains("type BGP = [Triple; 1]"),
+        "variable-disjoint MINUS must lower as the outer pattern alone (1 triple, no brackets), got:\n{}",
+        result.sparql_nr
+    );
+    let ne = result
+        .metadata
+        .get("notExists")
+        .and_then(|v| v.as_array())
+        .expect("notExists metadata array");
+    assert_eq!(
+        ne.len(),
+        0,
+        "variable-disjoint MINUS must emit no NonExistenceConstraint"
+    );
+}
+
+/// Multi-triple inner `NOT EXISTS` is rejected — round 3 main event
+/// ships single-triple inner only. See `spec/exists.md` §7.
+#[test]
+fn not_exists_multi_triple_inner_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?o . \
+               FILTER(NOT EXISTS { ?s ex:type ex:Person . ?s ex:flag ?o . }) \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected multi-triple-inner NOT EXISTS to be rejected"),
+        Err(err) => assert!(
+            err.contains("NOT EXISTS") && err.contains("single-triple"),
+            "expected error to mention NOT EXISTS and single-triple, got: {}",
+            err
+        ),
+    }
+}
+
+/// Ground-inner single-triple `NOT EXISTS` lowers to a non-membership
+/// constraint. The inner triple `?s ex:type ex:Person` has every
+/// position bound from the outer scope (?s) or constant (ex:type,
+/// ex:Person). The expected witness shape is: outer BGP triple +
+/// 2 bracket-leaf BGP slots + 1 NonExistenceConstraint.
+#[test]
+fn not_exists_ground_inner_lowers_to_non_membership() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?o . \
+               FILTER(NOT EXISTS { ?s ex:type ex:Person . }) \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+    // Three BGP slots: outer triple + 2 brackets.
+    assert!(
+        result.sparql_nr.contains("type BGP = [Triple; 3]"),
+        "expected BGP of size 3 (1 outer + 2 brackets), got:\n{}",
+        result.sparql_nr
+    );
+    // Body must call `verify_non_membership_no_inclusion`.
+    assert!(
+        result.sparql_nr.contains("utils::verify_non_membership_no_inclusion"),
+        "expected verify_non_membership_no_inclusion call, got:\n{}",
+        result.sparql_nr
+    );
+    // Metadata exposes the constraint.
+    let ne = result
+        .metadata
+        .get("notExists")
+        .and_then(|v| v.as_array())
+        .expect("notExists metadata array");
+    assert_eq!(ne.len(), 1, "expected one NonExistenceConstraint");
 }
 
 /// EXISTS nested under boolean operators is rejected for now (see
