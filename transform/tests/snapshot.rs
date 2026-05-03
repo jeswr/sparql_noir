@@ -304,6 +304,25 @@ fn inner_only_exists_variables_are_renamed() {
     assert!(result.sparql_nr.contains("pub(crate) struct Variables {\n  pub(crate) s: Field,\n}"));
 }
 
+/// ASK queries auto-project every bound variable. The roborev
+/// 2026-05-03 finding: with EXISTS now introducing `__exists_*` hidden
+/// vars, ASK must filter them out to avoid leaking inner-only witness
+/// names. This test guards that filter.
+#[test]
+fn ask_with_exists_does_not_leak_inner_only_vars() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             ASK WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ex:age ?age . }) }";
+    let result = transform_query(q).expect("transform should succeed");
+    assert!(
+        !result.sparql_nr.contains("__exists_age"),
+        "__exists_age_* should not appear in ASK projection: {}",
+        result.sparql_nr
+    );
+    // Sanity: the regular outer-bound variables ?s and ?o still project.
+    assert!(result.sparql_nr.contains("pub(crate) s: Field"));
+    assert!(result.sparql_nr.contains("pub(crate) o: Field"));
+}
+
 /// EXISTS with a fully-ground inner pattern lowers cleanly: the inner
 /// triple becomes an additional outer BGP entry with constant-position
 /// assertions and a unification of the shared variable.

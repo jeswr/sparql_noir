@@ -437,7 +437,24 @@ fn flatten_exists_into(
         }
     }
 
-    info.patterns.extend(inner_info.patterns);
+    // Rename inner-only variables inside the spargebra TriplePatterns
+    // before extending — otherwise `metadata.json` would expose the
+    // original local names, allowing downstream metadata-driven
+    // matchers to correlate two independent EXISTS blocks that reuse
+    // the same source variable name.
+    let renamed_patterns: Vec<ContextualizedTriple> = inner_info
+        .patterns
+        .into_iter()
+        .map(|ct| ContextualizedTriple {
+            pattern: TriplePattern {
+                subject: rename_term_pattern(ct.pattern.subject, &rename),
+                predicate: ct.pattern.predicate,
+                object: rename_term_pattern(ct.pattern.object, &rename),
+            },
+            graph: rename_graph_context(ct.graph, &rename),
+        })
+        .collect();
+    info.patterns.extend(renamed_patterns);
 
     for binding in inner_info.bindings {
         let adjusted_term = match binding.term {
@@ -488,6 +505,35 @@ fn flatten_exists_into(
     }
 
     Ok(())
+}
+
+/// Rename inner-only `TermPattern::Variable` references inside a
+/// spargebra `TermPattern`. Other variants pass through unchanged.
+fn rename_term_pattern(
+    tp: TermPattern,
+    rename: &std::collections::BTreeMap<String, String>,
+) -> TermPattern {
+    if let TermPattern::Variable(v) = &tp {
+        if let Some(fresh) = rename.get(v.as_str()) {
+            return TermPattern::Variable(Variable::new_unchecked(fresh.clone()));
+        }
+    }
+    tp
+}
+
+/// Rename inner-only variable references inside a `GraphContext`. The
+/// `Variable` arm is the only case that carries a name; `Default` /
+/// `NamedNode` pass through.
+fn rename_graph_context(
+    graph: GraphContext,
+    rename: &std::collections::BTreeMap<String, String>,
+) -> GraphContext {
+    if let GraphContext::Variable(name) = &graph {
+        if let Some(fresh) = rename.get(name) {
+            return GraphContext::Variable(fresh.clone());
+        }
+    }
+    graph
 }
 
 /// Adjust an inner-pattern `Term` for the outer offset, and rename
@@ -1190,11 +1236,18 @@ pub(crate) fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
                 offset: post.offset,
             })
         }
-        // ASK queries do not have PROJECT — project all bound variables.
+        // ASK queries do not have PROJECT — project all bound
+        // variables, except those with `__`-prefix (blank-node
+        // internals and `__exists_*` inner-only EXISTS witnesses,
+        // which must never appear in the disclosed projection).
         _ => {
             let pattern = process_graph_pattern(inner)?;
-            let mut vars: Vec<String> =
-                pattern.bindings.iter().map(|b| b.variable.clone()).collect();
+            let mut vars: Vec<String> = pattern
+                .bindings
+                .iter()
+                .map(|b| b.variable.clone())
+                .filter(|v| !v.starts_with("__"))
+                .collect();
             vars.sort();
             vars.dedup();
             Ok(QueryInfo {

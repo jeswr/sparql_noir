@@ -26,7 +26,7 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "age"
+        "value": "__exists_age_0"
       },
       "predicate": {
         "termType": "NamedNode",
@@ -62,7 +62,7 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "age"
+        "value": "__exists_age_0"
       },
       "predicate": {
         "termType": "NamedNode",
