@@ -190,6 +190,18 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M,
         N + 2 <= 1024,
         "merkle: N + 2 (real leaves + sentinels) exceeds the 1024-slot tree-level capacity",
     );
+    // Slab depth bound. The slab is dimensioned `[[Field; 1024]; M]`
+    // per level, but level-`i`'s sibling lookup `tree[i - 1][index ^
+    // 1]` for index up to `2^(M - 1) - 1` requires the level array
+    // to fit `2^(M - 1)` slots. Beyond `M = 11` (so `2^(M - 1) =
+    // 1024`), the slab can no longer hold the level. Reject those
+    // depths here -- the upstream `setup.ts --depth` defaults
+    // already use 11; deeper trees need the slab dimension lifted.
+    // Roborev finding 2026-05-03 (medium).
+    std::static_assert(
+        M <= 11,
+        "merkle: M > 11 exceeds the fixed 1024-slot per-level slab",
+    );
     // Compute `2^(M - 1)` as a `u32` using a small loop so the
     // shift's type doesn't fight the `static_assert` comparison.
     let mut logical_capacity: u32 = 1;
