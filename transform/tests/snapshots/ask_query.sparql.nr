@@ -5,12 +5,10 @@ use dep::types::Triple;
 
 pub(crate) type BGP = [Triple; 1];
 pub(crate) struct Variables {
-  pub(crate) o: Field,
-  pub(crate) s: Field,
 }
 
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables) {
-  assert(variables.s == bgp[0].terms[0]);
-  assert(variables.o == bgp[0].terms[2]);
+  assert(bgp[0].terms[0] == bgp[0].terms[0]);
+  assert(bgp[0].terms[2] == bgp[0].terms[2]);
   assert(consts::hash2([0, consts::encode_string("http://example.org/knows")]) == bgp[0].terms[1]);
 }

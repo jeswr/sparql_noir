@@ -53,8 +53,5 @@
   "total_patterns": 1,
   "unionBranches": [],
   "union_branches": [],
-  "variables": [
-    "o",
-    "s"
-  ]
+  "variables": []
 }
