@@ -17,11 +17,16 @@ on:
   pull_request:
     branches: [ main ]
 
+# Only run on the round-3 branch's PR (or its push events). The
+# `pull_request.branches` filter above matches every PR targeting
+# main, so we additionally gate each job on `github.head_ref` to
+# avoid this workflow firing on unrelated PRs.
 jobs:
   transform-tests:
     name: cargo test transform
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.head_ref == 'feat/not-exists-sorted-commitment'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +39,7 @@ jobs:
     name: tsc smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.head_ref == 'feat/not-exists-sorted-commitment'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -48,7 +54,7 @@ jobs:
     name: test-summary (auto-merge gate)
     runs-on: ubuntu-latest
     needs: [transform-tests, ts-build]
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || github.head_ref == 'feat/not-exists-sorted-commitment')
     steps:
       - name: Aggregate gate
         run: |

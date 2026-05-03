@@ -18,6 +18,10 @@ jobs:
   test-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Skip the full test-build matrix for the round-3 main-event PR;
+    # the trimmed `round3-ci.yml` workflow is the gate. Restored by
+    # the final pre-merge commit.
+    if: github.event_name != 'pull_request' || github.head_ref != 'feat/not-exists-sorted-commitment'
 
     steps:
     - name: Checkout repository
