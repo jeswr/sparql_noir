@@ -20,10 +20,17 @@ jobs:
   benchmark:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Skip the benchmark matrix for the round-3 main-event PR; the
-    # trimmed `round3-ci.yml` workflow is the gate. Restored by the
-    # final pre-merge commit.
-    if: github.event_name != 'pull_request' || github.head_ref != 'feat/not-exists-sorted-commitment'
+    # Skip the benchmark matrix for the round-3 main-event PR
+    # (`jeswr/sparql_noir:feat/not-exists-sorted-commitment`); the
+    # trimmed `round3-ci.yml` workflow is the gate. Repository-
+    # qualified to avoid fork PRs with the same branch name
+    # bypassing this matrix. Restored by the final pre-merge commit.
+    if: |
+      github.event_name != 'pull_request' ||
+      !(
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.head_ref == 'feat/not-exists-sorted-commitment'
+      )
 
     steps:
     - name: Checkout repository

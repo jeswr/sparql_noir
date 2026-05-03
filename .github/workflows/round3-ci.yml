@@ -26,7 +26,12 @@ jobs:
     name: cargo test transform
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name != 'pull_request' || github.head_ref == 'feat/not-exists-sorted-commitment'
+    if: |
+      github.event_name != 'pull_request' ||
+      (
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.head_ref == 'feat/not-exists-sorted-commitment'
+      )
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -39,7 +44,12 @@ jobs:
     name: tsc smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name != 'pull_request' || github.head_ref == 'feat/not-exists-sorted-commitment'
+    if: |
+      github.event_name != 'pull_request' ||
+      (
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.head_ref == 'feat/not-exists-sorted-commitment'
+      )
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -54,7 +64,14 @@ jobs:
     name: test-summary (auto-merge gate)
     runs-on: ubuntu-latest
     needs: [transform-tests, ts-build]
-    if: always() && (github.event_name != 'pull_request' || github.head_ref == 'feat/not-exists-sorted-commitment')
+    if: |
+      always() && (
+        github.event_name != 'pull_request' ||
+        (
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.head_ref == 'feat/not-exists-sorted-commitment'
+        )
+      )
     steps:
       - name: Aggregate gate
         run: |
