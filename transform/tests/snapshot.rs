@@ -221,6 +221,13 @@ const CORPUS: &[Case] = &[
         name: "filter_arith_mul_div",
         query: "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ex:n ?n . FILTER((?n * \"2\"^^xsd:integer) / \"3\"^^xsd:integer > \"4\"^^xsd:integer) }",
     },
+    // Round 2 §7 — UNION-distribution under Join. The sibling
+    // `?s ex:flag ?x` triple must propagate into every branch of the
+    // `+` path's UNION (regression for roborev #332 high finding).
+    Case {
+        name: "kleene_join_sibling",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o ?x WHERE { ?s ex:flag ?x . ?s ex:knows+ ?o . }",
+    },
 ];
 
 /// Round 2 §7 — defensive cap on OPTIONAL blocks. The transform must
@@ -280,6 +287,58 @@ fn kleene_path_segment_max_configurable() {
     assert!(
         !r.sparql_nr.contains("branch_"),
         "depth-1 unroll should have no UNION branches:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// `<a> p* <a>` — zero-step branch must be satisfiable for ground
+/// equal endpoints. Regression for roborev #332 finding (medium).
+#[test]
+fn kleene_zero_step_ground_equal_satisfiable() {
+    let q = "PREFIX ex: <http://example.org/>\nASK WHERE { ex:a ex:knows* ex:a . }";
+    let r = transform_query(q).expect("transform succeeds");
+    // The zero-step branch must NOT be a vacuous `false`. Look for a
+    // `true` branch literal.
+    assert!(
+        r.sparql_nr.contains("let branch_0 = (true);"),
+        "ground-equal zero-step should yield a `true` branch:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// `<a> p* <b>` (unequal ground) — zero-step branch must be
+/// unsatisfiable, but the positive branches must still apply.
+/// Regression for roborev #332 finding (medium).
+#[test]
+fn kleene_zero_step_ground_unequal_unsatisfiable() {
+    let q = "PREFIX ex: <http://example.org/>\nASK WHERE { ex:a ex:knows* ex:b . }";
+    let r = transform_query(q).expect("transform succeeds");
+    // Zero-step branch must include a `false` filter so the branch
+    // is not satisfiable just from being empty.
+    assert!(
+        r.sparql_nr.contains("(false)"),
+        "ground-unequal zero-step should explicitly assert false:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// Joining a UNION-producing path (`+`, `*`, `|`) with a sibling
+/// triple must propagate the sibling's constraints into every UNION
+/// branch — otherwise a malicious prover could pick a branch with
+/// fewer constraints. Regression for roborev #332 finding (high) on
+/// b8e0b1a.
+#[test]
+fn union_path_join_with_sibling_keeps_all_constraints() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s ?o ?x WHERE { ?s ex:flag ?x . ?s ex:knows+ ?o . }";
+    let r = transform_query(q).expect("transform succeeds");
+    // The sibling triple `?s ex:flag ?x` must appear in every branch.
+    let branch_count = r.sparql_nr.matches("let branch_").count();
+    assert!(branch_count > 0, "kleene+ should produce union branches:\n{}", r.sparql_nr);
+    let flag_count = r.sparql_nr.matches("ex:flag").count()
+        + r.sparql_nr.matches("encode_string(\"http://example.org/flag\")").count();
+    assert!(
+        flag_count >= branch_count,
+        "sibling `ex:flag` predicate should appear in every branch (got flag_count={flag_count}, branches={branch_count}):\n{}",
         r.sparql_nr
     );
 }

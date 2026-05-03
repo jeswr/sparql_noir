@@ -28,19 +28,31 @@ pub(crate) fn next_optional_id() -> usize {
 
 pub(crate) fn reset_optional_counter() {
     OPTIONAL_BLOCK_COUNTER.store(0, Ordering::SeqCst);
-    // Reset the fresh-variable counter alongside the optional one so
-    // outputs are deterministic per `transform_query` invocation. The
-    // counter is otherwise process-global and would race across
-    // parallel callers (notably the snapshot test, which exercises
-    // many queries in a single process).
-    VAR_COUNTER.store(0, Ordering::SeqCst);
 }
 
-static VAR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+/// Per-query source of fresh variable / predicate names. Threaded
+/// through the lowering instead of a global atomic so concurrent
+/// `transform_query` callers don't race on counter values (and so the
+/// snapshot test's many-queries-in-one-process pattern is stable).
+#[derive(Default)]
+pub(crate) struct FreshSource {
+    counter: usize,
+}
 
-fn fresh_variable() -> TermPattern {
-    let id = VAR_COUNTER.fetch_add(1, Ordering::SeqCst);
-    TermPattern::Variable(Variable::new_unchecked(format!("__v{}", id)))
+impl FreshSource {
+    fn next_id(&mut self) -> usize {
+        let id = self.counter;
+        self.counter += 1;
+        id
+    }
+
+    fn fresh_variable(&mut self) -> TermPattern {
+        TermPattern::Variable(Variable::new_unchecked(format!("__v{}", self.next_id())))
+    }
+
+    fn fresh_pred(&mut self) -> Variable {
+        Variable::new_unchecked(format!("__np{}", self.next_id()))
+    }
 }
 
 fn process_patterns(patterns: &[TriplePattern]) -> Result<PatternInfo, String> {
@@ -171,6 +183,165 @@ fn process_patterns_with_graph(
     Ok(info)
 }
 
+/// Adjust every `Term::Input(i, j)` reference in a `PatternInfo` by
+/// `offset`. Used when concatenating two pattern infos where the
+/// right side's input indices need shifting after the left side's
+/// triples.
+fn shift_pattern_inputs(info: &mut PatternInfo, offset: usize) {
+    if offset == 0 {
+        return;
+    }
+    for binding in &mut info.bindings {
+        if let Term::Input(i, j) = &binding.term {
+            binding.term = Term::Input(*i + offset, *j);
+        }
+    }
+    for assertion in &mut info.assertions {
+        if let Term::Input(i, j) = &assertion.0 {
+            assertion.0 = Term::Input(*i + offset, *j);
+        }
+        if let Term::Input(i, j) = &assertion.1 {
+            assertion.1 = Term::Input(*i + offset, *j);
+        }
+    }
+    if let Some(branches) = info.union_branches.as_mut() {
+        for branch in branches {
+            shift_pattern_inputs(branch, offset);
+        }
+    }
+    for opt in &mut info.optional_blocks {
+        adjust_optional_block_indices(opt, offset);
+    }
+}
+
+/// Compute `Join(left, right)` over two `PatternInfo`s with the
+/// SPARQL-1.1 §18.2.2.6 join semantics. The complication is UNION
+/// distribution: when one side is a `union_branches` pattern, every
+/// branch must inherit the *other* side's constraints (otherwise a
+/// prover could pick a branch with fewer constraints — the high-
+/// severity finding from roborev #332). Cases:
+///
+/// - neither has UNION → merge bindings / assertions / filters /
+///   optionals as before.
+/// - only one has UNION → distribute the plain side's constraints
+///   into every branch of the UNION side.
+/// - both have UNION → cross-product the branches, distributing
+///   each pair into a single combined branch.
+fn join_pattern_infos(
+    left: PatternInfo,
+    right: PatternInfo,
+) -> Result<PatternInfo, String> {
+    let offset = left.patterns.len();
+
+    // Shift the right side's input indices first so they refer to
+    // the merged BGP's positions.
+    let mut right = right;
+    shift_pattern_inputs(&mut right, offset);
+
+    match (left.union_branches.is_some(), right.union_branches.is_some()) {
+        (false, false) => {
+            // Plain merge.
+            let mut merged = PatternInfo::new();
+            merged.patterns.extend(left.patterns);
+            merged.patterns.extend(right.patterns);
+            merged.bindings.extend(left.bindings);
+            merged.bindings.extend(right.bindings);
+            merged.assertions.extend(left.assertions);
+            merged.assertions.extend(right.assertions);
+            merged.filters.extend(left.filters);
+            merged.filters.extend(right.filters);
+            merged.optional_blocks.extend(left.optional_blocks);
+            merged.optional_blocks.extend(right.optional_blocks);
+            Ok(merged)
+        }
+        (true, false) => Ok(distribute_into_branches(left, right)),
+        (false, true) => {
+            // Distribute the plain side into the UNION on the right.
+            // To keep input-index ordering monotonic we conceptually
+            // swap and re-shift; here we just distribute the plain
+            // (left) constraints into every branch of right.
+            Ok(distribute_into_branches(right, left))
+        }
+        (true, true) => {
+            // Cross-product: every pair of branches becomes a single
+            // combined branch.
+            let left_branches = left.union_branches.clone().unwrap_or_default();
+            let right_branches = right.union_branches.clone().unwrap_or_default();
+            let mut combined: Vec<PatternInfo> = Vec::new();
+            for lb in &left_branches {
+                for rb in &right_branches {
+                    let mut branch = PatternInfo::new();
+                    branch.patterns.extend(lb.patterns.clone());
+                    branch.patterns.extend(rb.patterns.clone());
+                    branch.bindings.extend(lb.bindings.clone());
+                    branch.bindings.extend(rb.bindings.clone());
+                    branch.assertions.extend(lb.assertions.clone());
+                    branch.assertions.extend(rb.assertions.clone());
+                    branch.filters.extend(lb.filters.clone());
+                    branch.filters.extend(rb.filters.clone());
+                    combined.push(branch);
+                }
+            }
+            let patterns = combined
+                .iter()
+                .max_by_key(|b| b.patterns.len())
+                .map(|b| b.patterns.clone())
+                .unwrap_or_default();
+            let mut merged = PatternInfo {
+                patterns,
+                bindings: Vec::new(),
+                assertions: Vec::new(),
+                filters: Vec::new(),
+                union_branches: Some(combined),
+                optional_blocks: Vec::new(),
+            };
+            merged.optional_blocks.extend(left.optional_blocks);
+            merged.optional_blocks.extend(right.optional_blocks);
+            Ok(merged)
+        }
+    }
+}
+
+/// `with_branches` carries `union_branches`; `plain` does not. Merge
+/// the plain side's constraints into each branch.
+fn distribute_into_branches(
+    with_branches: PatternInfo,
+    plain: PatternInfo,
+) -> PatternInfo {
+    let branches = with_branches.union_branches.clone().unwrap_or_default();
+    let mut combined: Vec<PatternInfo> = Vec::with_capacity(branches.len());
+    for b in &branches {
+        let mut branch = PatternInfo::new();
+        branch.patterns.extend(b.patterns.clone());
+        branch.patterns.extend(plain.patterns.clone());
+        branch.bindings.extend(b.bindings.clone());
+        branch.bindings.extend(plain.bindings.clone());
+        branch.assertions.extend(b.assertions.clone());
+        branch.assertions.extend(plain.assertions.clone());
+        branch.filters.extend(b.filters.clone());
+        branch.filters.extend(plain.filters.clone());
+        combined.push(branch);
+    }
+    let patterns = combined
+        .iter()
+        .max_by_key(|b| b.patterns.len())
+        .map(|b| b.patterns.clone())
+        .unwrap_or_default();
+    let mut merged = PatternInfo {
+        patterns,
+        bindings: Vec::new(),
+        assertions: Vec::new(),
+        filters: Vec::new(),
+        union_branches: Some(combined),
+        optional_blocks: Vec::new(),
+    };
+    // Optionals are top-level concerns — preserve them outside the
+    // branches.
+    merged.optional_blocks.extend(with_branches.optional_blocks);
+    merged.optional_blocks.extend(plain.optional_blocks);
+    merged
+}
+
 /// Recursively rewrite a `PropertyPathExpression` so all `Reverse(p)`
 /// nodes are pushed down to leaves, using the standard algebraic
 /// identities — `^(p1/p2) ≡ ^p2/^p1`, `^(p1|p2) ≡ ^p1|^p2`,
@@ -218,9 +389,10 @@ fn expand_path(
     path: &PropertyPathExpression,
     object: &TermPattern,
     options: &TransformOptions,
+    fresh: &mut FreshSource,
 ) -> Result<GraphPattern, String> {
     let normalised = normalise_path(path);
-    expand_normalised_path(subject, &normalised, object, options)
+    expand_normalised_path(subject, &normalised, object, options, fresh)
 }
 
 /// Build a `FILTER(?p != p1 && ?p != p2 && …)` over an excluded set of
@@ -242,11 +414,6 @@ fn build_nps_filter(pred_var: &Variable, excludes: &[spargebra::term::NamedNode]
     acc
 }
 
-fn fresh_pred_variable() -> Variable {
-    let id = VAR_COUNTER.fetch_add(1, Ordering::SeqCst);
-    Variable::new_unchecked(format!("__np{}", id))
-}
-
 /// Expand a `PropertyPathExpression` that has already been normalised
 /// (every `Reverse` wraps a leaf).
 fn expand_normalised_path(
@@ -254,6 +421,7 @@ fn expand_normalised_path(
     path: &PropertyPathExpression,
     object: &TermPattern,
     options: &TransformOptions,
+    fresh: &mut FreshSource,
 ) -> Result<GraphPattern, String> {
     match path {
         PropertyPathExpression::NamedNode(nn) => Ok(GraphPattern::Bgp {
@@ -274,7 +442,7 @@ fn expand_normalised_path(
             PropertyPathExpression::NegatedPropertySet(excludes) => {
                 // ^!{p1,p2,…} — a single triple s ?p o where ?p ∉ excludes,
                 // with subject and object swapped (reverse direction).
-                expand_negated_property_set(object, subject, excludes)
+                expand_negated_property_set(object, subject, excludes, fresh)
             }
             _ => Err(format!(
                 "internal: normalised path still has nested reverse: {:?}",
@@ -282,24 +450,24 @@ fn expand_normalised_path(
             )),
         },
         PropertyPathExpression::Sequence(a, b) => {
-            let mid = fresh_variable();
-            let left = expand_normalised_path(subject, a, &mid, options)?;
-            let right = expand_normalised_path(&mid, b, object, options)?;
+            let mid = fresh.fresh_variable();
+            let left = expand_normalised_path(subject, a, &mid, options, fresh)?;
+            let right = expand_normalised_path(&mid, b, object, options, fresh)?;
             Ok(GraphPattern::Join {
                 left: Box::new(left),
                 right: Box::new(right),
             })
         }
         PropertyPathExpression::Alternative(a, b) => {
-            let left = expand_normalised_path(subject, a, object, options)?;
-            let right = expand_normalised_path(subject, b, object, options)?;
+            let left = expand_normalised_path(subject, a, object, options, fresh)?;
+            let right = expand_normalised_path(subject, b, object, options, fresh)?;
             Ok(GraphPattern::Union {
                 left: Box::new(left),
                 right: Box::new(right),
             })
         }
         PropertyPathExpression::ZeroOrOne(inner) => {
-            let one = expand_normalised_path(subject, inner, object, options)?;
+            let one = expand_normalised_path(subject, inner, object, options, fresh)?;
             let zero = zero_step_pattern(subject, object)?;
             Ok(GraphPattern::Union {
                 left: Box::new(one),
@@ -318,7 +486,7 @@ fn expand_normalised_path(
                     "path_segment_max must be at least 1 for a `+` path".into()
                 );
             }
-            kleene_unroll(subject, inner, object, 1, max_depth, options)
+            kleene_unroll(subject, inner, object, 1, max_depth, options, fresh)
         }
         // p* — same as p+ but with a zero-step branch added.
         PropertyPathExpression::ZeroOrMore(inner) => {
@@ -327,7 +495,8 @@ fn expand_normalised_path(
             if max_depth < 1 {
                 return Ok(zero);
             }
-            let positive = kleene_unroll(subject, inner, object, 1, max_depth, options)?;
+            let positive =
+                kleene_unroll(subject, inner, object, 1, max_depth, options, fresh)?;
             Ok(GraphPattern::Union {
                 left: Box::new(zero),
                 right: Box::new(positive),
@@ -336,21 +505,41 @@ fn expand_normalised_path(
         // !{p1,p2,…} — a single triple `s ?p o` plus `FILTER(?p != p_i)`
         // for each excluded predicate. Bounded by the exclude-set size.
         PropertyPathExpression::NegatedPropertySet(excludes) => {
-            expand_negated_property_set(subject, object, excludes)
+            expand_negated_property_set(subject, object, excludes, fresh)
         }
     }
 }
 
-/// Build the BGP that represents the zero-step branch of `?p` /
-/// `p?` — i.e. `subject = object`. The semantics across SPARQL 1.1
-/// §18.5 require the binding to be a node mentioned in the data;
-/// in the context of an inclusion-proof witness we treat the binding
-/// as already constrained by the surrounding patterns, so a simple
-/// equality `Extend` suffices.
+/// Build the pattern that represents the zero-step branch of `p?` /
+/// `p*` — i.e. `subject = object`. Per SPARQL 1.1 §18.5 a
+/// zero-length path matches whenever the two endpoints are the same
+/// term (and, in the standard, that term appears in the dataset; the
+/// inclusion-proof witness handles dataset-membership separately).
+/// Encoding by case:
+///
+/// - `?s = ?o` (variable-variable): emit `BIND(?o AS ?s)` so the
+///   subject variable is constrained to equal the object.
+/// - `?s = <iri>` / `<iri> = ?o`: emit `BIND(<iri> AS ?v)` for the
+///   variable side.
+/// - `<iri> = <iri>` (ground equal): emit `Bgp { patterns: [] }` —
+///   the trivially-satisfied branch.
+/// - `<iri1> = <iri2>` (ground unequal): emit a `FILTER(false)`
+///   guard so the branch is unsatisfiable. Empty BGPs are treated
+///   as `false` in UNION emission, but that conflates "no
+///   constraint" with "unsatisfiable"; the explicit `FILTER` is
+///   unambiguous and matches the §18.5 semantics for unequal
+///   ground endpoints.
 fn zero_step_pattern(
     subject: &TermPattern,
     object: &TermPattern,
 ) -> Result<GraphPattern, String> {
+    use spargebra::term::Literal;
+    let false_lit = Literal::new_typed_literal(
+        "false",
+        spargebra::term::NamedNode::new_unchecked(
+            "http://www.w3.org/2001/XMLSchema#boolean",
+        ),
+    );
     let zero = if let TermPattern::Variable(sv) = subject {
         GraphPattern::Extend {
             inner: Box::new(GraphPattern::Bgp { patterns: vec![] }),
@@ -373,9 +562,27 @@ fn zero_step_pattern(
             },
         }
     } else if subject == object {
-        GraphPattern::Bgp { patterns: vec![] }
+        // Ground equal — trivially satisfied. Emit `FILTER(true)` so
+        // the union branch carries a non-empty assertion list (an
+        // empty list would emit as `false` per `emit::union_branches`).
+        let true_lit = Literal::new_typed_literal(
+            "true",
+            spargebra::term::NamedNode::new_unchecked(
+                "http://www.w3.org/2001/XMLSchema#boolean",
+            ),
+        );
+        GraphPattern::Filter {
+            expr: Expression::Literal(true_lit),
+            inner: Box::new(GraphPattern::Bgp { patterns: vec![] }),
+        }
     } else {
-        GraphPattern::Bgp { patterns: vec![] }
+        // Ground unequal — branch is unsatisfiable. Wrap an empty BGP
+        // in `FILTER(false)` so emit treats it as a failing branch
+        // explicitly rather than relying on the empty-branch fallback.
+        GraphPattern::Filter {
+            expr: Expression::Literal(false_lit),
+            inner: Box::new(GraphPattern::Bgp { patterns: vec![] }),
+        }
     };
     Ok(zero)
 }
@@ -392,6 +599,7 @@ fn kleene_unroll(
     min: usize,
     max: usize,
     options: &TransformOptions,
+    fresh: &mut FreshSource,
 ) -> Result<GraphPattern, String> {
     if min > max {
         return Err(format!(
@@ -401,7 +609,7 @@ fn kleene_unroll(
     }
     let mut acc: Option<GraphPattern> = None;
     for depth in min..=max {
-        let chain = build_chain(subject, inner, object, depth, options)?;
+        let chain = build_chain(subject, inner, object, depth, options, fresh)?;
         acc = Some(match acc {
             None => chain,
             Some(prev) => GraphPattern::Union {
@@ -424,12 +632,13 @@ fn build_chain(
     object: &TermPattern,
     depth: usize,
     options: &TransformOptions,
+    fresh: &mut FreshSource,
 ) -> Result<GraphPattern, String> {
     if depth == 0 {
         return zero_step_pattern(subject, object);
     }
     if depth == 1 {
-        return expand_normalised_path(subject, inner, object, options);
+        return expand_normalised_path(subject, inner, object, options, fresh);
     }
     // depth >= 2: subject -inner- mid_1 -inner- mid_2 ... -inner- object
     let mut prev_term = subject.clone();
@@ -438,9 +647,9 @@ fn build_chain(
         let next_term = if step == depth - 1 {
             object.clone()
         } else {
-            fresh_variable()
+            fresh.fresh_variable()
         };
-        let leg = expand_normalised_path(&prev_term, inner, &next_term, options)?;
+        let leg = expand_normalised_path(&prev_term, inner, &next_term, options, fresh)?;
         acc = Some(match acc {
             None => leg,
             Some(prev) => GraphPattern::Join {
@@ -461,8 +670,9 @@ fn expand_negated_property_set(
     subject: &TermPattern,
     object: &TermPattern,
     excludes: &[spargebra::term::NamedNode],
+    fresh: &mut FreshSource,
 ) -> Result<GraphPattern, String> {
-    let pred_var = fresh_pred_variable();
+    let pred_var = fresh.fresh_pred();
     let triple = TriplePattern {
         subject: subject.clone(),
         predicate: NamedNodePattern::Variable(pred_var.clone()),
@@ -503,80 +713,45 @@ fn adjust_optional_block_indices(block: &mut OptionalBlock, offset: usize) {
 
 #[cfg(test)]
 pub(crate) fn process_graph_pattern(gp: &GraphPattern) -> Result<PatternInfo, String> {
-    process_graph_pattern_with_options(gp, &TransformOptions::default())
+    let mut fresh = FreshSource::default();
+    process_graph_pattern_inner(gp, &TransformOptions::default(), &mut fresh)
 }
 
 pub(crate) fn process_graph_pattern_with_options(
     gp: &GraphPattern,
     options: &TransformOptions,
 ) -> Result<PatternInfo, String> {
+    let mut fresh = FreshSource::default();
+    process_graph_pattern_inner(gp, options, &mut fresh)
+}
+
+fn process_graph_pattern_inner(
+    gp: &GraphPattern,
+    options: &TransformOptions,
+    fresh: &mut FreshSource,
+) -> Result<PatternInfo, String> {
     match gp {
         GraphPattern::Bgp { patterns } => process_patterns(patterns),
 
         GraphPattern::Path { subject, path, object } => {
-            let expanded = expand_path(subject, path, object, options)?;
-            process_graph_pattern_with_options(&expanded, options)
+            let expanded = expand_path(subject, path, object, options, fresh)?;
+            process_graph_pattern_inner(&expanded, options, fresh)
         }
 
         GraphPattern::Join { left, right } => {
-            let left_info = process_graph_pattern_with_options(left, options)?;
-            let right_info = process_graph_pattern_with_options(right, options)?;
-
-            let offset = left_info.patterns.len();
-            let mut merged = PatternInfo::new();
-
-            merged.patterns.extend(left_info.patterns);
-            merged.patterns.extend(right_info.patterns);
-
-            merged.bindings.extend(left_info.bindings);
-            for binding in right_info.bindings {
-                let adjusted_term = match binding.term {
-                    Term::Input(i, j) => Term::Input(i + offset, j),
-                    other => other,
-                };
-                merged.bindings.push(Binding {
-                    variable: binding.variable,
-                    term: adjusted_term,
-                });
-            }
-
-            merged.assertions.extend(left_info.assertions);
-            for assertion in right_info.assertions {
-                let adj_left = match assertion.0 {
-                    Term::Input(i, j) => Term::Input(i + offset, j),
-                    other => other,
-                };
-                let adj_right = match assertion.1 {
-                    Term::Input(i, j) => Term::Input(i + offset, j),
-                    other => other,
-                };
-                merged.assertions.push(Assertion(adj_left, adj_right));
-            }
-
-            merged.filters.extend(left_info.filters);
-            merged.filters.extend(right_info.filters);
-
-            if left_info.union_branches.is_some() || right_info.union_branches.is_some() {
-                merged.union_branches = left_info.union_branches.or(right_info.union_branches);
-            }
-
-            merged.optional_blocks.extend(left_info.optional_blocks);
-            for mut opt_block in right_info.optional_blocks {
-                adjust_optional_block_indices(&mut opt_block, offset);
-                merged.optional_blocks.push(opt_block);
-            }
-
-            Ok(merged)
+            let left_info = process_graph_pattern_inner(left, options, fresh)?;
+            let right_info = process_graph_pattern_inner(right, options, fresh)?;
+            join_pattern_infos(left_info, right_info)
         }
 
         GraphPattern::Filter { expr, inner } => {
-            let mut info = process_graph_pattern_with_options(inner, options)?;
+            let mut info = process_graph_pattern_inner(inner, options, fresh)?;
             info.filters.push(expr.clone());
             Ok(info)
         }
 
         GraphPattern::Extend { inner, variable, expression } => {
-            let mut info = process_graph_pattern_with_options(inner, options)?;
+            let mut info = process_graph_pattern_inner(inner, options, fresh)?;
             let term = match expression {
                 Expression::Variable(v) => Term::Variable(v.as_str().to_string()),
                 Expression::NamedNode(nn) => Term::Static(GroundTerm::NamedNode(nn.clone())),
@@ -591,8 +766,8 @@ pub(crate) fn process_graph_pattern_with_options(
         }
 
         GraphPattern::LeftJoin { left, right, expression } => {
-            let mut left_info = process_graph_pattern_with_options(left, options)?;
-            let right_info = process_graph_pattern_with_options(right, options)?;
+            let mut left_info = process_graph_pattern_inner(left, options, fresh)?;
+            let right_info = process_graph_pattern_inner(right, options, fresh)?;
 
             let offset = left_info.patterns.len();
 
@@ -659,22 +834,23 @@ pub(crate) fn process_graph_pattern_with_options(
                 gp: &GraphPattern,
                 out: &mut Vec<PatternInfo>,
                 options: &TransformOptions,
+                fresh: &mut FreshSource,
             ) -> Result<(), String> {
                 match gp {
                     GraphPattern::Union { left, right } => {
-                        collect_branches(left, out, options)?;
-                        collect_branches(right, out, options)?;
+                        collect_branches(left, out, options, fresh)?;
+                        collect_branches(right, out, options, fresh)?;
                     }
                     _ => {
-                        out.push(process_graph_pattern_with_options(gp, options)?);
+                        out.push(process_graph_pattern_inner(gp, options, fresh)?);
                     }
                 }
                 Ok(())
             }
 
             let mut branches: Vec<PatternInfo> = Vec::new();
-            collect_branches(left, &mut branches, options)?;
-            collect_branches(right, &mut branches, options)?;
+            collect_branches(left, &mut branches, options, fresh)?;
+            collect_branches(right, &mut branches, options, fresh)?;
 
             let patterns = branches
                 .iter()
@@ -693,7 +869,7 @@ pub(crate) fn process_graph_pattern_with_options(
         }
 
         GraphPattern::Graph { name, inner } => {
-            let mut info = process_graph_pattern_with_options(inner, options)?;
+            let mut info = process_graph_pattern_inner(inner, options, fresh)?;
 
             let graph_context = match name {
                 NamedNodePattern::NamedNode(nn) => GraphContext::NamedNode(nn.as_str().to_string()),
@@ -734,12 +910,12 @@ pub(crate) fn process_graph_pattern_with_options(
 
         // Post-processing modifiers — accepted but not enforced in-circuit;
         // the verifier is expected to apply them to the witness.
-        GraphPattern::Distinct { inner } => process_graph_pattern_with_options(inner, options),
-        GraphPattern::Reduced { inner } => process_graph_pattern_with_options(inner, options),
+        GraphPattern::Distinct { inner } => process_graph_pattern_inner(inner, options, fresh),
+        GraphPattern::Reduced { inner } => process_graph_pattern_inner(inner, options, fresh),
         GraphPattern::OrderBy { inner, .. } => {
-            process_graph_pattern_with_options(inner, options)
+            process_graph_pattern_inner(inner, options, fresh)
         }
-        GraphPattern::Slice { inner, .. } => process_graph_pattern_with_options(inner, options),
+        GraphPattern::Slice { inner, .. } => process_graph_pattern_inner(inner, options, fresh),
 
         _ => Err(format!("Unsupported graph pattern: {:?}", gp)),
     }

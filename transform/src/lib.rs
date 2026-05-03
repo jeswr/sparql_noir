@@ -225,7 +225,10 @@ pub fn transform(query: &str) -> String {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn transform_with_options(query: &str, skip_signing: bool) -> String {
-    let options = TransformOptions { skip_signing };
+    let options = TransformOptions {
+        skip_signing,
+        ..TransformOptions::default()
+    };
     match transform_query_with_options(query, options) {
         Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
             serde_json::to_string(&TransformError { error: e.to_string() }).unwrap()
