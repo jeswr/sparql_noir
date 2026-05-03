@@ -525,6 +525,38 @@ fn not_exists_inside_optional_is_rejected() {
     }
 }
 
+/// `MINUS` with a UNION right-side is rejected — partially-disjoint
+/// branches need exact W3C §18.5 semantics that single-triple-ground
+/// NOT EXISTS doesn't provide (roborev follow-up 2026-05-03 medium).
+/// Round-4 follow-up — once OPTIONAL collapse (and its prefix-tree
+/// commitment) lands, MINUS over arbitrary RHS becomes tractable.
+#[test]
+fn minus_with_union_rhs_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { \
+               ?s ex:p ?o . \
+               MINUS { { ?s ex:q ?x } UNION { ?y ex:r ?z } } \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected MINUS over UNION-RHS to be rejected"),
+        Err(err) => {
+            // The current lowering rejects this via the NOT EXISTS
+            // rewrite catching the inner UNION ("UNION inside an
+            // EXISTS pattern" is the existing reject path) — either
+            // error path is acceptable, the important property is
+            // that the query does not silently lower with incorrect
+            // semantics.
+            assert!(
+                err.contains("NOT EXISTS")
+                    || err.contains("MINUS")
+                    || err.contains("UNION"),
+                "expected error mentioning NOT EXISTS / MINUS / UNION, got: {}",
+                err
+            );
+        }
+    }
+}
+
 /// Variable-disjoint `MINUS` is a no-op per W3C §18.5 — when the inner
 /// pattern shares no variables with the outer, every row is kept (roborev
 /// finding 2026-05-03 medium). Verifies the lowering produces the

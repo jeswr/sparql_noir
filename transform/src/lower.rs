@@ -813,6 +813,14 @@ fn collect_in_scope_variables(gp: &GraphPattern) -> BTreeSet<String> {
     out
 }
 
+/// True if the pattern is a plain BGP (no UNION / OPTIONAL / Filter /
+/// nested algebra constructs that could produce variable-disjoint
+/// solutions). Used by the `MINUS` lowering to reject RHS shapes
+/// where the `NOT EXISTS` rewrite is not exact under W3C §18.5.
+fn is_single_bgp(gp: &GraphPattern) -> bool {
+    matches!(gp, GraphPattern::Bgp { .. })
+}
+
 /// True if the expression tree contains an `Expression::Exists` anywhere.
 fn expression_contains_exists(expr: &Expression) -> bool {
     match expr {
@@ -1427,27 +1435,43 @@ fn process_graph_pattern_inner(
         // `Minus(Po, Pi)` — W3C SPARQL 1.1 §18.5. The W3C definition is
         //   `{ μ ∈ ⟦Po⟧ | ∀ μ' ∈ ⟦Pi⟧ : μ ≁ μ' ∨ dom(μ) ∩ dom(μ') = ∅ }`
         // i.e. MINUS only excludes rows whose μ' is compatible AND
-        // shares at least one variable with μ. When Pi shares no
-        // variables with Po, every μ' is variable-disjoint, so MINUS
-        // keeps all rows — it is a no-op.
+        // shares at least one variable with μ. When **every** μ'
+        // produced by the RHS necessarily binds at least one
+        // outer-shared variable, the rewrite to
+        // `Filter(NOT EXISTS { Pi }, Po)` is exact. When some μ' may
+        // be variable-disjoint (RHS contains UNION / OPTIONAL with a
+        // disjoint-variables branch), the rewrite would remove rows
+        // W3C strictly keeps.
         //
-        // We detect the variable-disjoint case syntactically: if the
-        // sets of in-scope variables of `left` and `right` are
-        // disjoint, lower as `left` alone. Otherwise rewrite to
-        // `Filter(NOT EXISTS { Pi }, Po)` and reuse the NOT-EXISTS
-        // lowering — exact W3C semantics for the shared-variable case.
+        // Round-3 main event handles two cases conservatively:
         //
-        // Roborev finding 2026-05-03 (medium): the previous
-        // unconditional rewrite mishandled the disjoint case (e.g.
-        // `MINUS { ex:a ex:p ex:b }` would have removed every row when
-        // that ground triple existed; correct semantics keep them).
+        //   1. RHS in-scope variables disjoint from LHS → MINUS is a
+        //      W3C no-op; lower as the outer alone.
+        //   2. RHS is a single BGP (no UNION / OPTIONAL) with at
+        //      least one shared variable → the rewrite is exact;
+        //      reuse the NOT-EXISTS lowering.
+        //   3. Anything else (RHS contains UNION / OPTIONAL etc.) →
+        //      rejected with a pointer to round-4 follow-up.
+        //
+        // Roborev findings 2026-05-03 (medium): the unconditional
+        // rewrite mishandled the disjoint case (case 1) and the
+        // partially-disjoint UNION-RHS case (case 3).
         GraphPattern::Minus { left, right } => {
             let left_vars = collect_in_scope_variables(left);
             let right_vars = collect_in_scope_variables(right);
             let shared = left_vars.intersection(&right_vars).count();
             if shared == 0 {
-                // Variable-disjoint MINUS — W3C no-op.
                 return process_graph_pattern_inner(left, options, fresh);
+            }
+            if !is_single_bgp(right) {
+                return Err(
+                    "MINUS with a UNION / OPTIONAL / non-BGP RHS is not yet implemented. \
+                     The Filter(NOT EXISTS { Pi }, Po) rewrite is only exact when every \
+                     μ' produced by Pi necessarily binds at least one outer-shared \
+                     variable; UNION / OPTIONAL branches can violate this. Round-4 \
+                     follow-up — see spec/exists.md §7."
+                        .into(),
+                );
             }
             let outer = GraphPattern::Filter {
                 expr: Expression::Not(Box::new(Expression::Exists(right.clone()))),
