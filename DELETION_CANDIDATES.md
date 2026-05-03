@@ -61,6 +61,23 @@ the other test entry points may be redundant.
 | `test/run-sparql-tests.ts` | If `ts.js` covers SPARQL 1.0 evaluation tests authoritatively, this entry point may be redundant. Could also be the cleaner long-term replacement once `ts.js` is split — verify which way. | After the test-cleanup plan's step 5 (`ts.js` `runTest` split). |
 | `test/run-snapshot-tests.ts` | Snapshot-regression specifically; possibly not subsumed by `ts.js`. | Verify the use case before deleting. |
 
+## Round-3-deferred OPTIONAL collapse residue (eviction-on-deck)
+
+Per `SPARQL_ROADMAP.md` §8.2 (Q.A.2 eviction-path) and the round-3
+main-event findings: OPTIONAL collapse landed only as a **deferred**
+work item (see `questions/optional-collapse-pattern-non-membership.md`).
+The following surfaces stay live until round 4 picks up that question
+and lands a sound collapse:
+
+| Path / surface | Reason | Trigger |
+| --- | --- | --- |
+| `transform/src/lib.rs::OptionalCircuit` (struct + `optional_circuits` field on `TransformResult`) | Power-set generation kept until round 4 collapse ships. | Round 4's OPTIONAL collapse landing per `questions/optional-collapse-pattern-non-membership.md`. |
+| `transform/src/lib.rs::transform_query_with_options` 2^n variant generation loop (~L178–L208) | Same — kept until collapse. | Same. |
+| `transform/src/emit.rs::generate_circuit_for_optional_combination` | Same. | Same. |
+| `transform/src/metadata.rs::build_variant_metadata` | Same. | Same. |
+| `ts.js:945–969` (the variant-iteration loop) | Sole external consumer of `optional_circuits`. | Same. |
+| `src/scripts/prove.ts::CircuitVariant` + the `circuitVariants` plumbing on `ProveOptions` (~L62–L72, L107–L117, L793–L876) | Sole external consumer of `optional_circuits`'s output shape. | Same. |
+
 ## Removed
 
 ### Q1-driven deletions (`arith::Float` arithmetic — IEEE 754 throughout)

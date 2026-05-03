@@ -41,6 +41,7 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm install
+      - run: npm run bundle:noir-lib
       - run: npm run build:tsc
 
   test-summary:

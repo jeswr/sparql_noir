@@ -283,14 +283,16 @@ Make the existing partial features actually correct, and clean up OPTIONAL so it
 
 The harder semantic features, plus the foundation for aggregates / DISTINCT / ORDER BY in-circuit.
 
-- §3 EXISTS / NOT EXISTS as "witnessed inner-pattern compatibility". Bound the inner search by the BGP size of the inner pattern; this is the canonical reformulation. Same primitive unlocks §6.4 (sound OPTIONAL collapse) and MINUS.
-- §3 MINUS as `Filter(NOT EXISTS)` once EXISTS is in.
-- §6.4: OPTIONAL collapse, now made sound by reusing the NOT-EXISTS primitive in the `is_matched=false` arm. Replace the power-set generation; update `optional_circuits` consumers (the test runner and the prove path) to the single-circuit shape.
-- §3 BIND with arbitrary expressions — `Extend` accepts any `Expression`; `expr.rs` already knows how to lower it; just thread the bound variable through subsequent triple patterns.
+- [x] §3 EXISTS — landed in PR #41 (round-3 spike) via the witnessed inner-pattern flatten reformulation.
+- [x] §3 sorted Merkle commitment — landed in round-3 main event. `noir::utils::merkle` sorts leaves by `consts::hash4` before tree construction; root commits to a permutation-invariant canonical form.
+- [x] §3 NOT EXISTS — landed in round-3 main event (single-triple ground-inner only). New primitive `noir::utils::verify_non_membership_no_inclusion` powers the lowering; `transform/src/lower.rs` emits a `NonExistenceConstraint` for each `FILTER(NOT EXISTS { t })`. Multi-triple inner / non-ground inner / nested NOT-EXISTS rejected at lowering with pointers to `spec/exists.md` §7.
+- [x] §3 MINUS — landed in round-3 main event. Algebra-level rewrite to `Filter(NOT EXISTS { Pi }, Po)` per W3C §18.5; reuses the NOT EXISTS lowering. W3C variable-disjoint freshness side-condition is documented as a small over-restriction (round-4 follow-up).
+- [ ] §6.4: OPTIONAL collapse — **deferred to round 4**. The unmatched arm requires non-membership of a *pattern* with free positions (e.g. `OPTIONAL { ?p ex:age ?o }` with `?o` inner-only) — strictly harder than Stage 2's single-triple ground-inner NOT EXISTS. Three approaches considered in `questions/optional-collapse-pattern-non-membership.md`; decision pending. Until then `optional_circuits[]` and the `2^n` variant generation stay (with the round-2 `optional_cap` guard).
+- [ ] §3 BIND with arbitrary expressions — out of scope for this PR, separate round-3 follow-up.
 - ~~§5 sort proof scaffolding in `noir/lib/utils` (multiset-hash + monotone-pairs primitives), behind a `_verified`-style API. No SPARQL feature uses it yet; this builds the foundation.~~ **Removed** per Q6 decision (2026-05-03): under the "don't ZK-prove revealed properties" principle (see §8.6), sort proofs are only needed for non-revealed orderings, of which we currently have none. Defer until a concrete non-revealed-output use case is identified.
-- §3 subqueries — once EXISTS is in, nested SELECT inside WHERE is mostly plumbing.
+- [ ] §3 subqueries — out of scope for this PR, separate round-3 follow-up.
 
-**Definition of done:** EXISTS/MINUS tests pass; BIND with arithmetic works; OPTIONAL collapse lands with the soundness-critical NOT-EXISTS arm proven; `COUNT(DISTINCT ?x)` lands by disclosing the underlying multiset (per Q6 decision — no in-circuit DISTINCT primitive needed; verifier counts externally). Sort-proof scaffolding deliberately deferred per Q6.
+**Definition of done (round-3 main event, partial):** EXISTS/NOT EXISTS/MINUS tests pass; sorted Merkle commitment lands; the soundness argument for non-membership is documented (`spec/exists.md` §3.3, §5). OPTIONAL collapse + BIND-expressions + subqueries are explicit follow-ups (see `questions/optional-collapse-pattern-non-membership.md`). `COUNT(DISTINCT ?x)` already landed in PR #39 by disclosing the underlying multiset (per Q6 decision — no in-circuit DISTINCT primitive). Sort-proof scaffolding deliberately deferred per Q6.
 
 (REGEX, general string functions, and encoding redesign §6.3 are explicitly **not** in this 3-round plan. They are larger pieces of work each, to be sized once round 3 lands. Aggregates that follow the "disclose-the-underlying-multiset, verify-externally" pattern from Q6 — `COUNT`, `COUNT(DISTINCT ?x)`, `SUM`, `MIN`, `MAX`, `AVG`, plus revealed `ORDER BY` / `LIMIT` — land as small additions whenever the surrounding round permits, since they require no new circuit primitives.)
 
@@ -305,13 +307,11 @@ The harder semantic features, plus the foundation for aggregates / DISTINCT / OR
    - `transform/src/lib.rs:128, 2374, 2435, 2448` — internal definition + producer; not a consumer in the eviction-path sense.
    - No hits in `src/scripts/verify.ts`, the `prove` path, the snapshot test runner, the W3C analysis scripts, or anywhere else.
 
-   **Eviction path** (lands as part of round 3, §6.4):
+   **Eviction path** (originally scoped to round 3, §6.4 — **partially deferred to round 4**):
 
-   - Round 3 lands the collapse + the NOT-EXISTS primitive in the `is_matched=false` arm.
-   - `transform/src/lib.rs` produces a single `sparql_nr` + `metadata` instead of a `Vec<OptionalCircuit>`. Add a witness-side `is_matched: [bool; N]` per OPTIONAL block.
-   - `ts.js`'s variant-iteration loop is rewritten as: compute the right `is_matched` vector for the bound data, prove once. Strict simplification — fewer compilations, single artefact.
-
-   The test-cleanup branch's plan to split `runTest` in `ts.js` (the agent's step 5 of 7) touches this code path anyway, so the variant-iteration logic is already in scope for refactoring; round 3's collapse simply removes it.
+   - ~~Round 3 lands the collapse + the NOT-EXISTS primitive in the `is_matched=false` arm.~~ **Round 3 main event** (2026-05-03) ships only the single-triple ground-inner NOT EXISTS primitive (Stage 2). OPTIONAL collapse requires non-membership over a *pattern* with free positions (e.g. `OPTIONAL { ?p ex:age ?o }` introduces `?o` as inner-only) — strictly harder. See `questions/optional-collapse-pattern-non-membership.md` for the three candidate approaches and the round-4 decision needed.
+   - `transform/src/lib.rs` continues to produce `Vec<OptionalCircuit>` until the round-4 decision lands. `ts.js:945-969`'s consumer **stays** in round 3.
+   - The test-cleanup branch's plan to split `runTest` in `ts.js` (the agent's step 5 of 7) is unchanged — variant-iteration logic continues to be the OPTIONAL handling path until round 4's collapse ships.
 3. ~~**String-witness encoding (§6.3).**~~ **DECIDED (2026-05-03):** `STRING_LEN_MAX` is **configurable in the public API** — not a hardcoded constant. The transform / circuit emitter accepts the bound as a parameter; downstream protocol deployments choose their own value for the privacy / gate-cost trade-off they want.
 
    Default value picked at API design time (recommended: **64**) is the value used when callers don't override; the public surface exposes both the parameter and the default.
