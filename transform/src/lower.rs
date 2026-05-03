@@ -28,7 +28,6 @@ pub(crate) fn next_optional_id() -> usize {
 
 pub(crate) fn reset_optional_counter() {
     OPTIONAL_BLOCK_COUNTER.store(0, Ordering::SeqCst);
-    EXISTS_VAR_COUNTER.store(0, Ordering::SeqCst);
 }
 
 /// Per-query source of fresh variable / predicate names. Threaded
@@ -53,6 +52,15 @@ impl FreshSource {
 
     fn fresh_pred(&mut self) -> Variable {
         Variable::new_unchecked(format!("__np{}", self.next_id()))
+    }
+
+    /// Mint a fresh inner-only EXISTS variable name. The name carries
+    /// the source variable for readability in metadata / debug
+    /// snapshots. Per-query `FreshSource` ensures no two EXISTS
+    /// blocks (in the same query or across concurrent queries) ever
+    /// produce the same `__exists_*` identifier.
+    fn fresh_exists_var(&mut self, orig: &str) -> String {
+        format!("__exists_{}_{}", orig, self.next_id())
     }
 }
 
@@ -653,17 +661,6 @@ fn true_literal() -> Expression {
     Expression::Literal(Literal::new_typed_literal("true", xsd_boolean))
 }
 
-/// Counter for generating fresh inner-only EXISTS variable names. We
-/// re-use the optional-id space's counter pattern; using a separate
-/// counter (rather than the optional one) keeps the IDs independent if
-/// either category resets later.
-static EXISTS_VAR_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-fn fresh_exists_var(orig: &str) -> String {
-    let id = EXISTS_VAR_COUNTER.fetch_add(1, Ordering::SeqCst);
-    format!("__exists_{}_{}", orig, id)
-}
-
 /// Flatten an inner `GraphPattern` (the `P` in `EXISTS { P }`) into the
 /// outer `info`, treating it as a Join. This is the §2 reformulation
 /// from `spec/exists.md`: append the inner triples + assertions, unify
@@ -732,7 +729,7 @@ fn flatten_exists_into(
         std::collections::BTreeMap::new();
     for b in &inner_info.bindings {
         if !outer_bound.contains(&b.variable) {
-            rename.insert(b.variable.clone(), fresh_exists_var(&b.variable));
+            rename.insert(b.variable.clone(), fresh.fresh_exists_var(&b.variable));
         }
     }
 
