@@ -343,9 +343,12 @@ fn union_path_join_with_sibling_keeps_all_constraints() {
     );
 
     // Index alignment: the predicate IRIs asserted at each `bgp[i]`
-    // must match the metadata `inputPatterns[i].predicate`. Walk the
-    // patterns and check that for each `bgp[i]`, the predicate
-    // hashed in the assertion equals the metadata's predicate.
+    // must match the metadata `inputPatterns[i].predicate`. We look
+    // for the literal substring
+    //   encode_string("<iri>")) == bgp[i].terms[1]
+    // (note the trailing `)` from the `consts::hash2(...)` wrapper)
+    // anywhere in the generated source — this binds the IRI hash and
+    // the index to the same equality, not just to the same file.
     let patterns = r.metadata
         .get("inputPatterns")
         .and_then(|v| v.as_array())
@@ -357,20 +360,14 @@ fn union_path_join_with_sibling_keeps_all_constraints() {
             .and_then(|v| v.as_str())
             .expect("predicate IRI");
         let needle = format!(
-            "encode_string(\"{}\")",
-            predicate_iri
+            "encode_string(\"{}\")]) == bgp[{}].terms[1]",
+            predicate_iri, i
         );
-        let bgp_idx = format!("bgp[{}].terms[1]", i);
-        // For each pattern, we expect at least one assertion of the
-        // form `… encode_string("predicate")) == bgp[i].terms[1]`.
-        // This is a coarse check — just verify the predicate string
-        // appears co-resident with the index in some assertion.
-        let combined = format!("{}", r.sparql_nr);
-        let mentions_pred = combined.contains(&needle);
-        let mentions_idx = combined.contains(&bgp_idx);
         assert!(
-            mentions_pred && mentions_idx,
-            "metadata predicate {predicate_iri} at index {i} not found in sparql.nr:\n{combined}"
+            r.sparql_nr.contains(&needle),
+            "metadata says bgp[{i}] is `{predicate_iri}` but no equality \
+             pinning that IRI to bgp[{i}].terms[1] was found:\n{}",
+            r.sparql_nr
         );
     }
 }
