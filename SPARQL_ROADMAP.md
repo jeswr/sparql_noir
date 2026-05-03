@@ -299,7 +299,19 @@ The harder semantic features, plus the foundation for aggregates / DISTINCT / OR
 ## 8. Open questions for Jesse
 
 1. ~~**Float representation choice.**~~ **DECIDED (2026-05-03):** adopt IEEE 754 (XPath F&O / `noir_xpath`) throughout and delete `arith::Float`'s arithmetic. Round 2 §6.2 lands as the option-(a) variant: rewire `arith`'s type-promotion + `ArithResult` to call `noir_xpath`, delete `add_floats` / `sub_floats` / `mul_floats` / `div_floats` / `truncate*` / `encode_float` and most comparison helpers (~700 LoC removed). This forces Q7 to "no arbitrary-precision decimal compliance" — see Q7 below.
-2. **OPTIONAL circuit strategy.** Is there a downstream consumer (e.g. the verifier in `src/scripts/verify.ts` or callers of `prove`) that depends on `optional_circuits[]` being one-circuit-per-combination? §6.4's collapse changes the artefact shape. If anything else reads that array, plan an eviction path first.
+2. ~~**OPTIONAL circuit strategy.**~~ **DECIDED (2026-05-03):** collapse is safe — only one consumer of `optional_circuits[]` exists, and its migration is mechanical. Empirical check (`grep -rn "optional_circuits\|optionalCircuits" --include="*.ts" --include="*.mjs" --include="*.js" --include="*.rs"`) found:
+
+   - **`ts.js:945-969`** — the test runner's "try circuit variants" loop. Sorts `optional_circuits` by `matched_optionals.length` descending and pushes one `circuitVariants[]` entry per element, then iterates compiling each. **This is the only external consumer.**
+   - `transform/src/lib.rs:128, 2374, 2435, 2448` — internal definition + producer; not a consumer in the eviction-path sense.
+   - No hits in `src/scripts/verify.ts`, the `prove` path, the snapshot test runner, the W3C analysis scripts, or anywhere else.
+
+   **Eviction path** (lands as part of round 3, §6.4):
+
+   - Round 3 lands the collapse + the NOT-EXISTS primitive in the `is_matched=false` arm.
+   - `transform/src/lib.rs` produces a single `sparql_nr` + `metadata` instead of a `Vec<OptionalCircuit>`. Add a witness-side `is_matched: [bool; N]` per OPTIONAL block.
+   - `ts.js`'s variant-iteration loop is rewritten as: compute the right `is_matched` vector for the bound data, prove once. Strict simplification — fewer compilations, single artefact.
+
+   The test-cleanup branch's plan to split `runTest` in `ts.js` (the agent's step 5 of 7) touches this code path anyway, so the variant-iteration logic is already in scope for refactoring; round 3's collapse simply removes it.
 3. **String-witness encoding (§6.3).** STRING_LEN_MAX is a privacy-leakage knob (a longer max means more witness, but exact lengths are still hidden). What's the right default — 32, 64, 128? Ties into the disclosure model in `spec/disclosure.md`.
 4. **Test-suite authority.** The repo has three test entry points (`ts.js`, `test/run-sparql-tests.ts`, `test/run-snapshot-tests.ts`) plus W3C analysis scripts (`check-tests.mjs`, `analyze-*.mjs`). Which one is canonical for SPARQL 1.0 pass-rate reporting? Coordination with the parallel agent on `/tmp/wt-sparql-tests` (`refactor/test-cleanup` branch) is needed before round 1's CI wiring step.
 5. **Lampe scope.** The `noir_IEEE754` Lampe scaffolding is being investigated separately. Does the `_verified` work in §5 here block on that, or do we land plain `unconstrained`+assertion now and retrofit Lampe relations later? Recommend the latter — keep round 1/2 unblocked.
