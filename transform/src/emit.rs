@@ -429,8 +429,13 @@ pub(crate) fn generate_sparql_nr_from_query_info(
         let matched_clauses: Vec<String> = (0..4)
             .filter(|j| *j != free_position)
             .map(|j| {
+                // Project through `.hash`: the bounded byte-array
+                // witness redesign makes each term slot a
+                // `TermWitness { hash, bytes, length }` and BGP
+                // equality only ever needs the term's identity. See
+                // `spec/encoding.md` sec.6.6 for the rationale.
                 format!(
-                    "({} == bgp[{}].terms[{}])",
+                    "({} == bgp[{}].terms[{}].hash)",
                     serialize_term(&eo.inner_terms[j], info, &binding_map),
                     eo.matched_idx,
                     j

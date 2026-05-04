@@ -343,7 +343,12 @@ pub(crate) fn serialize_term(term: &Term, query: &QueryInfo, bindings: &BTreeMap
             }
         }
         Term::Input(triple_idx, term_idx) => {
-            format!("bgp[{}].terms[{}]", triple_idx, term_idx)
+            // The bounded byte-array witness redesign means each term
+            // slot is now a `TermWitness { hash, bytes, length }`. BGP
+            // matching / FILTER equality only ever needs the term's
+            // identity, which is the `hash` field -- see
+            // `spec/encoding.md` sec.6.6 (compatibility) for the rationale.
+            format!("bgp[{}].terms[{}].hash", triple_idx, term_idx)
         }
         Term::Static(gt) => serialize_ground_term(gt),
         // Default graph term — must hash with term-type tag `4` to

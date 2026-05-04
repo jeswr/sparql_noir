@@ -11,7 +11,7 @@ pub(crate) struct Variables {
 
 pub(crate) type Hidden = [Field; 2];
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables, hidden: Hidden) {
-  assert(variables.o == bgp[0].terms[0]);
-  assert(variables.s == bgp[0].terms[2]);
+  assert(variables.o == bgp[0].terms[0].hash);
+  assert(variables.s == bgp[0].terms[2].hash);
   assert(!(hidden[0] == hidden[1]));
 }

@@ -10,8 +10,8 @@ pub(crate) struct Variables {
 }
 
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables) {
-  assert(variables.s == bgp[0].terms[0]);
-  assert(variables.o == bgp[0].terms[2]);
-  assert(consts::hash2([0, consts::encode_string("http://example.org/knows")]) == bgp[0].terms[1]);
-  assert(((variables.s == bgp[1].terms[0]) & (consts::hash2([0, consts::encode_string("http://example.org/type")]) == bgp[1].terms[1]) & (consts::hash2([0, consts::encode_string("http://example.org/Person")]) == bgp[1].terms[2]) & (consts::hash2([4, consts::encode_string("")]) == bgp[1].terms[3])) | (utils::verify_non_membership_no_inclusion_check(bgp[2], bgp[3], consts::hash4([variables.s, consts::hash2([0, consts::encode_string("http://example.org/type")]), consts::hash2([0, consts::encode_string("http://example.org/Person")]), consts::hash2([4, consts::encode_string("")])]))));
+  assert(variables.s == bgp[0].terms[0].hash);
+  assert(variables.o == bgp[0].terms[2].hash);
+  assert(consts::hash2([0, consts::encode_string("http://example.org/knows")]) == bgp[0].terms[1].hash);
+  assert(((variables.s == bgp[1].terms[0].hash) & (consts::hash2([0, consts::encode_string("http://example.org/type")]) == bgp[1].terms[1].hash) & (consts::hash2([0, consts::encode_string("http://example.org/Person")]) == bgp[1].terms[2].hash) & (consts::hash2([4, consts::encode_string("")]) == bgp[1].terms[3].hash)) | (utils::verify_non_membership_no_inclusion_check(bgp[2], bgp[3], consts::hash4([variables.s, consts::hash2([0, consts::encode_string("http://example.org/type")]), consts::hash2([0, consts::encode_string("http://example.org/Person")]), consts::hash2([4, consts::encode_string("")])]))));
 }

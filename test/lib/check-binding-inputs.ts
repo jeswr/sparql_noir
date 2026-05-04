@@ -60,10 +60,48 @@ export interface SignedData {
   nquads: string[];      // Original n-quads as strings
 }
 
+/**
+ * Round-1 default for the bounded byte-array witness bound. Mirrors
+ * `noir/lib/consts::STRING_LEN_MAX` and `DEFAULT_STRING_LEN_MAX` in
+ * `src/config.ts`. The TS pipeline currently emits zero-padded
+ * placeholder witnesses (`bytes: [0, ...]`, `length: 0`); round-2 will
+ * populate them with real lexical bytes from the source quad. See
+ * `spec/encoding.md` sec.6 for the contract.
+ */
+export const STRING_LEN_MAX = 64;
+
+/**
+ * Per-term witness in the JSON form Noir's input loader expects. The
+ * `hash` field carries the term's Enc_t result (the same hex-encoded
+ * Field that previous versions stored as `terms[i]`); `bytes` /
+ * `length` are the bounded byte-array witness defined in
+ * `spec/encoding.md` sec.6.2.
+ */
+export interface TermWitness {
+  hash: string;
+  bytes: number[];
+  length: number;
+}
+
 export interface BGPTriple {
-  terms: string[];
+  terms: TermWitness[];
   path: string[];
   directions: boolean[];
+}
+
+/**
+ * Wrap a bare term-hash hex string as a round-1 placeholder
+ * `TermWitness` (zero-padded bytes, `length: 0`). Use this whenever
+ * legacy code only carries the hash; the byte witness is unconstrained
+ * at the Triple level (see `spec/encoding.md` sec.6.3) so a zero
+ * placeholder is sound until a string operator binds it locally.
+ */
+export function termHashToWitness(hash: string, stringLenMax: number = STRING_LEN_MAX): TermWitness {
+  return {
+    hash,
+    bytes: new Array(stringLenMax).fill(0),
+    length: 0,
+  };
 }
 
 export interface CheckBindingInputs {
@@ -317,9 +355,11 @@ export function generateCheckBindingInputs(
     return null;
   }
   
-  // Build BGP triples from matched indices
+  // Build BGP triples from matched indices. Round-1: each term hash
+  // is wrapped in a placeholder `TermWitness` with zero-padded bytes
+  // (advisory at the Triple level; see `spec/encoding.md` sec.6.3).
   const bgpTriples: BGPTriple[] = matchedIndices.map(idx => ({
-    terms: signedData.triples[idx],
+    terms: signedData.triples[idx].map(h => termHashToWitness(h)),
     path: signedData.paths[idx],
     directions: signedData.direction[idx],
   }));
@@ -341,7 +381,7 @@ export function generateCheckBindingInputs(
           // Get the encoded value from the matched triple
           const triple = bgpTriples[patternIdx];
           if (triple && triple.terms[posIdx]) {
-            variables[varName] = triple.terms[posIdx];
+            variables[varName] = triple.terms[posIdx].hash;
           }
           break;
         }
@@ -515,7 +555,7 @@ export function generateNegativeTestCases(
     negativeTests.push({
       type: 'wrong_variable_value',
       description: `Variable ?${varName} has incorrect encoded value`,
-      expectedError: `Failed constraint: variables.${varName} == bgp[*].terms[*]`,
+      expectedError: `Failed constraint: variables.${varName} == bgp[*].terms[*].hash`,
       inputs: {
         ...baseInputs,
         bgp: validInputs.bgp,
@@ -523,23 +563,28 @@ export function generateNegativeTestCases(
       },
     });
   }
-  
+
   // 2. Wrong predicate - change the predicate term of a triple
   if (validInputs.bgp.length > 0) {
     const mutatedBgp = validInputs.bgp.map((t, i) => {
       if (i === 0) {
         return {
           ...t,
-          terms: [t.terms[0], mutateHexString(t.terms[1]), t.terms[2], t.terms[3]],
+          terms: [
+            t.terms[0],
+            { ...t.terms[1], hash: mutateHexString(t.terms[1].hash) },
+            t.terms[2],
+            t.terms[3],
+          ],
         };
       }
       return t;
     });
-    
+
     negativeTests.push({
       type: 'wrong_predicate',
       description: 'Predicate of first triple has incorrect encoded value',
-      expectedError: 'Failed constraint: consts::hash2([0, ...]) == bgp[0].terms[1]',
+      expectedError: 'Failed constraint: consts::hash2([0, ...]) == bgp[0].terms[1].hash',
       inputs: {
         ...baseInputs,
         bgp: mutatedBgp,
@@ -547,23 +592,28 @@ export function generateNegativeTestCases(
       },
     });
   }
-  
-  // 3. Wrong object - change the object term of a triple  
+
+  // 3. Wrong object - change the object term of a triple
   if (validInputs.bgp.length > 0) {
     const mutatedBgp = validInputs.bgp.map((t, i) => {
       if (i === 0) {
         return {
           ...t,
-          terms: [t.terms[0], t.terms[1], mutateHexString(t.terms[2]), t.terms[3]],
+          terms: [
+            t.terms[0],
+            t.terms[1],
+            { ...t.terms[2], hash: mutateHexString(t.terms[2].hash) },
+            t.terms[3],
+          ],
         };
       }
       return t;
     });
-    
+
     negativeTests.push({
       type: 'wrong_object',
       description: 'Object of first triple has incorrect encoded value',
-      expectedError: 'Failed constraint: ... == bgp[0].terms[2]',
+      expectedError: 'Failed constraint: ... == bgp[0].terms[2].hash',
       inputs: {
         ...baseInputs,
         bgp: mutatedBgp,
@@ -571,23 +621,28 @@ export function generateNegativeTestCases(
       },
     });
   }
-  
+
   // 4. Mismatched subjects - if there are multiple BGP patterns with shared variables
   if (validInputs.bgp.length >= 2) {
     const mutatedBgp = validInputs.bgp.map((t, i) => {
       if (i === 1) {
         return {
           ...t,
-          terms: [mutateHexString(t.terms[0]), t.terms[1], t.terms[2], t.terms[3]],
+          terms: [
+            { ...t.terms[0], hash: mutateHexString(t.terms[0].hash) },
+            t.terms[1],
+            t.terms[2],
+            t.terms[3],
+          ],
         };
       }
       return t;
     });
-    
+
     negativeTests.push({
       type: 'mismatched_subject',
       description: 'Subject of second triple differs from first (shared variable mismatch)',
-      expectedError: 'Failed constraint: bgp[0].terms[0] == bgp[1].terms[0]',
+      expectedError: 'Failed constraint: bgp[0].terms[0].hash == bgp[1].terms[0].hash',
       inputs: {
         ...baseInputs,
         bgp: mutatedBgp,

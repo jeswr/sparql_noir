@@ -90,6 +90,8 @@
   "prefixNotExists": [],
   "prefix_not_exists": [],
   "skip_signing": false,
+  "stringLenMax": 64,
+  "string_len_max": 64,
   "total_patterns": 2,
   "unionBranches": [],
   "union_branches": [],

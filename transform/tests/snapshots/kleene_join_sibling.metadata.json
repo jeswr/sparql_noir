@@ -192,6 +192,8 @@
   "prefixNotExists": [],
   "prefix_not_exists": [],
   "skip_signing": false,
+  "stringLenMax": 64,
+  "string_len_max": 64,
   "total_patterns": 5,
   "unionBranches": [
     [

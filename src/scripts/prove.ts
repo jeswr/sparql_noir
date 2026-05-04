@@ -19,6 +19,22 @@ import type { Term, Quad, Literal } from '@rdfjs/types';
 import type { SignedData } from './sign.js';
 import { encodeString, encodeDatatypeIri, encodeNamedNode, getTermEncodingString, runJson } from '../encode.js';
 import { buildPrefix3Inputs, type AbsentTermDescriptor, type PrefixNotExistsMeta } from './prove-prefix3.js';
+import { defaultConfig } from '../config.js';
+
+/**
+ * Wrap a bare term-hash hex string as a `TermWitness` matching the
+ * Noir `types::TermWitness` shape. Round-1 contract: the byte witness
+ * is advisory at the Triple level (see `spec/encoding.md` sec.6.3),
+ * so we emit a zero-padded placeholder; round-2 will populate it from
+ * the source quad's lexical form.
+ */
+function termHashToWitness(hash: string): { hash: string; bytes: number[]; length: number } {
+  return {
+    hash,
+    bytes: new Array(defaultConfig.stringLenMax).fill(0),
+    length: 0,
+  };
+}
 
 // --- Custom stringQuadToQuad that properly handles escape sequences ---
 
@@ -1073,16 +1089,21 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     return -1;
   }
 
-  // Build triple object for circuit input
+  // Build triple object for circuit input. Each term-hash is wrapped
+  // as a round-1 placeholder `TermWitness` (see `spec/encoding.md`
+  // sec.6.3); round-2 will populate `bytes` / `length` from the source
+  // quad's lexical form.
   function getTripleObject(id: number) {
+    const rawTerms = signedData!.triples[id] ?? [];
+    const termWitnesses = rawTerms.map(termHashToWitness);
     if (skipSigning) {
       // Simplified: only terms, no Merkle proof data
       return {
-        terms: signedData!.triples[id],
+        terms: termWitnesses,
       };
     }
     return {
-      terms: signedData!.triples[id],
+      terms: termWitnesses,
       path: signedData!.paths[id],
       directions: signedData!.direction[id],
     };
@@ -1574,13 +1595,18 @@ export async function generateProofsInMemory(options: ProveOptionsInMemory): Pro
     return -1;
   }
 
-  // Build triple object for circuit input
+  // Build triple object for circuit input. Each term-hash is wrapped
+  // as a round-1 placeholder `TermWitness` (`spec/encoding.md`
+  // sec.6.3); round-2 will populate `bytes` / `length` from the source
+  // quad's lexical form.
   function getTripleObject(id: number) {
+    const rawTerms = signedData.triples[id] ?? [];
+    const termWitnesses = rawTerms.map(termHashToWitness);
     if (skipSigning) {
-      return { terms: signedData.triples[id] };
+      return { terms: termWitnesses };
     }
     return {
-      terms: signedData.triples[id],
+      terms: termWitnesses,
       path: signedData.paths[id],
       directions: signedData.direction[id],
     };

@@ -10,7 +10,7 @@ pub(crate) struct Variables {
 }
 
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables) {
-  assert(variables.s == bgp[0].terms[0]);
-  assert(variables.g == bgp[0].terms[3]);
-  assert(consts::hash2([0, consts::encode_string("http://example.org/p")]) == bgp[0].terms[1]);
+  assert(variables.s == bgp[0].terms[0].hash);
+  assert(variables.g == bgp[0].terms[3].hash);
+  assert(consts::hash2([0, consts::encode_string("http://example.org/p")]) == bgp[0].terms[1].hash);
 }
