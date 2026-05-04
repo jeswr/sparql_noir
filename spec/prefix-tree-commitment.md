@@ -1,7 +1,7 @@
-# Prefix-tree commitment (rounds 4 + 5)
+# Prefix-tree commitment (rounds 4 + 5 + 6)
 
-**Status:** **shipped** -- round 4 (commitment scaffolding + prefix-3 primitive) and round 5 (transform-side dispatch + two-root signer ABI). The prefix-3 commitment is wired end-to-end for `NOT EXISTS` / `MINUS` / OPTIONAL collapse over single-triple inner patterns with one inner-only `o` position. Other 15 prefix variants follow the same template; land as new query classes call for them.
-**Owner:** noir-circuits + sparql-semantics agents (round 4 branch `prefix-tree-commitment-round4`; round 5 branch `prefix-tree-transform-dispatch`).
+**Status:** **shipped end-to-end** -- round 4 (commitment scaffolding + prefix-3 primitive), round 5 (transform-side dispatch + two-root signer ABI), and round 6 (runtime glue: signer issues two signatures, prover populates `bgp_prefix3` / sentinels / boundary cases against the live binding). The prefix-3 commitment is wired end-to-end for `NOT EXISTS` / `MINUS` / OPTIONAL collapse over single-triple inner patterns with one inner-only `o` position. Other 15 prefix variants follow the same template; land as new query classes call for them.
+**Owner:** noir-circuits + sparql-semantics agents (round 4 branch `prefix-tree-commitment-round4`; round 5 branch `prefix-tree-transform-dispatch`; round 6 branch `prefix-tree-runtime-glue`).
 **References:** `spec/exists.md` Sec.3.3 / Sec.6 (round-3 OPTIONAL collapse punt); `decisions/non-membership-sentinels-transform-wiring.md` (Approach A locked in for round 4); `paper/PLAN.md` Sec.4.3 (prefix-tree commitment claims); `feedback_modular_commitment_signature_design.md` (modular commitment-shape directive).
 
 ## 1. Background
@@ -245,21 +245,30 @@ The TS layer's `signRdfData` (`src/scripts/sign.ts`) computes both trees in para
 
 Deployments that don't need the prefix tree set `rootPrefix3 = "0x0"` and omit `prefix3`; any prover attempting a prefix-3 non-membership against an empty tree fails because the genuine tree-build hash never equals zero. See Sec.6.3.
 
-### 8.6 Runtime ABI gaps (round-5 follow-up)
+### 8.6 Runtime glue (shipped -- round 6)
 
-Round 5 ships the **transform-side** wiring -- the generated `sparql.nr` / `main.nr` correctly reference the two-root signer ABI and the prefix-3 inputs. Two pieces of **runtime glue** are still scaffolding-level and tracked as round-5 follow-ups:
+Round 5 shipped the **transform-side** wiring. Round 6 closes the two **runtime-glue** gaps so the prefix-3 commitment is exercised end-to-end on real datasets:
 
-1. **Signature over both roots** (roborev #545 high). The TS signer publishes both roots in `signed.json` but currently signs only `root` (round-3). The round-5 generated circuits' `verify_signature(public_key, roots[1])` call therefore receives a `roots[1]` whose `.signature` field is a placeholder. Fix in flight: extend `generateSignature` to sign a canonical `(root, rootPrefix3)` payload (e.g. `hash2([root, rootPrefix3])`) and update `noir/bin/signature/src/main.nr` to verify against that payload. Until then, a prefix-3 query proof will fail signature verification.
+1. **Two signatures, one key** (was: roborev #545 high 2). `src/scripts/sign.ts` now issues **separate signatures** under the same key for `root` and `rootPrefix3`, populating `signedData.signature` and `signedData.signaturePrefix3`. The generated `main.nr` already calls `verify_signature(public_key[0], roots[i])` once per root, so no verifier-side change was needed; per-root signatures keep the existing `Root.signature` ABI unchanged and avoid the soundness review burden of a hash-of-roots scheme. Each future prefix variant adds one more `Root` slot + one more `signRoot` call; the `for i in 0..K { verify_signature(...) }` loop already accepts arbitrary `K`. See the "two signatures vs one signature on `hash2([roots])`" trade-off in `src/scripts/sign.ts::generateSignature`.
 
-2. **Prove-time input population** (roborev #545 high). `src/scripts/prove.ts` and the WASM input builders don't yet populate `roots[1]`, `bgp_prefix3`, `low_sentinel_3`, `high_sentinel_3`, or `boundary_cases_prefix3` from the signer's `prefix3` data. Round-5 follow-up. Until then, the generated `main.nr` for a prefix-3 query is correct but no prover-side glue exists to invoke it.
+2. **Prove-time input population** (was: roborev #545 high 3). `src/scripts/prove.ts` populates `roots[1]`, `bgp_prefix3`, `low_sentinel_3`, `high_sentinel_3`, and `boundary_cases_prefix3` from `signedData.prefix3`. The substitution / hash / bracket logic lives in `src/scripts/prove-prefix3.ts`:
 
-Neither gap affects the transform-layer correctness (the focus of this round); both are tracked in the round-5 follow-up branch and will land before the prefix-3 commitment is exercised end-to-end on real datasets.
+   - **Substitute** each `metadata.prefixNotExists[i].absentTerms[j]` -- one of `variable` (resolved against the live binding), `static` (encoded constant), or `input` (read out of `bgp[p].terms[j]`) -- into a Field-string.
+   - **Hash** in one batched `runJson` call: `utils::prefix3::hash3_sp_g(s, p, g)` per constraint, matching the Noir circuit's identical call.
+   - **Bracket** by sorting the prefix-3 tree's real leaves by hash (using `paths[i][0]` and the `direction[i]`-reconstructed sorted index) and locating the strict-`<` neighbours of the absent hash.
+   - **Dispatch** by setting `boundary_cases_prefix3[i]` to `0` (Lower), `1` (Middle), or `2` (Upper); the matching `verify_non_membership_prefix3_*_no_inclusion` primitive fires inside the circuit. Filler slots (the dropped half of a Lower / Upper bracket) are populated with the smallest real prefix leaf so per-slot inclusion still passes.
 
-### 8.7 Soundness check on projection (roborev #545 high 1)
+   Bindings whose absent prefix is **present** in the dataset are dropped (the constraint is unsatisfiable, by design). The metadata schema gained `absentTerms` / `freePosition` / `fixedPositions` on each `prefixNotExists` entry so the prover can perform the substitution -- a transform-layer change the round-5 emitter didn't need.
+
+Round-3 sentinel inputs (`low_sentinel`, `high_sentinel`, `boundary_cases`) are also surfaced from the signer at round 6, since prefix-3 circuits import the same `verify_low_sentinel_inclusion` / `verify_high_sentinel_inclusion` primitives and the round-3 sentinel scaffolding becomes load-bearing as soon as the round-3 NOT EXISTS / OPTIONAL collapse paths run on real datasets. The signer's `signedData` exposes `lowSentinelPath` / `lowSentinelDirections` / `highSentinelPath` / `highSentinelDirections`; `prove.ts` wires them into every NOT EXISTS / OPTIONAL collapse / prefix-3 circuit.
+
+End-to-end coverage lives in `test/run-prefix3-e2e.ts` -- three sub-tests (sign emits both roots + signatures; NOT EXISTS over a prefix-3 absent object proves and verifies; OPTIONAL collapse over a prefix-3 inner-only object proves and verifies). The script exercises the full `sign → prove → verify` pipeline on an in-memory dataset shaped to land in the Lower / Middle / Upper boundary arms.
+
+### 8.7 Soundness check on projection (shipped -- round 5; verified round 6)
 
 The matched arm of a prefix-3 OPTIONAL collapse pins the fixed positions but leaves `bgp[matched_idx].terms[free_position]` unconstrained, so a malicious prover could pick any signed leaf's value at that position. If the inner-only variable bound to the free position is **projected** in the query's `Variables`, the verifier would accept a binding that wasn't witnessed by a live (s, p, o, g) tuple in the matched-arm sense. This is unsound.
 
-`process_query` enforces a post-lowering check: if any prefix-3 `EasyOptional`'s `inner_only_var` appears in `circuit_vars`, reject the query with a clear error rather than silently emitting an unsound circuit. This is the round-5 conservative position; a future round can extend the matched arm to pin all four positions when the inner-only is projected (at the cost of a richer witness shape) and lift the rejection.
+`process_query` enforces a post-lowering check: if any prefix-3 `EasyOptional`'s `inner_only_var` appears in `circuit_vars`, reject the query with a clear error rather than silently emitting an unsound circuit. The round-6 e2e fixture (`test/run-prefix3-e2e.ts`) exercises the OPTIONAL-collapse case with the inner-only `?age` **deliberately omitted from `SELECT`** -- the rejection is unit-tested in `transform/tests/snapshot.rs::optional_inner_only_object_projected_is_rejected`. Future rounds may extend the matched arm to pin all four positions when the inner-only is projected (at the cost of a richer witness shape) and lift the rejection.
 
 ## 9. Open questions for the follow-up round
 

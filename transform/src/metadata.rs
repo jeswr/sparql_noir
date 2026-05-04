@@ -8,8 +8,36 @@ use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern};
 
 use crate::{
     Aggregate, ContextualizedTriple, GraphContext, OptionalBlock, OrderDirection, OrderKey,
-    QueryInfo,
+    QueryInfo, Term,
 };
+
+/// Serialise a `Term` (the lowering-time representation, which can be a
+/// `Variable`, `Input`-position pointer, or `Static` ground term) to a
+/// JSON shape the TS prover can interpret.
+///
+/// Round-6 prover-side glue (`spec/prefix-tree-commitment.md` Sec.8.6)
+/// reads `prefix_not_exists[i].absent_terms` to know which `(s, p, g)`
+/// tuple to compute the absent prefix hash for. Variables are resolved
+/// against the live binding; `Input(p, j)` references `bgp[p].terms[j]`;
+/// `Static` is inlined as a constant ground term.
+pub(crate) fn term_to_json(term: &Term) -> serde_json::Value {
+    match term {
+        Term::Variable(v) => serde_json::json!({
+            "kind": "variable",
+            "name": v,
+        }),
+        Term::Input(pattern_idx, position) => serde_json::json!({
+            "kind": "input",
+            "patternIdx": pattern_idx,
+            "pattern_idx": pattern_idx,
+            "position": position,
+        }),
+        Term::Static(gt) => serde_json::json!({
+            "kind": "static",
+            "term": ground_term_to_json(gt),
+        }),
+    }
+}
 
 fn aggregate_to_json(agg: &Aggregate) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
@@ -205,10 +233,27 @@ pub(crate) fn build_base_metadata(
         .easy_optionals
         .iter()
         .map(|eo| {
-            let prefix_kind = eo
+            let prefix_kind_value = eo
                 .prefix_kind
                 .map(|k| serde_json::Value::String(k.metadata_tag().to_string()))
                 .unwrap_or(serde_json::Value::Null);
+            // Round-6 prover-side glue: surface `inner_terms` /
+            // `free_position` / `fixed_positions` for prefix-3
+            // OPTIONAL collapses so the prover can substitute the
+            // unmatched-arm absent prefix against the live binding.
+            // Round-3 collapses leave these empty -- no prefix-tree
+            // dispatch fires, so the substitution is unnecessary.
+            let inner_terms_json: Vec<serde_json::Value> =
+                eo.inner_terms.iter().map(term_to_json).collect();
+            let (free_position, fixed_positions) = match eo.prefix_kind {
+                Some(k) => (
+                    serde_json::Value::Number(k.free_position().into()),
+                    serde_json::Value::Array(
+                        k.fixed_positions().iter().map(|p| serde_json::Value::Number((*p).into())).collect(),
+                    ),
+                ),
+                None => (serde_json::Value::Null, serde_json::Value::Null),
+            };
             serde_json::json!({
                 "id": eo.id,
                 "matchedIdx": eo.matched_idx,
@@ -217,8 +262,14 @@ pub(crate) fn build_base_metadata(
                 "bracketRightIdx": eo.bracket_right_idx,
                 "bracket_left_idx": eo.bracket_left_idx,
                 "bracket_right_idx": eo.bracket_right_idx,
-                "prefixKind": prefix_kind.clone(),
-                "prefix_kind": prefix_kind,
+                "prefixKind": prefix_kind_value.clone(),
+                "prefix_kind": prefix_kind_value,
+                "innerTerms": inner_terms_json,
+                "inner_terms": inner_terms_json,
+                "freePosition": free_position.clone(),
+                "free_position": free_position,
+                "fixedPositions": fixed_positions.clone(),
+                "fixed_positions": fixed_positions,
             })
         })
         .collect();
@@ -234,6 +285,15 @@ pub(crate) fn build_base_metadata(
         .prefix_not_exists
         .iter()
         .map(|pne| {
+            // Absent terms in `[s, p, o, g]` order; the position at
+            // `prefix_kind.free_position()` is unused for hashing
+            // but kept for symmetry with `Term`-shape elsewhere.
+            // Round-6 prover-side glue computes
+            // `hash3_sp_g(absent_terms[fixed_positions])` to derive
+            // the absent prefix hash and pick the boundary case.
+            let absent_terms_json: Vec<serde_json::Value> =
+                pne.absent_terms.iter().map(term_to_json).collect();
+            let fixed_positions = pne.prefix_kind.fixed_positions();
             serde_json::json!({
                 "prefixKind": pne.prefix_kind.metadata_tag(),
                 "prefix_kind": pne.prefix_kind.metadata_tag(),
@@ -241,6 +301,12 @@ pub(crate) fn build_base_metadata(
                 "bracketRightIdx": pne.bracket_right_idx,
                 "bracket_left_idx": pne.bracket_left_idx,
                 "bracket_right_idx": pne.bracket_right_idx,
+                "absentTerms": absent_terms_json,
+                "absent_terms": absent_terms_json,
+                "freePosition": pne.prefix_kind.free_position(),
+                "free_position": pne.prefix_kind.free_position(),
+                "fixedPositions": fixed_positions,
+                "fixed_positions": fixed_positions,
                 "boundaryCaseDispatch": {
                     "0": "lower",
                     "1": "middle",
