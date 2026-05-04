@@ -69,6 +69,34 @@ export interface PrefixNotExistsMeta {
   fixedPositions: number[];
 }
 
+/**
+ * Description of one prefix-3 easy-OPTIONAL collapse from
+ * `metadata.easyOptionals` (`prefixKind === "prefix3_sp_g"` only --
+ * round-3 collapses don't dispatch through the prefix-3 commitment).
+ *
+ * Round-6 prover-side glue (roborev finding 2026-05-04, second HIGH
+ * on PR #61): `buildPrefix3Inputs` previously walked only
+ * `metadata.prefixNotExists`, leaving prefix-3 OPTIONAL collapses
+ * with empty `boundary_cases_prefix3` despite the circuit declaring
+ * length `1+` (one dispatch per prefix-3 collapse, allocated AFTER
+ * all NOT EXISTS dispatches). The witness population now treats
+ * prefix-3 EOs as a second class of bracketing dispatch.
+ */
+export interface PrefixEasyOptionalMeta {
+  id: number;
+  matchedIdx: number;
+  bracketLeftIdx: number;
+  bracketRightIdx: number;
+  /** `null` for round-3 collapses; `"prefix3_sp_g"` for prefix-3. */
+  prefixKind: string | null;
+  /** Inner-triple `[s, p, o, g]` term descriptors. */
+  innerTerms: AbsentTermDescriptor[];
+  /** Free (inner-only) position; `null` for round-3 collapses. */
+  freePosition: number | null;
+  /** Fixed positions in canonical hash3 input order; `null` for round-3. */
+  fixedPositions: number[] | null;
+}
+
 /** The three flavours of `absent_terms[j]` (mirrors the Rust `Term` enum). */
 export type AbsentTermDescriptor =
   | { kind: 'variable'; name: string }
@@ -152,6 +180,14 @@ export function buildPrefix3Inputs(
   metadata: {
     prefixNotExists?: PrefixNotExistsMeta[];
     prefix_not_exists?: PrefixNotExistsMeta[];
+    /**
+     * Round-6 fix (roborev finding 2026-05-04, second HIGH on PR #61).
+     * Prefix-3 OPTIONAL collapses share the `boundary_cases_prefix3[]`
+     * dispatch slots with `prefixNotExists`; they're allocated AFTER
+     * every NOT EXISTS entry so the same metadata array is read here.
+     */
+    easyOptionals?: PrefixEasyOptionalMeta[];
+    easy_optionals?: PrefixEasyOptionalMeta[];
     bgpPrefix3Length?: number;
     bgp_prefix3_length?: number;
     variables?: string[];
@@ -161,10 +197,17 @@ export function buildPrefix3Inputs(
   encodeTerm: (descriptor: AbsentTermDescriptor, binding: ReadonlyMap<string, { termType: string; value: string; language?: string; datatype?: { value: string } }>, bgpTriples: ReadonlyArray<{ terms: string[] }>) => string,
 ): Prefix3Inputs | null {
   const constraints = metadata.prefixNotExists || metadata.prefix_not_exists || [];
+  const easyOptionals = metadata.easyOptionals || metadata.easy_optionals || [];
+  const prefix3EasyOptionals = easyOptionals.filter(
+    (eo): eo is PrefixEasyOptionalMeta & { prefixKind: 'prefix3_sp_g'; fixedPositions: number[] } =>
+      eo.prefixKind === 'prefix3_sp_g'
+        && Array.isArray(eo.fixedPositions)
+        && eo.fixedPositions.length === 3,
+  );
   const bgpPrefix3Length = metadata.bgpPrefix3Length ?? metadata.bgp_prefix3_length ?? 0;
 
   if (!signedData.prefix3) {
-    if (constraints.length === 0 && bgpPrefix3Length === 0) {
+    if (constraints.length === 0 && prefix3EasyOptionals.length === 0 && bgpPrefix3Length === 0) {
       // No prefix-3 dispatches and no prefix-3 inputs needed -- but if
       // the circuit declares a `BgpPrefix3` array of any size, the
       // verifier still expects a (possibly empty) shape. Return null
@@ -183,7 +226,30 @@ export function buildPrefix3Inputs(
   // encoded Field strings. We collect the substituted (s, p, g)
   // triples first so we can batch the absent-hash computation in a
   // single Noir execution call.
-  const absences: { fixedTerms: [string, string, string]; bracketLeftIdx: number; bracketRightIdx: number }[] = [];
+  //
+  // The IR/emit ordering is: every `prefixNotExists` dispatch first,
+  // then every `prefix3` `easyOptionals` dispatch -- matches
+  // `transform/src/emit.rs` (`prefix3_eo_idx = num_prefix3_not_exists`
+  // initialiser around line 419). We must mirror that ordering here so
+  // the `boundary_cases_prefix3[i]` slot we set lines up with the
+  // dispatch the circuit reads at index `i`.
+  //
+  // For NOT EXISTS the absent prefix MUST be absent in the dataset --
+  // a hash collision means the constraint is unsatisfiable and the
+  // binding is dropped. For prefix-3 easy-OPTIONAL, the prefix may be
+  // absent (unmatched arm dispatches via the bracket primitives) or
+  // present (matched arm holds; bracket slots are filler and the
+  // unmatched-arm formula evaluates to false but the disjunction
+  // still holds). We tag each absence with its source so the
+  // collision handling diverges per kind.
+  type AbsenceKind = 'not_exists' | 'easy_optional';
+  interface AbsenceEntry {
+    kind: AbsenceKind;
+    fixedTerms: [string, string, string];
+    bracketLeftIdx: number;
+    bracketRightIdx: number;
+  }
+  const absences: AbsenceEntry[] = [];
   for (const c of constraints) {
     if (c.prefixKind !== 'prefix3_sp_g') {
       throw new Error(`unsupported prefix kind ${c.prefixKind}: round 6 only ships prefix3_sp_g`);
@@ -195,9 +261,24 @@ export function buildPrefix3Inputs(
       encodeTerm(c.absentTerms[fixed[2]!]!, binding, bgpTriples),
     ];
     absences.push({
+      kind: 'not_exists',
       fixedTerms,
       bracketLeftIdx: c.bracketLeftIdx,
       bracketRightIdx: c.bracketRightIdx,
+    });
+  }
+  for (const eo of prefix3EasyOptionals) {
+    const fixed = eo.fixedPositions;
+    const fixedTerms: [string, string, string] = [
+      encodeTerm(eo.innerTerms[fixed[0]!]!, binding, bgpTriples),
+      encodeTerm(eo.innerTerms[fixed[1]!]!, binding, bgpTriples),
+      encodeTerm(eo.innerTerms[fixed[2]!]!, binding, bgpTriples),
+    ];
+    absences.push({
+      kind: 'easy_optional',
+      fixedTerms,
+      bracketLeftIdx: eo.bracketLeftIdx,
+      bracketRightIdx: eo.bracketRightIdx,
     });
   }
 
@@ -235,21 +316,54 @@ export function buildPrefix3Inputs(
     const a = absences[i]!;
     const absentHash = parseFieldString(absentHashes[i] as unknown as string);
 
-    // Strict-`<` ordering against sorted real leaves.
+    // Strict-`<` ordering against sorted real leaves. Three states:
+    //   - leftReal == null               -> Lower (absent < all reals)
+    //   - rightReal == null              -> Upper (absent > all reals)
+    //   - both non-null                  -> Middle (absent strictly between)
+    //   - hash collision with a real leaf -> "present" -- handling
+    //                                       diverges per absence kind.
     let leftReal: { inputIdx: number; sortedIdx: number; hash: bigint } | null = null;
     let rightReal: { inputIdx: number; sortedIdx: number; hash: bigint } | null = null;
+    let present = false;
     for (const leaf of realLeavesByInputIdx) {
       if (leaf.hash < absentHash) {
         leftReal = leaf;
       } else if (leaf.hash === absentHash) {
-        throw new Error(
-          `prefix-3 NOT EXISTS constraint ${i} found absent prefix already in the dataset; ` +
-          `this binding fails the non-existence check. Drop it from the binding set or fix the query.`,
-        );
+        present = true;
+        break;
       } else if (rightReal == null) {
         rightReal = leaf;
         break;
       }
+    }
+
+    if (present) {
+      if (a.kind === 'not_exists') {
+        // The absent prefix is in the dataset -- the NOT EXISTS
+        // constraint is unsatisfiable for this binding. Surface the
+        // sentinel error string the caller in `prove.ts` greps for
+        // (`continue`-on-collision behaviour, dropping the binding).
+        throw new Error(
+          `prefix-3 NOT EXISTS constraint ${i} found absent prefix already in the dataset; ` +
+          `this binding fails the non-existence check. Drop it from the binding set or fix the query.`,
+        );
+      }
+      // `easy_optional`: the OPTIONAL matched. The matched arm of the
+      // disjunction holds (the inner triple's hash equals one of the
+      // signed leaves); the unmatched arm formula is allowed to be
+      // false because `(matched | unmatched)` only needs one true
+      // disjunct. We still have to emit a valid `boundary_cases_prefix3`
+      // tag and ensure the bracket slots satisfy the per-triple
+      // inclusion check (handled by the default filler initialisation
+      // above). Pick `Lower` arbitrarily -- the inclusion check on
+      // `bgp_prefix3[bracket_right_idx]` (filler = smallest real
+      // prefix leaf) succeeds; the Lower formula's strict-`<`
+      // assertion fails when `absentHash >= smallest_real_hash`,
+      // which is the case here since `absentHash` IS one of the
+      // real hashes -- so the unmatched-arm boolean evaluates to
+      // false, the matched arm is true, and the disjunction holds.
+      boundaryCasesPrefix3.push(fieldToHex(0n));
+      continue;
     }
 
     let boundaryCase: number;

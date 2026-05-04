@@ -31,6 +31,8 @@ import fs from 'fs';
 import path from 'path';
 import N3 from 'n3';
 import { sign, prove, verify } from '../src/index.js';
+import { buildPrefix3Inputs } from '../src/scripts/prove-prefix3.js';
+import { getTermEncodingString } from '../src/encode.js';
 
 const __dirname = new URL('.', import.meta.url).pathname;
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -137,10 +139,180 @@ async function main(): Promise<void> {
     log(`  verified ${proofResult.proofs.length} proof(s) end-to-end`);
   });
 
-  // OPTIONAL-collapse case is tracked as an orthogonal follow-up --
-  // the prover-side matched-arm slot population needs per-binding
-  // matched / unmatched dispatch on top of the gap-2 substitution
-  // glue. See `spec/prefix-tree-commitment.md` Sec.8.6.
+  // OPTIONAL-collapse end-to-end is tracked as an orthogonal
+  // follow-up -- the prover-side matched-arm `bgp[matched_idx]` slot
+  // population needs per-binding matched / unmatched dispatch on top
+  // of the gap-2 substitution glue. See
+  // `spec/prefix-tree-commitment.md` Sec.8.6.
+  //
+  // Below: focused regression test for roborev finding 2026-05-04
+  // (second HIGH on PR #61) -- `buildPrefix3Inputs` previously
+  // walked only `metadata.prefixNotExists`, so a circuit with a
+  // prefix-3 OPTIONAL collapse declared `boundary_cases_prefix3`
+  // length 1+ but the prover supplied length 0. Verifies the
+  // function now produces one boundary case per prefix-3 EO entry
+  // for both the matched (present-prefix) and unmatched
+  // (absent-prefix) sub-cases.
+  await runSubTest('buildPrefix3Inputs walks prefix-3 easyOptionals (unmatched arm)', async () => {
+    const store = buildDataset();
+    const signed = await sign(store);
+    if (!signed.prefix3) throw new Error('signed.prefix3 missing');
+
+    // Synthesise a metadata document mirroring what
+    // `optional_inner_only_object_collapses_via_prefix3` (the
+    // transform snapshot) produces for
+    // `OPTIONAL { ?p ex:age ?o . }` -- the inner pattern `?p ex:age
+    // ?o` substituted with `?p = ex:carol` is absent in the
+    // prefix-3 tree (carol has no age triple).
+    const ex = (local: string) => N3.DataFactory.namedNode(`http://example.org/${local}`);
+    const metadata = {
+      bgpPrefix3Length: 2,
+      prefixNotExists: [],
+      easyOptionals: [{
+        id: 0,
+        matchedIdx: 1,
+        bracketLeftIdx: 0,
+        bracketRightIdx: 1,
+        prefixKind: 'prefix3_sp_g' as const,
+        innerTerms: [
+          { kind: 'variable' as const, name: 'p' },
+          {
+            kind: 'static' as const,
+            term: { termType: 'NamedNode', value: 'http://example.org/age' },
+          },
+          { kind: 'variable' as const, name: 'o' },
+          { kind: 'static' as const, term: { termType: 'DefaultGraph' } },
+        ],
+        freePosition: 2,
+        fixedPositions: [0, 1, 3],
+      }],
+    };
+
+    // Build a binding for `?p = ex:carol` (no matching age triple
+    // in the dataset -- the inner OPTIONAL pattern is unmatched
+    // for this binding, so the prefix-3 bracketing arm fires).
+    const binding = new Map<string, { termType: string; value: string }>([
+      ['p', { termType: 'NamedNode', value: 'http://example.org/carol' }],
+    ]);
+    const bgpTriples: { terms: string[] }[] = [];
+
+    // The encodeAbsentTerm closure is the same shape as
+    // `prove.ts` uses internally; reproduce it here to keep the
+    // test self-contained.
+    const { DataFactory } = N3;
+    const encodeAbsentTerm = (
+      descriptor: typeof metadata.easyOptionals[number]['innerTerms'][number],
+      b: ReadonlyMap<string, { termType: string; value: string }>,
+      _bgp: ReadonlyArray<{ terms: string[] }>,
+    ): string => {
+      if (descriptor.kind === 'static') {
+        const t = descriptor.term;
+        if (t.termType === 'NamedNode') return getTermEncodingString(DataFactory.namedNode(t.value!));
+        if (t.termType === 'DefaultGraph') return getTermEncodingString(DataFactory.defaultGraph());
+        throw new Error(`unsupported test term: ${t.termType}`);
+      }
+      if (descriptor.kind === 'variable') {
+        const live = b.get(descriptor.name);
+        if (!live) throw new Error(`unbound variable ?${descriptor.name}`);
+        return getTermEncodingString(DataFactory.namedNode(live.value));
+      }
+      throw new Error(`unsupported descriptor kind: ${descriptor.kind}`);
+    };
+
+    const inputs = buildPrefix3Inputs(signed, metadata, binding, bgpTriples, encodeAbsentTerm);
+    if (!inputs) throw new Error('buildPrefix3Inputs returned null despite easyOptionals being present');
+    if (inputs.boundary_cases_prefix3.length !== 1) {
+      throw new Error(
+        `expected boundary_cases_prefix3.length === 1, got ${inputs.boundary_cases_prefix3.length}; ` +
+        `easyOptionals were dropped before the dispatch loop -- the bug roborev flagged`,
+      );
+    }
+    if (inputs.bgp_prefix3.length !== 2) {
+      throw new Error(`expected bgp_prefix3.length === 2 (size from bgpPrefix3Length), got ${inputs.bgp_prefix3.length}`);
+    }
+    const tag = inputs.boundary_cases_prefix3[0]!;
+    log(`  boundary_cases_prefix3[0] = ${tag} (Lower=0, Middle=1, Upper=2)`);
+    log(`  bgp_prefix3 slots populated for the unmatched arm`);
+  });
+
+  await runSubTest('buildPrefix3Inputs walks prefix-3 easyOptionals (matched arm, present prefix)', async () => {
+    const store = buildDataset();
+    const signed = await sign(store);
+    if (!signed.prefix3) throw new Error('signed.prefix3 missing');
+
+    const metadata = {
+      bgpPrefix3Length: 2,
+      prefixNotExists: [],
+      easyOptionals: [{
+        id: 0,
+        matchedIdx: 1,
+        bracketLeftIdx: 0,
+        bracketRightIdx: 1,
+        prefixKind: 'prefix3_sp_g' as const,
+        innerTerms: [
+          { kind: 'variable' as const, name: 'p' },
+          {
+            kind: 'static' as const,
+            term: { termType: 'NamedNode', value: 'http://example.org/age' },
+          },
+          { kind: 'variable' as const, name: 'o' },
+          { kind: 'static' as const, term: { termType: 'DefaultGraph' } },
+        ],
+        freePosition: 2,
+        fixedPositions: [0, 1, 3],
+      }],
+    };
+
+    // `?p = ex:bob` -- bob has an age triple, so the inner
+    // OPTIONAL pattern matches. The prefix `(bob, age, default)`
+    // IS in the prefix-3 tree, so `buildPrefix3Inputs` must NOT
+    // throw (matched-arm dispatch path); previously the throw was
+    // unconditional ("found absent prefix already in the dataset").
+    const binding = new Map<string, { termType: string; value: string }>([
+      ['p', { termType: 'NamedNode', value: 'http://example.org/bob' }],
+    ]);
+    const bgpTriples: { terms: string[] }[] = [];
+
+    const { DataFactory } = N3;
+    const encodeAbsentTerm = (
+      descriptor: typeof metadata.easyOptionals[number]['innerTerms'][number],
+      b: ReadonlyMap<string, { termType: string; value: string }>,
+      _bgp: ReadonlyArray<{ terms: string[] }>,
+    ): string => {
+      if (descriptor.kind === 'static') {
+        const t = descriptor.term;
+        if (t.termType === 'NamedNode') return getTermEncodingString(DataFactory.namedNode(t.value!));
+        if (t.termType === 'DefaultGraph') return getTermEncodingString(DataFactory.defaultGraph());
+        throw new Error(`unsupported test term: ${t.termType}`);
+      }
+      if (descriptor.kind === 'variable') {
+        const live = b.get(descriptor.name);
+        if (!live) throw new Error(`unbound variable ?${descriptor.name}`);
+        return getTermEncodingString(DataFactory.namedNode(live.value));
+      }
+      throw new Error(`unsupported descriptor kind: ${descriptor.kind}`);
+    };
+
+    let inputs;
+    try {
+      inputs = buildPrefix3Inputs(signed, metadata, binding, bgpTriples, encodeAbsentTerm);
+    } catch (err) {
+      const msg = (err as Error).message || String(err);
+      if (msg.includes('found absent prefix already in the dataset')) {
+        throw new Error(
+          'buildPrefix3Inputs threw on a prefix-3 EASY-OPTIONAL whose prefix is present in the dataset. ' +
+          'The matched-arm path of the disjunction must accept this case (the matched arm carries the truth, ' +
+          'the unmatched arm is allowed to be false). roborev finding 2026-05-04 second HIGH followup',
+        );
+      }
+      throw err;
+    }
+    if (!inputs) throw new Error('buildPrefix3Inputs returned null despite easyOptionals being present');
+    if (inputs.boundary_cases_prefix3.length !== 1) {
+      throw new Error(`expected boundary_cases_prefix3.length === 1, got ${inputs.boundary_cases_prefix3.length}`);
+    }
+    log(`  matched-arm dispatch tag = ${inputs.boundary_cases_prefix3[0]} (any valid tag is acceptable)`);
+  });
 
   // Print summary.
   console.log('\n========================================');
