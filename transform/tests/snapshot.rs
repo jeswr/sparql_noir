@@ -325,6 +325,25 @@ const CORPUS: &[Case] = &[
         query: "PREFIX ex: <http://example.org/>\n\
                 SELECT ?s ?p WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
     },
+    // Round 2 -- STRLEN / STRSTARTS / CONTAINS via the
+    // bind_term_bytes_plain_string_literal binding. Each query triggers
+    // the byte-witness path on `?o` (bound to `bgp[0].terms[2]`). The
+    // generated `sparql.nr` must emit a
+    // `utils::bind_term_bytes_plain_string_literal(...)` call before
+    // reading bytes, plus the operator-specific helper. See
+    // `spec/encoding.md` sec.6.3 for the soundness contract.
+    Case {
+        name: "filter_strlen",
+        query: "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRLEN(?o) > \"3\"^^xsd:integer) }",
+    },
+    Case {
+        name: "filter_strstarts",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRSTARTS(?o, \"foo\")) }",
+    },
+    Case {
+        name: "filter_contains",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(CONTAINS(?o, \"oba\")) }",
+    },
 ];
 
 /// Round 2 §7 — defensive cap on OPTIONAL blocks. The transform must
@@ -2026,6 +2045,181 @@ fn exists_grounded_lowers_to_two_triple_bgp() {
     assert!(result.sparql_nr.contains("http://example.org/Person"));
     // The EXISTS expression itself collapsed to `true`.
     assert!(result.sparql_nr.contains("assert(true);"));
+}
+
+/// Round 2 -- STRLEN(?x) emits `bind_term_bytes_plain_string_literal`
+/// followed by a `.length as Field` read. The binding ensures the
+/// bytes path is sound; `length` is the SPARQL string length of `?x`.
+#[test]
+fn strlen_emits_binding_and_length_read() {
+    let q = "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRLEN(?o) > \"3\"^^xsd:integer) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("utils::bind_term_bytes_plain_string_literal"),
+        "STRLEN must emit the byte-binding call:\n{}",
+        r.sparql_nr
+    );
+    // `.length` reading on the BGP witness.
+    assert!(
+        r.sparql_nr.contains(".length as Field"),
+        "STRLEN must read `.length` from the witness:\n{}",
+        r.sparql_nr
+    );
+    // The binding targets the BGP position bound to ?o (bgp[0].terms[2]).
+    assert!(
+        r.sparql_nr.contains("bgp[0].terms[2]"),
+        "STRLEN binding must target ?o's BGP position:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// Round 2 -- STRSTARTS(?x, "prefix") emits the binding plus a call
+/// to `utils::string_starts_with` with the prefix bytes folded in.
+#[test]
+fn strstarts_emits_binding_and_byte_array() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRSTARTS(?o, \"foo\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("utils::bind_term_bytes_plain_string_literal"),
+        "STRSTARTS must emit the byte-binding call:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("utils::string_starts_with"),
+        "STRSTARTS must call `string_starts_with`:\n{}",
+        r.sparql_nr
+    );
+    // Prefix "foo" = bytes 0x66 0x6f 0x6f, generic param `<3>`.
+    assert!(
+        r.sparql_nr.contains("[0x66, 0x6f, 0x6f]"),
+        "STRSTARTS must fold the prefix bytes in:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("string_starts_with::<3>"),
+        "STRSTARTS must use the explicit generic param:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// Round 2 -- CONTAINS(?x, "needle") emits the binding plus a call
+/// to `utils::string_contains`, with the prover-supplied position
+/// witnessed via `hidden[]`.
+#[test]
+fn contains_emits_binding_and_position_witness() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(CONTAINS(?o, \"oba\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("utils::bind_term_bytes_plain_string_literal"),
+        "CONTAINS must emit the byte-binding call:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("utils::string_contains"),
+        "CONTAINS must call `string_contains`:\n{}",
+        r.sparql_nr
+    );
+    // Needle "oba" = bytes 0x6f 0x62 0x61, generic param `<3>`.
+    assert!(
+        r.sparql_nr.contains("[0x6f, 0x62, 0x61]"),
+        "CONTAINS must fold the needle bytes in:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("string_contains::<3>"),
+        "CONTAINS must use the explicit generic param:\n{}",
+        r.sparql_nr
+    );
+    // Position witness pushed into hidden[].
+    let hidden = r
+        .metadata
+        .get("hiddenInputs")
+        .or_else(|| r.metadata.get("hidden_inputs"))
+        .and_then(|v| v.as_array())
+        .expect("hiddenInputs metadata array");
+    assert!(
+        hidden.iter().any(|h| h
+            .get("computedType")
+            .and_then(|c| c.as_str())
+            .map(|c| c == "contains_position")
+            .unwrap_or(false)),
+        "CONTAINS must push a `contains_position` hidden input:\n{:?}",
+        hidden
+    );
+}
+
+/// Round 2 -- STRENDS is deferred to round 3. The transform must
+/// reject it with a clear pointer to the roadmap rather than emitting
+/// an incorrect lowering.
+#[test]
+fn strends_is_deferred_to_round_3() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRENDS(?o, \"bar\")) }";
+    match transform_query(q) {
+        Ok(r) => panic!("expected STRENDS to be rejected, got:\n{}", r.sparql_nr),
+        Err(err) => assert!(
+            err.contains("STRENDS") && err.contains("round-3"),
+            "STRENDS rejection should mention round-3 deferral, got: {}",
+            err
+        ),
+    }
+}
+
+/// Round 2 -- STRSTARTS / CONTAINS / STRLEN over a `Term::Static`
+/// (e.g. a literal in the FILTER itself) is rejected. Round-2 scopes
+/// to BGP-anchored variables only.
+#[test]
+fn strstarts_over_static_literal_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRSTARTS(\"hello\", \"he\")) }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected STRSTARTS over static literal to be rejected"),
+        Err(err) => assert!(
+            err.contains("variable") || err.contains("static") || err.contains("BGP"),
+            "expected error mentioning the static-operand restriction, got: {}",
+            err
+        ),
+    }
+}
+
+/// `STRSTARTS(?o, "")` is vacuously true, but the structural binding
+/// (`bind_term_bytes_plain_string_literal`) on the operand must still
+/// be emitted so a non-string `?o` cannot satisfy the filter. Roborev
+/// review 2026-05-04 (medium) on PR #60.
+#[test]
+fn strstarts_empty_prefix_keeps_operand_binding() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:label ?o . FILTER(STRSTARTS(?o, \"\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("bind_term_bytes_plain_string_literal"),
+        "STRSTARTS(?o, \"\") must still emit the operand binding:\n{}",
+        r.sparql_nr
+    );
+    // The result is `true`, but it must come from the binding block,
+    // not a bare `assert(true)`.
+    assert!(
+        r.sparql_nr.contains("); true }"),
+        "binding block must end in `; true }}`:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// `CONTAINS(?o, "")` is vacuously true, but the structural binding
+/// on the operand must still be emitted. Same regression as above.
+#[test]
+fn contains_empty_needle_keeps_operand_binding() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:label ?o . FILTER(CONTAINS(?o, \"\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("bind_term_bytes_plain_string_literal"),
+        "CONTAINS(?o, \"\") must still emit the operand binding:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("); true }"),
+        "binding block must end in `; true }}`:\n{}",
+        r.sparql_nr
+    );
 }
 
 #[test]

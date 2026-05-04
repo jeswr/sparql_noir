@@ -534,6 +534,42 @@ pub(crate) fn generate_sparql_nr_from_query_info(
         sparql_nr.push_str("use dep::xpath;\n");
     }
 
+    // Round-2 string operators (STRLEN / STRSTARTS / CONTAINS) call into
+    // `utils::bind_term_bytes_plain_string_literal` and the byte-walking
+    // helpers; they live in `noir/lib/utils`. The skip-signing branch
+    // already imports `utils` for the inclusion / non-membership
+    // primitives, so the additional `use` is only needed when signing
+    // is enabled and the body references `utils::` directly. We detect
+    // that via a substring scan.
+    let body_needs_utils = !options.skip_signing && (
+        assertions.iter().any(|a| a.contains("utils::"))
+            || union_assertions
+                .iter()
+                .any(|branch| branch.iter().any(|a| a.contains("utils::")))
+    );
+    // `use dep::utils` is already emitted unconditionally above for the
+    // signed branch (for inclusion / non-membership primitives). If
+    // we're in skip-signing mode and the body references utils, we need
+    // a manual `use dep::utils` -- but the skip-signing template doesn't
+    // wire utils because it has its own simplified Triple type. Round-2
+    // string operators in skip-signing mode would need utils too;
+    // detect the case and emit an error pointing to the fix.
+    if options.skip_signing && (
+        assertions.iter().any(|a| a.contains("utils::"))
+            || union_assertions
+                .iter()
+                .any(|branch| branch.iter().any(|a| a.contains("utils::")))
+    ) {
+        return Err(
+            "round-2 string operators (STRLEN / STRSTARTS / CONTAINS) cannot run in \
+             skip-signing mode -- they call into `noir/lib/utils` which is excluded from \
+             the simplified skip-signing template. Re-run without --skip-signing or land \
+             a string-op skip-signing variant of `utils` (round-3 follow-up)."
+                .into(),
+        );
+    }
+    let _ = body_needs_utils; // already imported in the signed branch
+
     sparql_nr.push_str("\n");
     sparql_nr.push_str(&format!(
         "pub(crate) type BGP = [Triple; {}];\n",
