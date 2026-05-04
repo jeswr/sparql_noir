@@ -21,6 +21,7 @@ name: Require Copilot review
 
 on:
   pull_request:
+    branches: [main]
     types: [opened, reopened, ready_for_review, synchronize]
   pull_request_review:
     types: [submitted, edited, dismissed]
@@ -32,12 +33,16 @@ permissions:
 jobs:
   copilot-review-posted:
     name: copilot-review-posted
+    # Skip pull_request_review events targeting non-default branches; the
+    # `pull_request_review` trigger does not honour the `branches:` filter
+    # above, so we gate it explicitly here.
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - name: Resolve PR number
         id: pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           echo "number=${{ github.event.pull_request.number }}" >>"$GITHUB_OUTPUT"
@@ -79,9 +84,12 @@ jobs:
           # The review-summary endpoint reports the bot as
           # `copilot-pull-request-reviewer[bot]`; the review-line-comments
           # endpoint reports `Copilot` (same identity, different surface).
-          # We check `/reviews` which uses the bot login.
-          reviewers=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
-            --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length')
+          # We check `/reviews` which uses the bot login. `--paginate` walks
+          # every page so the gate cannot false-fail when a PR accumulates
+          # >30 reviews (default page size).
+          reviewers=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length' \
+            | awk '{s+=$1} END {print s+0}')
           if [[ "$reviewers" -ge 1 ]]; then
             echo "::notice::Copilot has posted $reviewers review(s) on PR #$PR_NUMBER."
             exit 0
