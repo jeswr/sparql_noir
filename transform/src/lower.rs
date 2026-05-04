@@ -1103,10 +1103,11 @@ pub(crate) fn term_references_variable(term: &Term, var_name: &str) -> bool {
 }
 
 /// True iff `pattern` references the variable `var_name` anywhere in
-/// its IR -- bindings (right-hand side `Term::Variable`), assertions,
-/// filters, OPTIONAL inner patterns, UNION branches, or NOT EXISTS /
-/// MINUS / easy-OPTIONAL `inner_terms` / `absent_terms` arrays. Used
-/// by the prefix-3 OPTIONAL collapse soundness scope check.
+/// its IR -- bindings (LHS variable name OR right-hand side
+/// `Term::Variable`), assertions, filters, OPTIONAL inner patterns,
+/// UNION branches, or NOT EXISTS / MINUS / easy-OPTIONAL
+/// `inner_terms` / `absent_terms` arrays. Used by the prefix-3
+/// OPTIONAL collapse soundness scope check.
 ///
 /// The check **excludes** the easy-OPTIONAL whose `inner_only_var` is
 /// being checked (caller passes `skip_easy_optional_id`), so the
@@ -1117,9 +1118,21 @@ pub(crate) fn pattern_references_variable(
     var_name: &str,
     skip_easy_optional_id: usize,
 ) -> bool {
-    // Bindings whose RHS term references the variable (BIND `?out := ?inner_only`).
+    // Bindings whose **LHS variable name** is `var_name` -- a
+    // sibling required triple (`?o ex:foo ?z` after `OPTIONAL { ?p
+    // ex:age ?o }`) lowers to a `Binding { variable: "o", term:
+    // Term::Input(...) }`. The prefix-3 matched arm leaves the
+    // inner-only `?o` slot unconstrained, so SPARQL's
+    // OPTIONAL+later-required join semantics ("matched-arm `?o`
+    // must agree with the later triple's `?o` binding") is broken
+    // -- the prover could pick any prefix-`(p, age, *, g)` leaf
+    // and any later-triple binding for `?o`. Reject the collapse.
+    // Roborev finding 2026-05-04 follow-up (job 664).
+    //
+    // Also flag bindings whose **RHS term** references the variable
+    // (BIND-shaped `?out := ?inner_only`).
     for b in &pattern.bindings {
-        if term_references_variable(&b.term, var_name) {
+        if b.variable == var_name || term_references_variable(&b.term, var_name) {
             return true;
         }
     }

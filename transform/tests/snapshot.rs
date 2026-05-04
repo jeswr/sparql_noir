@@ -784,6 +784,31 @@ fn optional_inner_only_object_filter_referenced_is_rejected() {
     }
 }
 
+/// As above, but a sibling required triple after the OPTIONAL
+/// rebinds `?o` (the inner-only variable). SPARQL semantics require
+/// that the OPTIONAL's matched `?o` agree with the later triple's
+/// `?o`; the prefix-3 matched arm leaves that position unconstrained,
+/// so the collapse is unsound. This is the second-pass roborev finding
+/// (job 664) -- the widened scope check must inspect `Binding.variable`
+/// (the LHS), not just the RHS term.
+#[test]
+fn optional_inner_only_object_rebind_by_sibling_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?z WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+               ?o ex:foo ?z . \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected sibling-required ?o to be rejected"),
+        Err(err) => assert!(
+            err.contains("?o") && err.contains("unconstrained"),
+            "expected error mentioning ?o + unconstrained, got: {}",
+            err
+        ),
+    }
+}
+
 /// As above, but the outer reference is via a `BIND(?o AS ?out)`
 /// alias. The inner-only var still escapes the OPTIONAL, so the
 /// widened scope check must reject.
