@@ -104,10 +104,13 @@ jobs:
       with:
         script: |
           const fs = require('fs');
-          const glob = require('glob');
-          
-          // Find latest benchmark result file
-          const files = glob.sync('benchmark-results-*.json');
+
+          // Find latest benchmark result file. `glob` is already injected
+          // by actions/github-script@v7, so re-declaring `const glob =
+          // require('glob')` raised "Identifier 'glob' has already been
+          // declared" on every PR. Use fs.readdirSync for a cwd-local match.
+          const files = fs.readdirSync('.')
+            .filter((f) => /^benchmark-results-.*\.json$/.test(f));
           if (files.length === 0) {
             console.log('No benchmark results found');
             return;
