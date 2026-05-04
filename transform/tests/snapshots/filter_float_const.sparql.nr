@@ -9,6 +9,6 @@ pub(crate) struct Variables {
 }
 
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables) {
-  assert(variables.s == bgp[0].terms[0]);
+  assert(variables.s == bgp[0].terms[0].hash);
   assert(true);
 }

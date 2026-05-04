@@ -343,7 +343,12 @@ pub(crate) fn serialize_term(term: &Term, query: &QueryInfo, bindings: &BTreeMap
             }
         }
         Term::Input(triple_idx, term_idx) => {
-            format!("bgp[{}].terms[{}]", triple_idx, term_idx)
+            // The bounded byte-array witness redesign means each term
+            // slot is now a `TermWitness { hash, bytes, length }`. BGP
+            // matching / FILTER equality only ever needs the term's
+            // identity, which is the `hash` field -- see
+            // `spec/encoding.md` sec.6.6 (compatibility) for the rationale.
+            format!("bgp[{}].terms[{}].hash", triple_idx, term_idx)
         }
         Term::Static(gt) => serialize_ground_term(gt),
         // Default graph term — must hash with term-type tag `4` to
@@ -631,6 +636,8 @@ fn infer_expression_type(expr: &Expression) -> Option<NumericSourceType> {
         | Expression::FunctionCall(Function::Floor, args) => {
             args.first().and_then(infer_expression_type)
         }
+        // Round 2 -- STRLEN returns xsd:integer per SPARQL 1.1 §17.4.2.
+        Expression::FunctionCall(Function::StrLen, _) => Some(NumericSourceType::Integer),
         // Handle XSD cast functions - they return the target type
         Expression::FunctionCall(Function::Custom(iri), _) => {
             let iri_str = iri.as_str();
@@ -776,7 +783,50 @@ fn expr_to_noir_code(
                         Err(format!("Unsupported custom function: {}", iri_str))
                     }
                 }
-                
+
+                // Round 2 -- string operators when nested inside another
+                // expression (e.g. `STRLEN(?o) > 3`, `&&` of CONTAINS calls).
+                // STRLEN returns a Field; STRSTARTS / CONTAINS return bool.
+                // Boolean inside a Field-typed comparison is handled by the
+                // surrounding lowering -- STRSTARTS / CONTAINS only show up
+                // in `expr_to_noir_code` when the surrounding code expects a
+                // boolean (e.g. via `&&` -> `filter_to_noir` recursion).
+                Function::StrLen => {
+                    if args.len() != 1 { return Err("STRLEN requires 1 argument".into()); }
+                    let term = expr_to_term(&args[0])?;
+                    string_op_strlen(&term, query, bindings)
+                }
+                Function::StrStarts => {
+                    if args.len() != 2 { return Err("STRSTARTS requires 2 arguments".into()); }
+                    let str_term = expr_to_term(&args[0])?;
+                    let prefix = match &args[1] {
+                        Expression::Literal(lit) => lit.value().to_string(),
+                        _ => return Err(
+                            "STRSTARTS round-2 requires the second argument to be a string literal".into(),
+                        ),
+                    };
+                    string_op_strstarts(&str_term, &prefix, query, bindings)
+                }
+                Function::Contains => {
+                    if args.len() != 2 { return Err("CONTAINS requires 2 arguments".into()); }
+                    let str_term = expr_to_term(&args[0])?;
+                    let needle = match &args[1] {
+                        Expression::Literal(lit) => lit.value().to_string(),
+                        _ => return Err(
+                            "CONTAINS round-2 requires the second argument to be a string literal".into(),
+                        ),
+                    };
+                    string_op_contains(&str_term, &needle, query, bindings, hidden)
+                }
+                Function::StrEnds => {
+                    Err(
+                        "STRENDS is a round-3 follow-up -- see SPARQL_ROADMAP.md sec.7 Round 2.\n\
+                         The byte-level lowering is mechanically similar to STRSTARTS but \
+                         needs a position-witness for the suffix start (`length - suffix_len`)."
+                            .into(),
+                    )
+                }
+
                 _ => Err(format!("Unsupported function in expression: {:?}", func)),
             }
         }
@@ -1095,39 +1145,60 @@ pub(crate) fn filter_to_noir(
                 }
 
 
-                // String functions (return numeric/boolean values only)
-                // Note: These are placeholder implementations that do not perform actual string operations
+                // String functions -- round-2 wiring (SPARQL_ROADMAP.md sec.7
+                // Round 2 / sec.6.3 / Q3). Each operator is bound to the
+                // term's lexical bytes via `utils::bind_term_bytes_plain_string_literal`
+                // before reading them. Soundness: the binding asserts the
+                // term-hash decomposes to a plain xsd:string literal whose
+                // lexical preimage is `bytes[0..length]`. Adversarial provers
+                // supplying mismatched bytes are rejected.
+                //
+                // **Scope.** Round 2 supports plain xsd:string literals only
+                // (no language tag, no special encoding). Language-tagged
+                // literals, typed numerics, and IRIs through STR() are
+                // round-3 follow-ups.
                 Function::StrLen => {
                     if args.len() != 1 { return Err("STRLEN requires 1 argument".into()); }
                     let term = expr_to_term(&args[0])?;
-                    let str_idx = push_hidden(hidden, "strlen_str", &term);
-                    // STUB: Returns placeholder value, not actual string length
-                    // TODO: Implement actual string length calculation when string values are available
-                    Ok(format!("hidden[{}]", str_idx))
+                    string_op_strlen(&term, query, bindings)
                 }
                 Function::Contains => {
                     if args.len() != 2 { return Err("CONTAINS requires 2 arguments".into()); }
-                    let str1_term = expr_to_term(&args[0])?;
-                    let str1_idx = push_hidden(hidden, "contains_str1", &str1_term);
-                    // STUB: Second argument not used - placeholder implementation only
-                    // TODO: Implement xpath::contains(str1, str2) when string values are available
-                    Ok(format!("(hidden[{}] != 0)", str1_idx))
+                    let str_term = expr_to_term(&args[0])?;
+                    // The needle must be a literal (compile-time constant).
+                    let needle = match &args[1] {
+                        Expression::Literal(lit) => lit.value().to_string(),
+                        _ => return Err(
+                            "CONTAINS round-2 requires the second argument to be a string literal \
+                             (variable needle would need a private-byte-array lowering deferred to round 3)".into(),
+                        ),
+                    };
+                    string_op_contains(&str_term, &needle, query, bindings, hidden)
                 }
                 Function::StrStarts => {
                     if args.len() != 2 { return Err("STRSTARTS requires 2 arguments".into()); }
-                    let str1_term = expr_to_term(&args[0])?;
-                    let str1_idx = push_hidden(hidden, "strstarts_str1", &str1_term);
-                    // STUB: Second argument not used - placeholder implementation only
-                    // TODO: Implement xpath::starts_with(str1, str2) when string values are available
-                    Ok(format!("(hidden[{}] != 0)", str1_idx))
+                    let str_term = expr_to_term(&args[0])?;
+                    let prefix = match &args[1] {
+                        Expression::Literal(lit) => lit.value().to_string(),
+                        _ => return Err(
+                            "STRSTARTS round-2 requires the second argument to be a string literal".into(),
+                        ),
+                    };
+                    string_op_strstarts(&str_term, &prefix, query, bindings)
                 }
                 Function::StrEnds => {
+                    // Round 2 deliberately defers STRENDS -- the round-2 brief
+                    // recommends STRLEN/STRSTARTS/CONTAINS as the minimal-viable
+                    // set; STRENDS is mechanically similar to STRSTARTS but
+                    // ships in round 3 once language-tagged / typed-literal
+                    // binding is in place.
                     if args.len() != 2 { return Err("STRENDS requires 2 arguments".into()); }
-                    let str1_term = expr_to_term(&args[0])?;
-                    let str1_idx = push_hidden(hidden, "strends_str1", &str1_term);
-                    // STUB: Second argument not used - placeholder implementation only
-                    // TODO: Implement xpath::ends_with(str1, str2) when string values are available
-                    Ok(format!("(hidden[{}] != 0)", str1_idx))
+                    Err(
+                        "STRENDS is a round-3 follow-up -- see SPARQL_ROADMAP.md sec.7 Round 2.\n\
+                         The byte-level lowering is mechanically similar to STRSTARTS but \
+                         needs a position-witness for the suffix start (`length - suffix_len`)."
+                            .into(),
+                    )
                 }
                 
                 // DateTime functions - delegate to expr_to_noir_code to avoid duplication
@@ -1474,6 +1545,185 @@ fn term_to_hidden_json(term: &Term) -> serde_json::Value {
             "value": { "termType": "DefaultGraph" },
         }),
     }
+}
+
+// =============================================================================
+// STRING OPERATORS (round 2)
+// =============================================================================
+//
+// `bind_term_bytes_plain_string_literal` requires the witness at
+// `bgp[i].terms[j]` -- the FULL TermWitness, not just its `.hash`
+// projection. We resolve a `Term` to its BGP location by walking
+// `info.pattern.bindings` (which records every variable's anchoring
+// triple/position) plus any inline `Term::Input` reference.
+
+/// Resolve a [`Term`] to its `(triple_idx, term_idx)` BGP location, if
+/// any. Returns `None` for `Term::Static` values (no BGP anchor) and
+/// for variables that aren't tracked in `info.pattern.bindings`.
+///
+/// For `Term::Variable`, the lookup walks `info.pattern.bindings` for
+/// the first entry that anchors the variable to a `Term::Input(i, j)`.
+/// The first such entry is sufficient because the BGP equality
+/// constraints already pin every other occurrence of the same variable
+/// to the same hash; reading bytes from any occurrence yields the same
+/// witness identity (`hash`) and therefore the same lexical preimage.
+fn term_to_bgp_location(term: &Term, query: &QueryInfo, bindings: &BTreeMap<String, Term>) -> Option<(usize, usize)> {
+    match term {
+        Term::Input(i, j) => Some((*i, *j)),
+        Term::Variable(name) => {
+            // Check explicit bindings table first (handles Extend/BIND).
+            if let Some(bound) = bindings.get(name) {
+                if let Term::Input(i, j) = bound {
+                    return Some((*i, *j));
+                }
+            }
+            // Otherwise scan the pattern's BGP bindings.
+            for b in &query.pattern.bindings {
+                if &b.variable == name {
+                    if let Term::Input(i, j) = &b.term {
+                        return Some((*i, *j));
+                    }
+                }
+            }
+            None
+        }
+        Term::Static(_) => None,
+        Term::DefaultGraph => None,
+    }
+}
+
+/// Generate a Noir code reference to a term's `TermWitness` -- i.e.
+/// `bgp[i].terms[j]`, the WHOLE struct rather than just `.hash`. Used
+/// by the string-operator lowerings that need access to `bytes` and
+/// `length`.
+///
+/// `Term::Static` (a constant ground term) is not currently supported
+/// for byte-level operators in round 2: the constant's bytes are known
+/// at compile-time and would need a different lowering shape (no
+/// witness round-trip needed). Returns an explicit error for that case
+/// rather than silently producing something wrong.
+fn term_witness_ref(term: &Term, query: &QueryInfo, bindings: &BTreeMap<String, Term>) -> Result<String, String> {
+    match term_to_bgp_location(term, query, bindings) {
+        Some((i, j)) => Ok(format!("bgp[{}].terms[{}]", i, j)),
+        None => Err(
+            "round-2 string operators require their operand to be a variable bound to a BGP \
+             triple position; static / aggregate / BIND-derived terms are a round-3 follow-up"
+                .into(),
+        ),
+    }
+}
+
+/// Format a Rust-compiled byte slice as a Noir array literal of size
+/// `STRING_LEN_MAX` for use in `string_starts_with` / `string_contains`.
+/// Pads with zeros up to `STRING_LEN_MAX` so the array's length is
+/// compile-time-constant regardless of the prefix / needle length.
+fn format_bytes_array(bytes: &[u8]) -> String {
+    let mut out = String::from("[");
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!("0x{:02x}", b));
+    }
+    out.push(']');
+    out
+}
+
+/// Push a hidden input that the prover computes as the lexical-byte
+/// position of `needle` inside the variable's bytes. The TS prover
+/// finds the first occurrence and supplies the byte index; if the
+/// needle isn't present, the prover supplies `0` and the constraint
+/// `position + needle_len <= length` will fail (along with the byte
+/// equality), surfacing the absence as a proof failure.
+fn push_contains_position(hidden: &mut Vec<serde_json::Value>, term: &Term, needle: &str) -> usize {
+    let idx = hidden.len();
+    let term_json = match term {
+        Term::Variable(name) => serde_json::json!({"type": "variable", "value": name}),
+        Term::Input(i, j) => serde_json::json!({"type": "input", "value": [i, j]}),
+        Term::Static(gt) => serde_json::json!({"type": "static", "value": ground_term_to_json(gt)}),
+        Term::DefaultGraph => serde_json::json!({"type": "static", "value": {"termType": "DefaultGraph"}}),
+    };
+    hidden.push(serde_json::json!({
+        "type": "customComputed",
+        "computedType": "contains_position",
+        "input": term_json,
+        "needle": needle,
+    }));
+    idx
+}
+
+/// `STRLEN(?x)` -> `{ binding; bgp[i].terms[j].length as Field }`.
+/// The binding asserts `bgp[i].terms[j]` is a plain xsd:string literal
+/// whose lexical preimage is `bytes[0..length]`; `length` is then the
+/// SPARQL string length (over UTF-8 bytes -- a known limitation versus
+/// SPARQL's intended Unicode-codepoint semantics, documented in
+/// `spec/encoding.md` sec.6.6).
+fn string_op_strlen(term: &Term, query: &QueryInfo, bindings: &BTreeMap<String, Term>) -> Result<String, String> {
+    let witness = term_witness_ref(term, query, bindings)?;
+    Ok(format!(
+        "{{ utils::bind_term_bytes_plain_string_literal({w}, utils::empty_string_lexical_hash(), utils::xsd_string_datatype_hash()); {w}.length as Field }}",
+        w = witness
+    ))
+}
+
+/// `STRSTARTS(?x, "prefix")` -> `{ binding; utils::string_starts_with(witness, [bytes...], len) }`.
+/// The prefix is folded in at compile time as a byte array.
+fn string_op_strstarts(term: &Term, prefix: &str, query: &QueryInfo, bindings: &BTreeMap<String, Term>) -> Result<String, String> {
+    let witness = term_witness_ref(term, query, bindings)?;
+    let prefix_bytes = prefix.as_bytes();
+    let prefix_len = prefix_bytes.len();
+    if prefix_len == 0 {
+        // STRSTARTS(s, "") is vacuously true *for any plain xsd:string s*.
+        // The Boolean result is `true`, but operand validation -- the
+        // structural check that `?x` is a plain xsd:string literal --
+        // must still happen. Otherwise the prover could supply any term
+        // (NamedNode, language-tagged literal, numeric, etc.) and the
+        // expression would silently pass without binding the bytes.
+        // Roborev review 2026-05-04 (medium).
+        return Ok(format!(
+            "{{ utils::bind_term_bytes_plain_string_literal({w}, utils::empty_string_lexical_hash(), utils::xsd_string_datatype_hash()); true }}",
+            w = witness,
+        ));
+    }
+    Ok(format!(
+        "{{ utils::bind_term_bytes_plain_string_literal({w}, utils::empty_string_lexical_hash(), utils::xsd_string_datatype_hash()); let prefix: [u8; {n}] = {arr}; utils::string_starts_with::<{n}>({w}, prefix, {n}) }}",
+        w = witness,
+        arr = format_bytes_array(prefix_bytes),
+        n = prefix_len,
+    ))
+}
+
+/// `CONTAINS(?x, "needle")` -> `{ binding; utils::string_contains(witness, [bytes...], needle_len, hidden[<pos_idx>] as u32) }`.
+/// The prover supplies the matching position via `hidden[]`.
+fn string_op_contains(
+    term: &Term,
+    needle: &str,
+    query: &QueryInfo,
+    bindings: &BTreeMap<String, Term>,
+    hidden: &mut Vec<serde_json::Value>,
+) -> Result<String, String> {
+    let witness = term_witness_ref(term, query, bindings)?;
+    let needle_bytes = needle.as_bytes();
+    let needle_len = needle_bytes.len();
+    if needle_len == 0 {
+        // CONTAINS(s, "") is vacuously true *for any plain xsd:string s*.
+        // Same operand-validation contract as the STRSTARTS empty-prefix
+        // fast path: keep the binding so the structural check on `?x`
+        // still runs; only the substring search is short-circuited.
+        // Roborev review 2026-05-04 (medium).
+        return Ok(format!(
+            "{{ utils::bind_term_bytes_plain_string_literal({w}, utils::empty_string_lexical_hash(), utils::xsd_string_datatype_hash()); true }}",
+            w = witness,
+        ));
+    }
+    let pos_idx = push_contains_position(hidden, term, needle);
+    Ok(format!(
+        "{{ utils::bind_term_bytes_plain_string_literal({w}, utils::empty_string_lexical_hash(), utils::xsd_string_datatype_hash()); let needle: [u8; {n}] = {arr}; utils::string_contains::<{n}>({w}, needle, {n}, hidden[{p}] as u32) }}",
+        w = witness,
+        arr = format_bytes_array(needle_bytes),
+        n = needle_len,
+        p = pos_idx,
+    ))
 }
 
 fn push_hidden(hidden: &mut Vec<serde_json::Value>, kind: &str, term: &Term) -> usize {

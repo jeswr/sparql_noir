@@ -19,6 +19,92 @@ import type { Term, Quad, Literal } from '@rdfjs/types';
 import type { SignedData } from './sign.js';
 import { encodeString, encodeDatatypeIri, encodeNamedNode, getTermEncodingString, runJson } from '../encode.js';
 import { buildPrefix3Inputs, type AbsentTermDescriptor, type PrefixNotExistsMeta } from './prove-prefix3.js';
+import { defaultConfig } from '../config.js';
+
+/**
+ * Wrap a bare term-hash hex string as a `TermWitness` matching the
+ * Noir `types::TermWitness` shape, with `bytes` / `length` populated
+ * from the source RDF term's lexical form.
+ *
+ * **Round-2 contract** (`spec/encoding.md` sec.6.3). The bytes carry the
+ * UTF-8 encoding of the term's lexical value:
+ *   - NamedNode: the IRI string verbatim.
+ *   - Literal: the literal's value field (no datatype, no language tag).
+ *   - BlankNode: the blank-node label.
+ *   - DefaultGraph: empty.
+ * `length` is the byte count of the encoded prefix (clamped to
+ * `STRING_LEN_MAX`); positions `[length..STRING_LEN_MAX)` are zero-
+ * padded. The bytes are advisory at the Triple level until a string
+ * operator binds them at its use site via
+ * `utils::bind_term_bytes_*`.
+ *
+ * **Truncation behaviour.** If the lexical form exceeds
+ * `STRING_LEN_MAX`, the leading bytes are kept and `length` is set to
+ * `STRING_LEN_MAX`. Any subsequent string-operator binding will fail
+ * (the term's full lexical hash differs from the truncated bytes'
+ * hash), surfacing as a proof-construction error. Callers can lift the
+ * `STRING_LEN_MAX` ceiling via `setup.ts --string-len-max <n>`.
+ */
+function termToWitness(term: Term, hash: string, stringLenMax: number): { hash: string; bytes: number[]; length: number } {
+  const lexical = lexicalFormBytes(term);
+  const cap = stringLenMax;
+  const bytes = new Array<number>(cap).fill(0);
+  const len = Math.min(lexical.length, cap);
+  for (let i = 0; i < len; i++) {
+    const b = lexical[i];
+    if (b !== undefined) bytes[i] = b;
+  }
+  return {
+    hash,
+    bytes,
+    length: len,
+  };
+}
+
+/**
+ * Resolve the bounded byte-array witness cap (`STRING_LEN_MAX`) to use
+ * for a given circuit run. Per-circuit metadata wins over the
+ * source-default; setup.ts can override the default via
+ * `--string-len-max <n>` and the new value is recorded in the
+ * circuit's metadata. Falling back to `defaultConfig.stringLenMax`
+ * keeps behaviour unchanged for circuits whose metadata predates the
+ * round-2 byte-array witness.
+ */
+function resolveStringLenMax(metadata: Record<string, unknown> | undefined | null): number {
+  if (metadata) {
+    const m = metadata as Record<string, unknown>;
+    const cand = (m.stringLenMax ?? m.string_len_max);
+    if (typeof cand === 'number' && Number.isFinite(cand) && Number.isInteger(cand) && cand > 0) {
+      return cand;
+    }
+  }
+  return defaultConfig.stringLenMax;
+}
+
+/**
+ * Extract the UTF-8 byte sequence of an RDF term's lexical form
+ * (matching the Noir `consts::encode_string_bounded` input domain).
+ *
+ * Mirrors the encoding in `spec/encoding.md` sec.3:
+ *   - NamedNode -> `term.value` (the IRI string).
+ *   - Literal -> `term.value` (the literal's value, NOT including
+ *     datatype IRI or language tag).
+ *   - BlankNode -> `term.value` (the blank-node label).
+ *   - DefaultGraph -> empty bytes.
+ *   - Variable / Quad -> empty (these don't appear in signed quads).
+ */
+function lexicalFormBytes(term: Term): Uint8Array {
+  switch (term.termType) {
+    case 'NamedNode':
+    case 'BlankNode':
+    case 'Literal':
+      return new TextEncoder().encode(term.value);
+    case 'DefaultGraph':
+      return new Uint8Array(0);
+    default:
+      return new Uint8Array(0);
+  }
+}
 
 // --- Custom stringQuadToQuad that properly handles escape sequences ---
 
@@ -185,6 +271,8 @@ interface HiddenInput {
   value?: [number, number] | TermJson;
   input?: { type: string; value: unknown };
   computedType?: string;
+  /** Round-2: the literal needle string for `contains_position` hidden inputs. */
+  needle?: string;
 }
 
 /**
@@ -805,6 +893,64 @@ function computeHiddenInputs(
         console.warn(`Unknown hidden input type for ebv_datatype: ${input.type}`);
         return null;
       }
+    } else if (hidden.type === 'customComputed' && hidden.computedType === 'contains_position') {
+      // Round-2 CONTAINS witness: the prover supplies the byte
+      // offset where `needle` first occurs inside the bound term's
+      // lexical bytes. The circuit's `string_contains` helper checks
+      // the byte equality at that offset and `position + needle_len <= length`.
+      // If the needle is genuinely absent, no `position` satisfies the
+      // constraint and the proof fails to construct.
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      const needle = (hidden as unknown as { needle?: string }).needle;
+      if (!input || typeof needle !== 'string') {
+        console.warn('Hidden input missing input/needle for contains_position');
+        return null;
+      }
+      let lexical = '';
+      if (input.type === 'variable') {
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for contains_position`);
+          return null;
+        }
+        lexical = boundTerm.value;
+      } else if (input.type === 'static') {
+        const termJson = input.value as TermJson;
+        lexical = termJson?.value ?? '';
+      } else {
+        console.warn(`Unknown hidden input type for contains_position: ${input.type}`);
+        return null;
+      }
+      // Search by UTF-8 bytes (the circuit walks bytes).
+      const haystackBytes = new TextEncoder().encode(lexical);
+      const needleBytes = new TextEncoder().encode(needle);
+      let position = 0;
+      let found = false;
+      for (let i = 0; i + needleBytes.length <= haystackBytes.length; i++) {
+        let match = true;
+        for (let j = 0; j < needleBytes.length; j++) {
+          if (haystackBytes[i + j] !== needleBytes[j]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          position = i;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        // Needle absent. We still emit a position (zero); the circuit
+        // will reject because the byte equality fails. This makes the
+        // proof construction fail with a clear error rather than an
+        // index-out-of-range crash.
+        console.warn(
+          `CONTAINS: needle "${needle}" not found in "${lexical}" -- proof will fail to construct`
+        );
+      }
+      hiddenValues.push(position.toString());
     } else if (hidden.type === 'variable') {
       // Direct variable reference
       const varName = (hidden.value as unknown) as string;
@@ -1073,16 +1219,46 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     return -1;
   }
 
-  // Build triple object for circuit input
+  // Build triple object for circuit input. Each term-hash is wrapped
+  // as a `TermWitness` whose `bytes` / `length` carry the source
+  // term's UTF-8 lexical form (round-2 contract -- see
+  // `spec/encoding.md` sec.6.3). Round-2 string operators
+  // (STRLEN / STRSTARTS / CONTAINS) bind the bytes at their use site
+  // via `utils::bind_term_bytes_*`. The byte-array width MUST match
+  // the circuit's compiled `STRING_LEN_MAX` (per-circuit metadata),
+  // not the source-default -- otherwise circuits compiled with
+  // `setup.ts --string-len-max <n>` for n != 64 receive mis-sized
+  // witnesses and the proof generation fails.
+  const stringLenMax = resolveStringLenMax(metadata as unknown as Record<string, unknown> | undefined);
   function getTripleObject(id: number) {
+    const rawTerms = signedData!.triples[id] ?? [];
+    const sourceQuad = quadArr[id];
+    const sourceTerms: Term[] = sourceQuad
+      ? [sourceQuad.subject, sourceQuad.predicate, sourceQuad.object, sourceQuad.graph]
+      : [];
+    const termWitnesses = rawTerms.map((hash, i) => {
+      const sourceTerm = sourceTerms[i];
+      if (sourceTerm) {
+        return termToWitness(sourceTerm, hash, stringLenMax);
+      }
+      // Fallback: zero-padded placeholder (round-1 behaviour). This
+      // path triggers when the signed dataset's `triples[id]` has
+      // hashes but no parsed quad, which shouldn't happen in normal
+      // operation but stays defensive against partial fixtures.
+      return {
+        hash,
+        bytes: new Array(stringLenMax).fill(0),
+        length: 0,
+      };
+    });
     if (skipSigning) {
       // Simplified: only terms, no Merkle proof data
       return {
-        terms: signedData!.triples[id],
+        terms: termWitnesses,
       };
     }
     return {
-      terms: signedData!.triples[id],
+      terms: termWitnesses,
       path: signedData!.paths[id],
       directions: signedData!.direction[id],
     };
@@ -1574,13 +1750,35 @@ export async function generateProofsInMemory(options: ProveOptionsInMemory): Pro
     return -1;
   }
 
-  // Build triple object for circuit input
+  // Build triple object for circuit input. Each term-hash is wrapped
+  // as a `TermWitness` whose `bytes` / `length` carry the source
+  // term's UTF-8 lexical form (round-2 contract -- see
+  // `spec/encoding.md` sec.6.3). Byte-array width follows per-circuit
+  // metadata (not the source-default) so circuits compiled with a
+  // non-default `STRING_LEN_MAX` get correctly-sized witnesses.
+  const stringLenMax = resolveStringLenMax(metadata as unknown as Record<string, unknown> | undefined);
   function getTripleObject(id: number) {
+    const rawTerms = signedData.triples[id] ?? [];
+    const sourceQuad = quadArr[id];
+    const sourceTerms: Term[] = sourceQuad
+      ? [sourceQuad.subject, sourceQuad.predicate, sourceQuad.object, sourceQuad.graph]
+      : [];
+    const termWitnesses = rawTerms.map((hash, i) => {
+      const sourceTerm = sourceTerms[i];
+      if (sourceTerm) {
+        return termToWitness(sourceTerm, hash, stringLenMax);
+      }
+      return {
+        hash,
+        bytes: new Array(stringLenMax).fill(0),
+        length: 0,
+      };
+    });
     if (skipSigning) {
-      return { terms: signedData.triples[id] };
+      return { terms: termWitnesses };
     }
     return {
-      terms: signedData.triples[id],
+      terms: termWitnesses,
       path: signedData.paths[id],
       directions: signedData.direction[id],
     };

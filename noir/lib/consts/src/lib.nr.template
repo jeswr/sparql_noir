@@ -1,6 +1,13 @@
 pub use signature;
 
 pub global MERKLE_DEPTH: u32 = 11;
+/// Maximum number of bytes the bounded byte-array term witness
+/// (`types::TermWitness`) can hold. Per-triple input size grows by
+/// `4 x STRING_LEN_MAX` bytes plus four `u32` length witnesses. See
+/// `spec/encoding.md` sec.6 for the soundness contract and gate-cost
+/// trade-off; configurable via `setup.ts --string-len-max <n>`
+/// (default 64).
+pub global STRING_LEN_MAX: u32 = {{stringLenMax}};
 // pub global hash2: fn([Field; 2]) -> Field = {{hash2}};
 // pub global hash4: fn([Field; 4]) -> Field = {{hash4}};
 // pub global verify_signature: fn([u8; 32], [u8; 32], [u8; 64], [u8; 32]) -> bool = {{signature}};
@@ -79,8 +86,40 @@ pub fn hash_string<let N: u32>(input: [u8; N]) -> [u8; {{stringHashOutputSize}}]
   {{stringHash}}(input)
 }
 
+/// Variable-length string hash. Hashes exactly `input[0..length]` and
+/// MUST agree with `hash_string(slice)` for any honest prover -- i.e.
+/// `hash_string_var(buf, len) == hash_string(buf[0..len])`. This is the
+/// soundness contract that ties `encode_string_bounded` (the bounded
+/// byte-array witness path) to `encode_string` (the credential-layer
+/// canonical hash). See `spec/encoding.md` sec.6.3.
+///
+/// **Round-2 scope.** Only `sha256` is wired with a true variable-
+/// length implementation. The other supported string hashes
+/// (`blake2s`, `blake3`, `keccak256`, `sha384`, `sha512`) lack a
+/// variable-length API in their Noir implementations, so this function
+/// asserts under those configs -- the round-2 byte-binding path is
+/// sha256-only until a variable-length API lands for the remaining
+/// hashes (round-3 scope, see `spec/encoding.md` sec.6.5).
+pub fn hash_string_var<let N: u32>(input: [u8; N], length: u32) -> [u8; {{stringHashOutputSize}}] {
+  {{stringHashVar}}
+}
+
 pub fn encode_string<let N: u32>(string: str<N>) -> Field {
   Field::from_le_bytes(hash_string(string.as_bytes()))
+}
+
+/// Compute the lexical-form hash of a bounded byte-array witness so
+/// that the result agrees with `encode_string(s)` for the unique
+/// `s` whose UTF-8 encoding is `bytes[0..length]`. The bytes at
+/// indices `length..N` are unconstrained padding from the prover and
+/// are NOT hashed -- the variable-length hash primitive
+/// `hash_string_var` enforces that domain. See `spec/encoding.md`
+/// sec.6.3 for the soundness argument; in particular this function
+/// MUST round-trip with `encode_string` for any honest prover, or the
+/// round-2 string operators (STRLEN / STRSTARTS / CONTAINS) cannot
+/// produce valid proofs for honest witnesses.
+pub fn encode_string_bounded<let N: u32>(bytes: [u8; N], length: u32) -> Field {
+  Field::from_le_bytes(hash_string_var(bytes, length))
 }
 
 // Recursion

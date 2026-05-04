@@ -325,6 +325,25 @@ const CORPUS: &[Case] = &[
         query: "PREFIX ex: <http://example.org/>\n\
                 SELECT ?s ?p WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
     },
+    // Round 2 -- STRLEN / STRSTARTS / CONTAINS via the
+    // bind_term_bytes_plain_string_literal binding. Each query triggers
+    // the byte-witness path on `?o` (bound to `bgp[0].terms[2]`). The
+    // generated `sparql.nr` must emit a
+    // `utils::bind_term_bytes_plain_string_literal(...)` call before
+    // reading bytes, plus the operator-specific helper. See
+    // `spec/encoding.md` sec.6.3 for the soundness contract.
+    Case {
+        name: "filter_strlen",
+        query: "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRLEN(?o) > \"3\"^^xsd:integer) }",
+    },
+    Case {
+        name: "filter_strstarts",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRSTARTS(?o, \"foo\")) }",
+    },
+    Case {
+        name: "filter_contains",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(CONTAINS(?o, \"oba\")) }",
+    },
 ];
 
 /// Round 2 §7 — defensive cap on OPTIONAL blocks. The transform must
@@ -370,6 +389,63 @@ SELECT ?s ?a ?b ?c ?d ?e WHERE {
         ..TransformOptions::default()
     };
     transform_with_opts(q, opts).expect("should succeed with raised cap");
+}
+
+/// `STRING_LEN_MAX` defaults to 64 and is propagated into metadata.
+/// Regression for `spec/encoding.md` sec.6.5.
+#[test]
+fn string_len_max_defaults_to_64() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:knows ?o . }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert_eq!(
+        r.metadata.get("stringLenMax").and_then(|v| v.as_u64()),
+        Some(64),
+        "default stringLenMax must be 64"
+    );
+    assert_eq!(
+        r.metadata.get("string_len_max").and_then(|v| v.as_u64()),
+        Some(64),
+        "snake_case mirror must also be 64"
+    );
+}
+
+/// Custom `string_len_max` is reflected in metadata. Callers picking
+/// (e.g.) 128 for wider IRI coverage must see the bound surfaced.
+#[test]
+fn string_len_max_is_configurable() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:knows ?o . }";
+    let opts = TransformOptions {
+        string_len_max: 128,
+        ..TransformOptions::default()
+    };
+    let r = transform_with_opts(q, opts).expect("transform succeeds with custom bound");
+    assert_eq!(
+        r.metadata.get("stringLenMax").and_then(|v| v.as_u64()),
+        Some(128),
+        "custom stringLenMax must propagate to metadata"
+    );
+}
+
+/// The bounded byte-array witness redesign means BGP equality reads the
+/// `.hash` projection of each `TermWitness`. Regression for the design
+/// recorded in `spec/encoding.md` sec.6.6.
+#[test]
+fn bgp_path_uses_term_witness_hash_projection() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s ?p ?o WHERE { ?s ?p ?o . }";
+    let r = transform_query(q).expect("transform succeeds");
+    // Each variable assertion must read `.hash` not the bare term.
+    assert!(
+        r.sparql_nr.contains("variables.s == bgp[0].terms[0].hash"),
+        "BGP equality must project through `.hash`:\n{}",
+        r.sparql_nr
+    );
+    // Sanity: the bare-Field form (pre-redesign) must not appear.
+    assert!(
+        !r.sparql_nr.contains("variables.s == bgp[0].terms[0]\n")
+            && !r.sparql_nr.contains("variables.s == bgp[0].terms[0];"),
+        "no bare `terms[k]` reads should remain:\n{}",
+        r.sparql_nr
+    );
 }
 
 /// `+` paths past `path_segment_max` must still work — but past the
@@ -459,7 +535,7 @@ fn union_path_join_with_sibling_keeps_all_constraints() {
             .and_then(|v| v.as_str())
             .expect("predicate IRI");
         let needle = format!(
-            "encode_string(\"{}\")]) == bgp[{}].terms[1]",
+            "encode_string(\"{}\")]) == bgp[{}].terms[1].hash",
             predicate_iri, i
         );
         assert!(
@@ -1055,8 +1131,8 @@ fn optional_easy_case_graph_scoped_uses_wildcard_placeholders() {
             .contains("http://example.org/g")
             && result
                 .sparql_nr
-                .contains("bgp[1].terms[3]"),
-        "matched arm should pin bgp[1].terms[3] to ex:g, got:\n{}",
+                .contains("bgp[1].terms[3].hash"),
+        "matched arm should pin bgp[1].terms[3].hash to ex:g, got:\n{}",
         result.sparql_nr
     );
 }
@@ -1128,32 +1204,32 @@ fn optional_easy_case_inside_enclosing_graph_keeps_placeholders_wildcard() {
     // The matched-arm assertion in `checkBinding` must pin the
     // matched-slot's graph position to `ex:g`. It should appear
     // **inside the OR disjunction** (matched-arm branch), not as a
-    // free-standing assertion line. We check both: bgp[1].terms[3]
+    // free-standing assertion line. We check both: bgp[1].terms[3].hash
     // is referenced AND it occurs in the disjunction line, NOT in a
     // separate `assert(...)` line. Roborev finding 2026-05-03
     // (third high, sub-finding 2): without this stronger check, a
-    // global graph assertion on bgp[1].terms[3] could slip through
+    // global graph assertion on bgp[1].terms[3].hash could slip through
     // and silently force the matched-arm graph in both arms.
     let bgp1_count = result
         .sparql_nr
-        .matches("bgp[1].terms[3]")
+        .matches("bgp[1].terms[3].hash")
         .count();
     assert_eq!(
         bgp1_count, 1,
-        "bgp[1].terms[3] should appear exactly once (inside the matched-arm \
+        "bgp[1].terms[3].hash should appear exactly once (inside the matched-arm \
          disjunction), got {} occurrences:\n{}",
         bgp1_count, result.sparql_nr
     );
     // Sanity: that one occurrence must be inside the
     // `assert(... | utils::verify_non_membership_no_inclusion_check)`
-    // line, not in a free-standing `assert(... == bgp[1].terms[3])`.
+    // line, not in a free-standing `assert(... == bgp[1].terms[3].hash)`.
     let or_line_with_bgp1 = result.sparql_nr.lines().any(|l| {
-        l.contains("bgp[1].terms[3]")
+        l.contains("bgp[1].terms[3].hash")
             && l.contains("verify_non_membership_no_inclusion_check")
     });
     assert!(
         or_line_with_bgp1,
-        "bgp[1].terms[3] must appear inside the matched|unmatched disjunction line, got:\n{}",
+        "bgp[1].terms[3].hash must appear inside the matched|unmatched disjunction line, got:\n{}",
         result.sparql_nr
     );
 
@@ -1163,7 +1239,7 @@ fn optional_easy_case_inside_enclosing_graph_keeps_placeholders_wildcard() {
     // bgp[i].terms[3]`. It should appear for slot 0 only.
     let graph_iri_count = result
         .sparql_nr
-        .matches("== bgp[0].terms[3]")
+        .matches("== bgp[0].terms[3].hash")
         .count();
     assert_eq!(
         graph_iri_count, 1,
@@ -1172,8 +1248,8 @@ fn optional_easy_case_inside_enclosing_graph_keeps_placeholders_wildcard() {
     );
     // No graph assertion on bgp[2] / bgp[3] (the bracket slots).
     assert!(
-        !result.sparql_nr.contains("== bgp[2].terms[3]")
-            && !result.sparql_nr.contains("== bgp[3].terms[3]"),
+        !result.sparql_nr.contains("== bgp[2].terms[3].hash")
+            && !result.sparql_nr.contains("== bgp[3].terms[3].hash"),
         "bracket slots must not have a graph-pinning assertion, got:\n{}",
         result.sparql_nr
     );
@@ -1837,9 +1913,9 @@ fn predicate_variable_reuse_is_constrained() {
              SELECT ?s ?p ?o ?x WHERE { ?s ?p ?o . ?x ?p ?o . }";
     let result = transform_query(q).expect("transform should succeed");
     // The shared predicate variable must produce a unification
-    // assertion `variables.p == bgp[1].terms[1]`.
+    // assertion `variables.p == bgp[1].terms[1].hash`.
     assert!(
-        result.sparql_nr.contains("variables.p == bgp[1].terms[1]"),
+        result.sparql_nr.contains("variables.p == bgp[1].terms[1].hash"),
         "predicate-var reuse must add a unification assertion at index 1: {}",
         result.sparql_nr
     );
@@ -1963,7 +2039,7 @@ fn exists_grounded_lowers_to_two_triple_bgp() {
     // `?s ex:type ex:Person`.
     assert!(result.sparql_nr.contains("type BGP = [Triple; 2]"));
     // The inner subject unifies with the outer-bound variable `?s`.
-    assert!(result.sparql_nr.contains("variables.s == bgp[1].terms[0]"));
+    assert!(result.sparql_nr.contains("variables.s == bgp[1].terms[0].hash"));
     // Inner predicate / object land as constant assertions.
     assert!(result.sparql_nr.contains("http://example.org/type"));
     assert!(result.sparql_nr.contains("http://example.org/Person"));
@@ -1971,14 +2047,200 @@ fn exists_grounded_lowers_to_two_triple_bgp() {
     assert!(result.sparql_nr.contains("assert(true);"));
 }
 
+/// Round 2 -- STRLEN(?x) emits `bind_term_bytes_plain_string_literal`
+/// followed by a `.length as Field` read. The binding ensures the
+/// bytes path is sound; `length` is the SPARQL string length of `?x`.
+#[test]
+fn strlen_emits_binding_and_length_read() {
+    let q = "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRLEN(?o) > \"3\"^^xsd:integer) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("utils::bind_term_bytes_plain_string_literal"),
+        "STRLEN must emit the byte-binding call:\n{}",
+        r.sparql_nr
+    );
+    // `.length` reading on the BGP witness.
+    assert!(
+        r.sparql_nr.contains(".length as Field"),
+        "STRLEN must read `.length` from the witness:\n{}",
+        r.sparql_nr
+    );
+    // The binding targets the BGP position bound to ?o (bgp[0].terms[2]).
+    assert!(
+        r.sparql_nr.contains("bgp[0].terms[2]"),
+        "STRLEN binding must target ?o's BGP position:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// Round 2 -- STRSTARTS(?x, "prefix") emits the binding plus a call
+/// to `utils::string_starts_with` with the prefix bytes folded in.
+#[test]
+fn strstarts_emits_binding_and_byte_array() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRSTARTS(?o, \"foo\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("utils::bind_term_bytes_plain_string_literal"),
+        "STRSTARTS must emit the byte-binding call:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("utils::string_starts_with"),
+        "STRSTARTS must call `string_starts_with`:\n{}",
+        r.sparql_nr
+    );
+    // Prefix "foo" = bytes 0x66 0x6f 0x6f, generic param `<3>`.
+    assert!(
+        r.sparql_nr.contains("[0x66, 0x6f, 0x6f]"),
+        "STRSTARTS must fold the prefix bytes in:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("string_starts_with::<3>"),
+        "STRSTARTS must use the explicit generic param:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// Round 2 -- CONTAINS(?x, "needle") emits the binding plus a call
+/// to `utils::string_contains`, with the prover-supplied position
+/// witnessed via `hidden[]`.
+#[test]
+fn contains_emits_binding_and_position_witness() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(CONTAINS(?o, \"oba\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("utils::bind_term_bytes_plain_string_literal"),
+        "CONTAINS must emit the byte-binding call:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("utils::string_contains"),
+        "CONTAINS must call `string_contains`:\n{}",
+        r.sparql_nr
+    );
+    // Needle "oba" = bytes 0x6f 0x62 0x61, generic param `<3>`.
+    assert!(
+        r.sparql_nr.contains("[0x6f, 0x62, 0x61]"),
+        "CONTAINS must fold the needle bytes in:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("string_contains::<3>"),
+        "CONTAINS must use the explicit generic param:\n{}",
+        r.sparql_nr
+    );
+    // Position witness pushed into hidden[].
+    let hidden = r
+        .metadata
+        .get("hiddenInputs")
+        .or_else(|| r.metadata.get("hidden_inputs"))
+        .and_then(|v| v.as_array())
+        .expect("hiddenInputs metadata array");
+    assert!(
+        hidden.iter().any(|h| h
+            .get("computedType")
+            .and_then(|c| c.as_str())
+            .map(|c| c == "contains_position")
+            .unwrap_or(false)),
+        "CONTAINS must push a `contains_position` hidden input:\n{:?}",
+        hidden
+    );
+}
+
+/// Round 2 -- STRENDS is deferred to round 3. The transform must
+/// reject it with a clear pointer to the roadmap rather than emitting
+/// an incorrect lowering.
+#[test]
+fn strends_is_deferred_to_round_3() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRENDS(?o, \"bar\")) }";
+    match transform_query(q) {
+        Ok(r) => panic!("expected STRENDS to be rejected, got:\n{}", r.sparql_nr),
+        Err(err) => assert!(
+            err.contains("STRENDS") && err.contains("round-3"),
+            "STRENDS rejection should mention round-3 deferral, got: {}",
+            err
+        ),
+    }
+}
+
+/// Round 2 -- STRSTARTS / CONTAINS / STRLEN over a `Term::Static`
+/// (e.g. a literal in the FILTER itself) is rejected. Round-2 scopes
+/// to BGP-anchored variables only.
+#[test]
+fn strstarts_over_static_literal_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:label ?o . FILTER(STRSTARTS(\"hello\", \"he\")) }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected STRSTARTS over static literal to be rejected"),
+        Err(err) => assert!(
+            err.contains("variable") || err.contains("static") || err.contains("BGP"),
+            "expected error mentioning the static-operand restriction, got: {}",
+            err
+        ),
+    }
+}
+
+/// `STRSTARTS(?o, "")` is vacuously true, but the structural binding
+/// (`bind_term_bytes_plain_string_literal`) on the operand must still
+/// be emitted so a non-string `?o` cannot satisfy the filter. Roborev
+/// review 2026-05-04 (medium) on PR #60.
+#[test]
+fn strstarts_empty_prefix_keeps_operand_binding() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:label ?o . FILTER(STRSTARTS(?o, \"\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("bind_term_bytes_plain_string_literal"),
+        "STRSTARTS(?o, \"\") must still emit the operand binding:\n{}",
+        r.sparql_nr
+    );
+    // The result is `true`, but it must come from the binding block,
+    // not a bare `assert(true)`.
+    assert!(
+        r.sparql_nr.contains("); true }"),
+        "binding block must end in `; true }}`:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// `CONTAINS(?o, "")` is vacuously true, but the structural binding
+/// on the operand must still be emitted. Same regression as above.
+#[test]
+fn contains_empty_needle_keeps_operand_binding() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:label ?o . FILTER(CONTAINS(?o, \"\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("bind_term_bytes_plain_string_literal"),
+        "CONTAINS(?o, \"\") must still emit the operand binding:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("); true }"),
+        "binding block must end in `; true }}`:\n{}",
+        r.sparql_nr
+    );
+}
+
 #[test]
 fn corpus_byte_identical() {
     let update = env::var("UPDATE_SNAPSHOTS").map(|v| v == "1").unwrap_or(false);
     let dir = snapshots_dir();
 
+    let mut failures: Vec<String> = Vec::new();
     for case in CORPUS {
-        let result = transform_query(case.query)
-            .unwrap_or_else(|e| panic!("transform failed for {}: {}", case.name, e));
+        let result = match transform_query(case.query) {
+            Ok(r) => r,
+            Err(e) => {
+                // Pre-existing transform failures (tracked separately)
+                // shouldn't abort the corpus run -- record them and
+                // keep going so the remaining snapshots still
+                // regenerate / verify. The standalone error-path tests
+                // upstream cover these queries individually.
+                failures.push(format!("{}: {}", case.name, e));
+                continue;
+            }
+        };
 
         let metadata_pretty = serde_json::to_string_pretty(&result.metadata)
             .expect("serialise metadata");
@@ -2010,6 +2272,14 @@ fn corpus_byte_identical() {
             update,
             "metadata.json",
             case.name,
+        );
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "transform failed for {} corpus case(s):\n{}",
+            failures.len(),
+            failures.join("\n")
         );
     }
 }

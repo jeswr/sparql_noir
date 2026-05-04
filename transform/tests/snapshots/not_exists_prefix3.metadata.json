@@ -200,6 +200,8 @@
     }
   ],
   "skip_signing": false,
+  "stringLenMax": 64,
+  "string_len_max": 64,
   "total_patterns": 1,
   "unionBranches": [],
   "union_branches": [],

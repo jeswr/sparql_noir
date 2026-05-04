@@ -11,7 +11,7 @@ pub(crate) struct Variables {
 
 pub(crate) type Hidden = [Field; 2];
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables, hidden: Hidden) {
-  assert(variables.s == bgp[0].terms[0]);
-  assert(consts::hash2([0, consts::encode_string("http://example.org/date")]) == bgp[0].terms[1]);
+  assert(variables.s == bgp[0].terms[0].hash);
+  assert(consts::hash2([0, consts::encode_string("http://example.org/date")]) == bgp[0].terms[1].hash);
   assert((xpath::year_from_datetime(xpath::datetime_from_epoch_microseconds((hidden[0] as i128) * 1000)) as i64) > (hidden[1] as i64));
 }

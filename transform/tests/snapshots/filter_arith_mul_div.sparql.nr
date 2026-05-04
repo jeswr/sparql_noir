@@ -11,7 +11,7 @@ pub(crate) struct Variables {
 
 pub(crate) type Hidden = [Field; 4];
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables, hidden: Hidden) {
-  assert(variables.s == bgp[0].terms[0]);
-  assert(consts::hash2([0, consts::encode_string("http://example.org/n")]) == bgp[0].terms[1]);
+  assert(variables.s == bgp[0].terms[0].hash);
+  assert(consts::hash2([0, consts::encode_string("http://example.org/n")]) == bgp[0].terms[1].hash);
   assert((((xpath::numeric_divide_int((((xpath::numeric_multiply_int((hidden[0]) as i64, (hidden[1]) as i64)) as Field)) as i64, (hidden[2]) as i64)) as Field) as i64) > (hidden[3] as i64));
 }

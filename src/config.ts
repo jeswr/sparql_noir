@@ -26,11 +26,26 @@ export const signatures = [
   'schnorr',
 ] as const;
 
+/**
+ * Default upper bound on the bounded byte-array term witness
+ * (`STRING_LEN_MAX`). See `spec/encoding.md` sec.6 -- this knob trades
+ * privacy (length-leak resistance) and circuit size for the maximum
+ * length of any RDF lexical the circuit's string operators can read.
+ * Round-1 default; callers can pick any positive integer at setup time.
+ */
+export const DEFAULT_STRING_LEN_MAX = 64;
+
 interface IConfigInternal {
   stringHash: (typeof stringHashes)[number];
   fieldHash: (typeof fieldHashes)[number];
   merkleDepth: (typeof merkleDepths)[number];
   signature: (typeof signatures)[number];
+  /**
+   * Upper bound on the bounded byte-array witness per term (see
+   * `spec/encoding.md` sec.6.5). Round-1 default 64; callers can pick
+   * any positive integer at setup time.
+   */
+  stringLenMax: number;
 }
 
 interface IConfig extends IConfigInternal {
@@ -42,6 +57,7 @@ const defaultConfigInternal: IConfigInternal = {
   fieldHash: 'pedersen',
   merkleDepth: 11,
   signature: 'babyjubjubOpt',
+  stringLenMax: DEFAULT_STRING_LEN_MAX,
 }
 
 export const defaultConfig: IConfig = {
@@ -55,5 +71,5 @@ export function* configGenerator(): Generator<IConfig> {
     for (const fieldHash of fieldHashes)
       for (const merkleDepth of merkleDepths)
         for (const signature of signatures)
-          yield { stringHash, fieldHash, merkleDepth, signature, stringHashOutputSize: 32 };
+          yield { stringHash, fieldHash, merkleDepth, signature, stringHashOutputSize: 32, stringLenMax: DEFAULT_STRING_LEN_MAX };
 }
