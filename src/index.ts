@@ -389,15 +389,14 @@ export async function sign(
   const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(dataset));
 
   // Process quads for Merkle tree (round-3 leaf-hash sorted commitment)
-  // and the round-6 prefix-3 sorted commitment in parallel.
+  // and the round-6 prefix-3 sorted commitment in **separate** Noir
+  // executions -- the two `merkle*` helpers return different generic
+  // struct types, so wrapping them in a single homogeneous array
+  // fails Noir's array-element type-equality check.
   const { noirInput } = await processQuadsForMerkle(quads);
   const prefix3Spec = await processQuadsForPrefix3(quads);
 
-  const noirCalls = prefix3Spec
-    ? `[${noirInput},${prefix3Spec.noirInput}]`
-    : `[${noirInput}]`;
-  const noirResults = runJson(noirCalls);
-  const jsonRes: any = noirResults[0];
+  const jsonRes: any = runJson(`[${noirInput}]`)[0];
 
   // Surface round-3 sentinel inclusion paths to the prover. Mirrors
   // `signRdfData` (see `src/scripts/sign.ts` for the rationale).
@@ -411,7 +410,7 @@ export async function sign(
   delete jsonRes.high_sentinel_directions;
 
   if (prefix3Spec) {
-    const prefix3Res: any = noirResults[1];
+    const prefix3Res: any = runJson(`[${prefix3Spec.noirInput}]`)[0];
     jsonRes.rootPrefix3 = prefix3Res.root;
     jsonRes.rootPrefix3_u8 = prefix3Res.root_u8;
     jsonRes.prefix3 = {

@@ -344,13 +344,15 @@ export async function signRdfData(inputPath: string): Promise<SignedData> {
   const { noirInput } = await processQuadsForMerkle(quads);
   const prefix3Spec = await processQuadsForPrefix3(quads);
 
-  // Generate both Merkle trees via a single Noir execution. The
-  // returned array carries one entry per top-level call, in order.
-  const noirCalls = prefix3Spec
-    ? `[${noirInput},${prefix3Spec.noirInput}]`
-    : `[${noirInput}]`;
-  const noirResults = runJson(noirCalls);
-  const jsonRes: any = noirResults[0];
+  // Generate the two Merkle trees in **separate** Noir executions.
+  // Noir's `print([...])` insists every array element has the same
+  // type, but `merkle::<...>` returns `MerkleInfo<M, N>` while
+  // `merkle_prefix3::<...>` returns `MerklePrefix3Info<M, N3>` --
+  // different generic struct types -- so we batch them into one
+  // outer array only when they happen to be the same shape.
+  // Two single-element calls are cheap enough at sign time and keep
+  // the result extraction trivial.
+  const jsonRes: any = runJson(`[${noirInput}]`)[0];
 
   // Surface round-3 sentinel inclusion paths to the prover. The
   // generated `main.nr` calls `verify_low_sentinel_inclusion` /
@@ -367,7 +369,7 @@ export async function signRdfData(inputPath: string): Promise<SignedData> {
   delete jsonRes.high_sentinel_directions;
 
   if (prefix3Spec) {
-    const prefix3Res: any = noirResults[1];
+    const prefix3Res: any = runJson(`[${prefix3Spec.noirInput}]`)[0];
     jsonRes.rootPrefix3 = prefix3Res.root;
     // Stash the prefix-3 root bytes for `generateSignature` to sign
     // under the same key; deleted before returning.
