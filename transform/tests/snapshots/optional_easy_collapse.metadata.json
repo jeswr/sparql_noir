@@ -1,7 +1,27 @@
 {
   "aggregates": [],
-  "easyOptionals": [],
-  "easy_optionals": [],
+  "easyOptionals": [
+    {
+      "bracketLeftIdx": 2,
+      "bracketRightIdx": 3,
+      "bracket_left_idx": 2,
+      "bracket_right_idx": 3,
+      "id": 0,
+      "matchedIdx": 1,
+      "matched_idx": 1
+    }
+  ],
+  "easy_optionals": [
+    {
+      "bracketLeftIdx": 2,
+      "bracketRightIdx": 3,
+      "bracket_left_idx": 2,
+      "bracket_right_idx": 3,
+      "id": 0,
+      "matchedIdx": 1,
+      "matched_idx": 1
+    }
+  ],
   "hiddenInputs": [],
   "hidden_inputs": [],
   "inputPatterns": [
@@ -54,6 +74,23 @@
       "subject": {
         "termType": "Variable",
         "value": "__br_s_1"
+      }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__br_o_2"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "__br_p_2"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__br_s_2"
       }
     }
   ],
@@ -108,25 +145,28 @@
         "termType": "Variable",
         "value": "__br_s_1"
       }
+    },
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "__br_o_2"
+      },
+      "predicate": {
+        "termType": "Variable",
+        "value": "__br_p_2"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "__br_s_2"
+      }
     }
   ],
   "limit": null,
-  "notExists": [
-    {
-      "bracketLeftIdx": 1,
-      "bracketRightIdx": 2,
-      "bracket_left_idx": 1,
-      "bracket_right_idx": 2
-    }
-  ],
-  "not_exists": [
-    {
-      "bracketLeftIdx": 1,
-      "bracketRightIdx": 2,
-      "bracket_left_idx": 1,
-      "bracket_right_idx": 2
-    }
-  ],
+  "notExists": [],
+  "not_exists": [],
   "num_optionals": 0,
   "offset": null,
   "optionalPatterns": [],
@@ -134,7 +174,7 @@
   "orderBy": [],
   "order_by": [],
   "skip_signing": false,
-  "total_patterns": 3,
+  "total_patterns": 4,
   "unionBranches": [],
   "union_branches": [],
   "variables": [

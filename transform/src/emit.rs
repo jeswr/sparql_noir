@@ -19,14 +19,19 @@ use crate::{Assertion, OptionalBlock, PatternInfo, QueryInfo, Term, TransformOpt
 const MAIN_TEMPLATE: &str = include_str!("../template/main-verify.template.nr");
 const MAIN_TEMPLATE_SIMPLE: &str = include_str!("../template/main-simple.template.nr");
 
-/// True if any part of the pattern tree carries a `NonExistenceConstraint`.
+/// True if any part of the pattern tree carries a non-membership
+/// obligation — `NonExistenceConstraint` (NOT EXISTS / MINUS) or
+/// `EasyOptional` (collapsed-OPTIONAL unmatched arm). Both depend on
+/// the sorted-Merkle commitment that skip-signing mode bypasses, so
+/// either disqualifies a query from running in skip-signing mode.
+///
 /// The lowering currently rejects NOT EXISTS inside UNION branches and
 /// OPTIONAL right-sides (per round-3 scope), so in practice only the
-/// top-level `pat.not_exists` matters; the recursive walk is a
-/// defence-in-depth check should those rejections ever loosen without
-/// an emit-side update. Used by the skip-signing guard.
+/// top-level `pat.not_exists` / `pat.easy_optionals` matter; the
+/// recursive walk is a defence-in-depth check should those rejections
+/// ever loosen without an emit-side update.
 fn pattern_has_not_exists(pat: &PatternInfo) -> bool {
-    if !pat.not_exists.is_empty() {
+    if !pat.not_exists.is_empty() || !pat.easy_optionals.is_empty() {
         return true;
     }
     if let Some(branches) = &pat.union_branches {
@@ -75,6 +80,7 @@ pub(crate) fn generate_circuit_for_optional_combination(
         union_branches: base_info.pattern.union_branches.clone(),
         optional_blocks: Vec::new(),
         not_exists: base_info.pattern.not_exists.clone(),
+        easy_optionals: base_info.pattern.easy_optionals.clone(),
     };
 
     let mut optional_only_vars: std::collections::HashSet<String> =
@@ -228,11 +234,11 @@ pub(crate) fn generate_sparql_nr_from_query_info(
         }
     }
 
-    // Non-existence constraints (NOT EXISTS / MINUS / unmatched-arm of
-    // collapsed OPTIONAL — see spec/exists.md §3.3, §6.4). Each emits
-    // a call to `utils::verify_non_membership_no_inclusion` with the
-    // absent triple's hash computed inline from the outer μ. Bracket
-    // leaves at `bgp[bracket_left_idx]` / `bgp[bracket_right_idx]` are
+    // Non-existence constraints (NOT EXISTS / MINUS — see
+    // spec/exists.md §3.3). Each emits a call to
+    // `utils::verify_non_membership_no_inclusion` with the absent
+    // triple's hash computed inline from the outer μ. Bracket leaves
+    // at `bgp[bracket_left_idx]` / `bgp[bracket_right_idx]` are
     // already inclusion-checked by the generic per-triple loop in
     // `main.nr`.
     let mut not_exists_calls: Vec<String> = Vec::new();
@@ -248,6 +254,50 @@ pub(crate) fn generate_sparql_nr_from_query_info(
             "utils::verify_non_membership_no_inclusion(bgp[{}], bgp[{}], {})",
             ne.bracket_left_idx, ne.bracket_right_idx, absent
         ));
+    }
+
+    // Easy-case OPTIONAL disjunctions (round 3 follow-up — see
+    // `spec/exists.md` §4.1). Each `EasyOptional` emits one
+    // `assert(matched | unmatched)` line: the matched arm asserts that
+    // the substituted ground inner triple lives at `bgp[matched_idx]`;
+    // the unmatched arm calls the boolean variant of
+    // `verify_non_membership` over the bracket leaves. Both arms keep
+    // the projected solution set unchanged because the easy case has
+    // no inner-only variables.
+    let mut easy_optional_lines: Vec<String> = Vec::new();
+    for eo in &info.pattern.easy_optionals {
+        // Matched arm: per-position equalities pinning each of the
+        // four `bgp[matched_idx].terms[j]` slots to the substituted
+        // inner term. Reuses `serialize_term` exactly as the
+        // `NonExistenceConstraint` lowering does.
+        let matched_clauses: Vec<String> = (0..4)
+            .map(|j| {
+                format!(
+                    "({} == bgp[{}].terms[{}])",
+                    serialize_term(&eo.inner_terms[j], info, &binding_map),
+                    eo.matched_idx,
+                    j
+                )
+            })
+            .collect();
+        let matched_arm = matched_clauses.join(" & ");
+
+        // Unmatched arm: the boolean variant of
+        // `verify_non_membership_no_inclusion`. Computes the absent
+        // hash inline from the same `inner_terms`.
+        let absent = format!(
+            "consts::hash4([{}, {}, {}, {}])",
+            serialize_term(&eo.inner_terms[0], info, &binding_map),
+            serialize_term(&eo.inner_terms[1], info, &binding_map),
+            serialize_term(&eo.inner_terms[2], info, &binding_map),
+            serialize_term(&eo.inner_terms[3], info, &binding_map),
+        );
+        let unmatched_arm = format!(
+            "utils::verify_non_membership_no_inclusion_check(bgp[{}], bgp[{}], {})",
+            eo.bracket_left_idx, eo.bracket_right_idx, absent
+        );
+
+        easy_optional_lines.push(format!("({}) | {}", matched_arm, unmatched_arm));
     }
 
     let mut sparql_nr = String::new();
@@ -328,6 +378,9 @@ pub(crate) fn generate_sparql_nr_from_query_info(
     }
     for call in &not_exists_calls {
         sparql_nr.push_str(&format!("  {};\n", call));
+    }
+    for line in &easy_optional_lines {
+        sparql_nr.push_str(&format!("  assert({});\n", line));
     }
     sparql_nr.push_str("}\n");
 
