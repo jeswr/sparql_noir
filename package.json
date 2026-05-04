@@ -66,6 +66,7 @@
     "benchmark:list": "npx tsx src/scripts/benchmarks/noir-benchmark.ts list-circuits",
     "benchmark:help": "npx tsx src/scripts/benchmarks/noir-benchmark.ts --help",
     "test:sparql10": "node ts.js",
+    "test:conformance": "tsx test/conformance/run-w3c-sparql10.ts",
     "semantic-release": "semantic-release",
     "prebuild:tsc": "npm run bundle:noir-lib",
     "pretest": "npm run bundle:noir-lib"
