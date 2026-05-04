@@ -755,3 +755,239 @@ pub fn verify_non_membership_high_sentinel_no_inclusion(
         "non-membership: high sentinel is not adjacent to the left leaf",
     );
 }
+
+/// Simulate the `checkBinding` runtime dispatch the transform layer
+/// emits for each `NonExistenceConstraint`. The transform output (see
+/// `transform/src/emit.rs`) wraps the three `_no_inclusion` primitives
+/// in an `if boundary_cases[i] == X` chain; this helper mirrors that
+/// shape so the integration test below can exercise the dispatch
+/// without re-running the full transform pipeline.
+///
+/// Used by the `transform_dispatch_*` tests below to validate that the
+/// dispatch-shape Noir code emitted by the transform compiles +
+/// constrains correctly for each of the three boundary cases.
+fn dispatch_non_membership(
+    low_sentinel: SentinelLeaf,
+    high_sentinel: SentinelLeaf,
+    bgp_left: Triple,
+    bgp_right: Triple,
+    absent_hash: Field,
+    boundary_case: Field,
+) {
+    if boundary_case == 0 {
+        verify_non_membership_low_sentinel_no_inclusion(low_sentinel, bgp_right, absent_hash);
+    } else if boundary_case == 1 {
+        verify_non_membership_no_inclusion(bgp_left, bgp_right, absent_hash);
+    } else if boundary_case == 2 {
+        verify_non_membership_high_sentinel_no_inclusion(bgp_left, high_sentinel, absent_hash);
+    } else {
+        assert(false, "non-membership: boundary_case must be 0 (Lower), 1 (Middle), or 2 (Upper)");
+    }
+}
+
+#[test]
+fn test_transform_dispatch_lower_boundary() {
+    // End-to-end transform-shape test: `absent_hash` falls below the
+    // smallest real leaf, so the dispatch must select the Lower arm
+    // (boundary_case = 0). The right bracket is the smallest real
+    // leaf; the left bracket BGP slot is a *dummy* (any inclusion-
+    // valid leaf -- here the same smallest real leaf, since its
+    // directions still reconstruct correctly via inclusion). The
+    // dispatch's Lower arm ignores the left BGP slot and uses
+    // `low_sentinel` instead.
+    let triples = [[8, 9, 10, 11], [0, 1, 2, 3], [4, 5, 6, 7]];
+    let info = merkle::<11, 3>(triples);
+
+    // Find the smallest real leaf (sorted index 1).
+    let mut smallest_idx: u32 = 0;
+    for i in 0..3 {
+        let mut idx: u64 = 0;
+        let mut bit: u64 = 1;
+        for j in 0..10 {
+            if info.direction[i][j] == 1 {
+                idx += bit;
+            }
+            bit *= 2;
+        }
+        if idx == 1 {
+            smallest_idx = i as u32;
+        }
+    }
+
+    let smallest = Triple {
+        terms: info.triples[smallest_idx],
+        path: info.paths[smallest_idx],
+        directions: info.direction[smallest_idx],
+    };
+    let low_leaf = SentinelLeaf {
+        path: info.low_sentinel_path,
+        directions: info.low_sentinel_directions,
+    };
+    let high_leaf = SentinelLeaf {
+        path: info.high_sentinel_path,
+        directions: info.high_sentinel_directions,
+    };
+
+    // `absent_hash = 1` is strictly less than any non-zero real leaf
+    // (Pedersen-hash collision-resistance ensures real leaves don't
+    // collide with `1` either).
+    let absent_hash: Field = 1;
+
+    // Dispatch with boundary_case = 0 (Lower). The dummy left bracket
+    // is `smallest` -- it's still a valid included leaf, but the
+    // Lower arm never reads its hash.
+    dispatch_non_membership(low_leaf, high_leaf, smallest, smallest, absent_hash, 0);
+}
+
+#[test]
+fn test_transform_dispatch_middle_interior() {
+    // End-to-end transform-shape test: `absent_hash` between two
+    // adjacent real leaves -- the Middle case. Dispatch with
+    // `boundary_case = 1` should fire the interior primitive.
+    //
+    // We construct three triples with carefully spaced hashes so
+    // there's a gap between sorted index 1 and sorted index 2 that we
+    // can witness an absent hash in.
+    let triples = [[8, 9, 10, 11], [0, 1, 2, 3], [4, 5, 6, 7]];
+    let info = merkle::<11, 3>(triples);
+
+    // Find sorted indices 1 and 2 (smallest two real leaves).
+    let mut idx1: u32 = 0;
+    let mut idx2: u32 = 0;
+    for i in 0..3 {
+        let mut idx: u64 = 0;
+        let mut bit: u64 = 1;
+        for j in 0..10 {
+            if info.direction[i][j] == 1 {
+                idx += bit;
+            }
+            bit *= 2;
+        }
+        if idx == 1 {
+            idx1 = i as u32;
+        } else if idx == 2 {
+            idx2 = i as u32;
+        }
+    }
+
+    let left = Triple {
+        terms: info.triples[idx1],
+        path: info.paths[idx1],
+        directions: info.direction[idx1],
+    };
+    let right = Triple {
+        terms: info.triples[idx2],
+        path: info.paths[idx2],
+        directions: info.direction[idx2],
+    };
+    let low_leaf = SentinelLeaf {
+        path: info.low_sentinel_path,
+        directions: info.low_sentinel_directions,
+    };
+    let high_leaf = SentinelLeaf {
+        path: info.high_sentinel_path,
+        directions: info.high_sentinel_directions,
+    };
+
+    // Pick `absent_hash` strictly between left and right hashes.
+    // Both are concrete `consts::hash4(triples[*])` values; their
+    // arithmetic mean isn't generally between them as Field elements,
+    // but `left.path[0] + 1` is provably distinct from both real
+    // hashes (Pedersen-hash collision-resistance) and provably
+    // greater than `left.path[0]` if right.path[0] > left.path[0] + 1.
+    let absent_hash: Field = left.path[0] + 1;
+    assert(left.path[0].lt(absent_hash), "fixture: left < absent");
+    assert(absent_hash.lt(right.path[0]), "fixture: absent < right");
+
+    dispatch_non_membership(low_leaf, high_leaf, left, right, absent_hash, 1);
+}
+
+#[test]
+fn test_transform_dispatch_upper_boundary() {
+    // End-to-end transform-shape test: `absent_hash` above the
+    // largest real leaf -- the Upper case. Dispatch with
+    // `boundary_case = 2` should fire the high-sentinel primitive.
+    let triples = [[8, 9, 10, 11], [0, 1, 2, 3], [4, 5, 6, 7]];
+    let info = merkle::<11, 3>(triples);
+
+    // Find the largest real leaf (sorted index 3 = N).
+    let mut largest_idx: u32 = 0;
+    for i in 0..3 {
+        let mut idx: u64 = 0;
+        let mut bit: u64 = 1;
+        for j in 0..10 {
+            if info.direction[i][j] == 1 {
+                idx += bit;
+            }
+            bit *= 2;
+        }
+        if idx == 3 {
+            largest_idx = i as u32;
+        }
+    }
+
+    let largest = Triple {
+        terms: info.triples[largest_idx],
+        path: info.paths[largest_idx],
+        directions: info.direction[largest_idx],
+    };
+    let low_leaf = SentinelLeaf {
+        path: info.low_sentinel_path,
+        directions: info.low_sentinel_directions,
+    };
+    let high_leaf = SentinelLeaf {
+        path: info.high_sentinel_path,
+        directions: info.high_sentinel_directions,
+    };
+
+    let absent_hash: Field = consts::HIGH_SENTINEL_HASH - 1;
+    assert(largest.path[0].lt(absent_hash), "fixture: largest < absent");
+    assert(absent_hash.lt(consts::HIGH_SENTINEL_HASH), "fixture: absent < HIGH_SENTINEL_HASH");
+
+    // Dispatch with boundary_case = 2 (Upper). The dummy right
+    // bracket is `largest` -- the Upper arm reads `high_sentinel`
+    // for the right bracket and ignores the BGP right slot.
+    dispatch_non_membership(low_leaf, high_leaf, largest, largest, absent_hash, 2);
+}
+
+#[test(should_fail_with = "non-membership: boundary_case must be 0")]
+fn test_transform_dispatch_invalid_boundary_case_rejected() {
+    // Soundness check: a malicious prover supplying a `boundary_case`
+    // outside `{0, 1, 2}` must be rejected outright. The `else` arm
+    // of the dispatch chain is `assert(false, ...)` so any out-of-
+    // range tag fails the proof.
+    let triples = [[8, 9, 10, 11], [0, 1, 2, 3], [4, 5, 6, 7]];
+    let info = merkle::<11, 3>(triples);
+
+    let mut idx1: u32 = 0;
+    for i in 0..3 {
+        let mut idx: u64 = 0;
+        let mut bit: u64 = 1;
+        for j in 0..10 {
+            if info.direction[i][j] == 1 {
+                idx += bit;
+            }
+            bit *= 2;
+        }
+        if idx == 1 {
+            idx1 = i as u32;
+        }
+    }
+    let leaf = Triple {
+        terms: info.triples[idx1],
+        path: info.paths[idx1],
+        directions: info.direction[idx1],
+    };
+    let low_leaf = SentinelLeaf {
+        path: info.low_sentinel_path,
+        directions: info.low_sentinel_directions,
+    };
+    let high_leaf = SentinelLeaf {
+        path: info.high_sentinel_path,
+        directions: info.high_sentinel_directions,
+    };
+
+    // `boundary_case = 7` is out of range; the dispatch's `else` arm
+    // fires and asserts false.
+    dispatch_non_membership(low_leaf, high_leaf, leaf, leaf, 1, 7);
+}
