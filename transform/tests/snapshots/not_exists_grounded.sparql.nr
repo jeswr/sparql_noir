@@ -12,7 +12,6 @@ pub(crate) struct Variables {
 pub(crate) type BoundaryCases = [Field; 1];
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables, low_sentinel: SentinelLeaf, high_sentinel: SentinelLeaf, boundary_cases: BoundaryCases) {
   assert(variables.s == bgp[0].terms[0]);
-  assert(bgp[0].terms[2] == bgp[0].terms[2]);
   assert(consts::hash2([0, consts::encode_string("http://example.org/knows")]) == bgp[0].terms[1]);
   assert(true);
   let absent_0 = consts::hash4([variables.s, consts::hash2([0, consts::encode_string("http://example.org/type")]), consts::hash2([0, consts::encode_string("http://example.org/Person")]), consts::hash2([0, consts::encode_string("")])]);

@@ -30,9 +30,22 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 // IEEE 754 FLOAT HANDLING
 // =============================================================================
 
+/// A constant-folded IEEE 754 literal. The `Normal` variant stores the
+/// IEEE 754 bit pattern as an unsigned integer at the operand's
+/// natural width — `u32` for `xsd:float` (binary32), `u64` for
+/// `xsd:double` (binary64). Specials carry their sign explicitly so
+/// the comparator does not need to inspect bit patterns.
+///
+/// Width is preserved because IEEE 754 ordering depends on the width:
+/// the bit pattern `0x40000000` is `+2.0f32`, but `0x40000000` as f64
+/// is the subnormal `1.99e-308`. Conflating widths makes constant-
+/// folding subtly wrong (audit item 6, sparql_noir #37 row).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FloatSpecial {
-    Normal(i64),
+    /// `xsd:float` (binary32) bit pattern.
+    NormalF32(u32),
+    /// `xsd:double` (binary64) bit pattern.
+    NormalF64(u64),
     NaN,
     PositiveInf,
     NegativeInf,
@@ -40,26 +53,132 @@ pub enum FloatSpecial {
     NegativeZero,
 }
 
-fn parse_float_special(value: &str, _datatype: &str) -> FloatSpecial {
+/// Parse a `xsd:float` / `xsd:double` literal into a [`FloatSpecial`],
+/// dispatching on `datatype` so `xsd:float` is rounded to f32
+/// precision (binary32) and `xsd:double` stays at f64 precision
+/// (binary64). Other datatypes default to f64 — callers are expected
+/// to gate on `datatype.ends_with("float" | "double")` before calling.
+fn parse_float_special(value: &str, datatype: &str) -> FloatSpecial {
     let v = value.trim();
     if v == "NaN" {
-        FloatSpecial::NaN
-    } else if v == "INF" || v == "+INF" {
-        FloatSpecial::PositiveInf
-    } else if v == "-INF" {
-        FloatSpecial::NegativeInf
-    } else if v == "0" || v == "0.0" || v == "+0" || v == "+0.0" {
-        FloatSpecial::PositiveZero
-    } else if v == "-0" || v == "-0.0" {
-        FloatSpecial::NegativeZero
+        return FloatSpecial::NaN;
+    }
+    if v == "INF" || v == "+INF" {
+        return FloatSpecial::PositiveInf;
+    }
+    if v == "-INF" {
+        return FloatSpecial::NegativeInf;
+    }
+    // The `+0` / `-0` lexical forms are special-cased so the
+    // signed-zero distinction survives constant folding.
+    if v == "0" || v == "0.0" || v == "+0" || v == "+0.0" {
+        return FloatSpecial::PositiveZero;
+    }
+    if v == "-0" || v == "-0.0" {
+        return FloatSpecial::NegativeZero;
+    }
+
+    let is_float = datatype.ends_with("float");
+    if is_float {
+        match v.parse::<f32>() {
+            Ok(f) if f.is_nan() => FloatSpecial::NaN,
+            Ok(f) if f.is_infinite() => {
+                if f.is_sign_positive() {
+                    FloatSpecial::PositiveInf
+                } else {
+                    FloatSpecial::NegativeInf
+                }
+            }
+            Ok(f) if f == 0.0_f32 => {
+                if f.is_sign_negative() {
+                    FloatSpecial::NegativeZero
+                } else {
+                    FloatSpecial::PositiveZero
+                }
+            }
+            Ok(f) => FloatSpecial::NormalF32(f.to_bits()),
+            Err(_) => FloatSpecial::NaN,
+        }
     } else {
-        // Parse as i64 bits for normal values
-        if let Ok(f) = v.parse::<f64>() {
-            FloatSpecial::Normal(f.to_bits() as i64)
-        } else {
-            FloatSpecial::NaN
+        // Default + xsd:double path — binary64.
+        match v.parse::<f64>() {
+            Ok(f) if f.is_nan() => FloatSpecial::NaN,
+            Ok(f) if f.is_infinite() => {
+                if f.is_sign_positive() {
+                    FloatSpecial::PositiveInf
+                } else {
+                    FloatSpecial::NegativeInf
+                }
+            }
+            Ok(f) if f == 0.0_f64 => {
+                if f.is_sign_negative() {
+                    FloatSpecial::NegativeZero
+                } else {
+                    FloatSpecial::PositiveZero
+                }
+            }
+            Ok(f) => FloatSpecial::NormalF64(f.to_bits()),
+            Err(_) => FloatSpecial::NaN,
         }
     }
+}
+
+/// Sign-aware IEEE 754 magnitude comparator for two same-width
+/// `Normal*` values. Returns `Some(true)` iff the first operand is
+/// strictly less than the second under standard IEEE 754 ordering
+/// (where `-x < -y` iff `|x| > |y|`).
+///
+/// The trick is that bit patterns aren't a total order: positive
+/// values sort by ascending bit pattern, negative values by
+/// descending bit pattern (sign-magnitude). Comparing as signed
+/// integers (the previous implementation) is wrong because
+/// `bits(-2.0)` as a signed integer is *less negative* than
+/// `bits(-1.0)` (audit item 7, sparql_noir #37 row).
+fn ieee754_normal_lt(a_bits_unsigned: u64, b_bits_unsigned: u64, sign_bit: u64) -> bool {
+    let a_neg = (a_bits_unsigned & sign_bit) != 0;
+    let b_neg = (b_bits_unsigned & sign_bit) != 0;
+    match (a_neg, b_neg) {
+        (false, false) => a_bits_unsigned < b_bits_unsigned,
+        (true, true) => a_bits_unsigned > b_bits_unsigned,
+        (true, false) => true,  // any negative < any positive
+        (false, true) => false, // any positive >= any negative
+    }
+}
+
+fn float_normal_lt(a: FloatSpecial, b: FloatSpecial) -> Option<bool> {
+    match (a, b) {
+        (FloatSpecial::NormalF32(x), FloatSpecial::NormalF32(y)) => {
+            Some(ieee754_normal_lt(x as u64, y as u64, 0x8000_0000))
+        }
+        (FloatSpecial::NormalF64(x), FloatSpecial::NormalF64(y)) => {
+            Some(ieee754_normal_lt(x, y, 0x8000_0000_0000_0000))
+        }
+        // Mixed widths shouldn't be hit because the caller gates on
+        // both operands having the same datatype, but if it ever is,
+        // promote the f32 to f64 and recompare.
+        (FloatSpecial::NormalF32(x), FloatSpecial::NormalF64(y)) => {
+            let x_f64 = f32::from_bits(x) as f64;
+            Some(ieee754_normal_lt(x_f64.to_bits(), y, 0x8000_0000_0000_0000))
+        }
+        (FloatSpecial::NormalF64(x), FloatSpecial::NormalF32(y)) => {
+            let y_f64 = f32::from_bits(y) as f64;
+            Some(ieee754_normal_lt(x, y_f64.to_bits(), 0x8000_0000_0000_0000))
+        }
+        _ => None,
+    }
+}
+
+fn float_is_negative_normal(a: FloatSpecial) -> bool {
+    match a {
+        FloatSpecial::NormalF32(x) => (x & 0x8000_0000) != 0,
+        FloatSpecial::NormalF64(x) => (x & 0x8000_0000_0000_0000) != 0,
+        _ => false,
+    }
+}
+
+fn float_normal_eq_zero(a: FloatSpecial) -> bool {
+    matches!(a, FloatSpecial::NormalF32(0) | FloatSpecial::NormalF32(0x8000_0000)
+        | FloatSpecial::NormalF64(0) | FloatSpecial::NormalF64(0x8000_0000_0000_0000))
 }
 
 pub fn ieee754_less_than(a: FloatSpecial, b: FloatSpecial) -> Option<bool> {
@@ -69,13 +188,37 @@ pub fn ieee754_less_than(a: FloatSpecial, b: FloatSpecial) -> Option<bool> {
         (NegativeInf, NegativeInf) => Some(false),
         (NegativeInf, _) => Some(true),
         (_, NegativeInf) => Some(false),
+        (PositiveInf, PositiveInf) => Some(false),
         (PositiveInf, _) => Some(false),
         (_, PositiveInf) => Some(true),
+        // SPARQL value-equality treats +0 and -0 as equal, so neither
+        // is strictly less than the other.
         (PositiveZero, NegativeZero) | (NegativeZero, PositiveZero) => Some(false),
         (PositiveZero, PositiveZero) | (NegativeZero, NegativeZero) => Some(false),
-        (Normal(x), Normal(y)) => Some(x < y),
-        (PositiveZero, Normal(y)) | (NegativeZero, Normal(y)) => Some(0 < y),
-        (Normal(x), PositiveZero) | (Normal(x), NegativeZero) => Some(x < 0),
+        (NormalF32(_) | NormalF64(_), NormalF32(_) | NormalF64(_)) => float_normal_lt(a, b),
+        // Zero vs Normal — Normal is not zero, so the comparison
+        // reduces to whether `b` is positive (a < b) or `a` is
+        // negative (a < b).
+        (PositiveZero | NegativeZero, NormalF32(_) | NormalF64(_)) => {
+            // a == 0 < b iff b is positive (and not zero, which
+            // can't happen for a Normal pattern of non-zero value).
+            // Note: `NormalF32(0)` would represent `+0.0` lexically;
+            // the parser routes those to PositiveZero, but a malformed
+            // input could land here. Treat such patterns as equal-
+            // to-zero, hence not strictly greater.
+            if float_normal_eq_zero(b) {
+                Some(false)
+            } else {
+                Some(!float_is_negative_normal(b))
+            }
+        }
+        (NormalF32(_) | NormalF64(_), PositiveZero | NegativeZero) => {
+            if float_normal_eq_zero(a) {
+                Some(false)
+            } else {
+                Some(float_is_negative_normal(a))
+            }
+        }
     }
 }
 
@@ -87,11 +230,95 @@ pub fn ieee754_equal(a: FloatSpecial, b: FloatSpecial) -> Option<bool> {
         (NegativeInf, NegativeInf) => Some(true),
         (PositiveInf, _) | (_, PositiveInf) => Some(false),
         (NegativeInf, _) | (_, NegativeInf) => Some(false),
+        // SPARQL value-equality: +0 == -0.
         (PositiveZero, NegativeZero) | (NegativeZero, PositiveZero) => Some(true),
         (PositiveZero, PositiveZero) | (NegativeZero, NegativeZero) => Some(true),
-        (Normal(x), Normal(y)) => Some(x == y),
-        (PositiveZero, Normal(y)) | (NegativeZero, Normal(y)) => Some(0 == y),
-        (Normal(x), PositiveZero) | (Normal(x), NegativeZero) => Some(x == 0),
+        (NormalF32(x), NormalF32(y)) => Some(x == y),
+        (NormalF64(x), NormalF64(y)) => Some(x == y),
+        // Mixed widths — promote f32 to f64 (lossless) and compare.
+        (NormalF32(x), NormalF64(y)) => Some((f32::from_bits(x) as f64).to_bits() == y),
+        (NormalF64(x), NormalF32(y)) => Some(x == (f32::from_bits(y) as f64).to_bits()),
+        (PositiveZero | NegativeZero, NormalF32(_) | NormalF64(_)) => Some(float_normal_eq_zero(b)),
+        (NormalF32(_) | NormalF64(_), PositiveZero | NegativeZero) => Some(float_normal_eq_zero(a)),
+    }
+}
+
+#[cfg(test)]
+mod ieee754_tests {
+    use super::*;
+
+    #[test]
+    fn parse_xsd_float_uses_binary32() {
+        // 0.1 + 0.2 in f32 vs f64 differ. The bit pattern of 0.1f32
+        // is 0x3DCCCCCD; the bit pattern of 0.1f64 is 0x3FB999999999999A.
+        let f = parse_float_special("0.1", "http://www.w3.org/2001/XMLSchema#float");
+        let d = parse_float_special("0.1", "http://www.w3.org/2001/XMLSchema#double");
+        match (f, d) {
+            (FloatSpecial::NormalF32(fb), FloatSpecial::NormalF64(db)) => {
+                assert_eq!(fb, 0.1_f32.to_bits(), "xsd:float must round to binary32");
+                assert_eq!(db, 0.1_f64.to_bits(), "xsd:double must stay binary64");
+                // Distinct bit patterns prove the dispatch is real.
+                assert_ne!(fb as u64, db, "f32 and f64 of 0.1 must differ");
+            }
+            _ => panic!("expected NormalF32 + NormalF64 from parse_float_special"),
+        }
+    }
+
+    #[test]
+    fn negative_normals_compare_by_magnitude() {
+        // -2.0 < -1.0 must be true (the previous signed-i64 path
+        // returned the wrong answer here — audit item 7).
+        let neg2 = parse_float_special("-2.0", "http://www.w3.org/2001/XMLSchema#double");
+        let neg1 = parse_float_special("-1.0", "http://www.w3.org/2001/XMLSchema#double");
+        assert_eq!(ieee754_less_than(neg2, neg1), Some(true), "-2.0 < -1.0");
+        assert_eq!(ieee754_less_than(neg1, neg2), Some(false), "!(-1.0 < -2.0)");
+    }
+
+    #[test]
+    fn negative_normal_less_than_positive_normal() {
+        let neg = parse_float_special("-1.5", "http://www.w3.org/2001/XMLSchema#double");
+        let pos = parse_float_special("1.5", "http://www.w3.org/2001/XMLSchema#double");
+        assert_eq!(ieee754_less_than(neg, pos), Some(true));
+        assert_eq!(ieee754_less_than(pos, neg), Some(false));
+    }
+
+    #[test]
+    fn signed_zeros_compare_equal() {
+        let pz = parse_float_special("+0.0", "http://www.w3.org/2001/XMLSchema#double");
+        let nz = parse_float_special("-0.0", "http://www.w3.org/2001/XMLSchema#double");
+        assert_eq!(ieee754_equal(pz, nz), Some(true));
+        assert_eq!(ieee754_less_than(pz, nz), Some(false));
+        assert_eq!(ieee754_less_than(nz, pz), Some(false));
+    }
+
+    #[test]
+    fn nan_is_unordered() {
+        let nan = parse_float_special("NaN", "http://www.w3.org/2001/XMLSchema#double");
+        let one = parse_float_special("1.0", "http://www.w3.org/2001/XMLSchema#double");
+        assert_eq!(ieee754_less_than(nan, one), Some(false));
+        assert_eq!(ieee754_less_than(one, nan), Some(false));
+        assert_eq!(ieee754_equal(nan, one), Some(false));
+        assert_eq!(ieee754_equal(nan, nan), Some(false));
+    }
+
+    #[test]
+    fn infinity_orders_at_extremes() {
+        let pinf = parse_float_special("INF", "http://www.w3.org/2001/XMLSchema#double");
+        let ninf = parse_float_special("-INF", "http://www.w3.org/2001/XMLSchema#double");
+        let one = parse_float_special("1.0", "http://www.w3.org/2001/XMLSchema#double");
+        assert_eq!(ieee754_less_than(ninf, one), Some(true));
+        assert_eq!(ieee754_less_than(one, pinf), Some(true));
+        assert_eq!(ieee754_less_than(ninf, pinf), Some(true));
+        assert_eq!(ieee754_less_than(pinf, ninf), Some(false));
+    }
+
+    #[test]
+    fn float_subnormals_round_to_binary32() {
+        // 1e-50 is representable in f64 but underflows to 0 in f32.
+        let f = parse_float_special("1e-50", "http://www.w3.org/2001/XMLSchema#float");
+        // After f32 rounding 1e-50 becomes 0.0, which the parser
+        // then routes to PositiveZero.
+        assert_eq!(f, FloatSpecial::PositiveZero);
     }
 }
 

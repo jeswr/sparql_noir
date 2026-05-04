@@ -7,7 +7,6 @@
 //! pure data; no Noir code is emitted here.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
@@ -15,43 +14,61 @@ use spargebra::algebra::{
 };
 use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 
+use crate::parse::QueryForm;
 use crate::{
     Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, EasyOptional, GraphContext,
     OptionalBlock, OrderDirection, OrderKey, PatternInfo, QueryInfo, Term, TransformOptions,
 };
 
-static OPTIONAL_BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-pub(crate) fn next_optional_id() -> usize {
-    OPTIONAL_BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst)
-}
-
-pub(crate) fn reset_optional_counter() {
-    OPTIONAL_BLOCK_COUNTER.store(0, Ordering::SeqCst);
-}
-
-/// Per-query source of fresh variable / predicate names. Threaded
-/// through the lowering instead of a global atomic so concurrent
-/// `transform_query` callers don't race on counter values (and so the
-/// snapshot test's many-queries-in-one-process pattern is stable).
+/// Per-query source of fresh identifiers. Threaded through the
+/// lowering instead of a global atomic so concurrent
+/// `transform_query` callers don't race on counter values (and so
+/// the snapshot test's many-queries-in-one-process pattern is
+/// stable).
+///
+/// Owns three independent counters:
+/// - `var_counter` for the `__v*` / `__np*` / `__exists_*_*` names
+///   used by path expansion / EXISTS lowering.
+/// - `optional_counter` for OPTIONAL block IDs.
+/// - `bracket_counter` for the `__br_*_*` placeholders the NOT EXISTS
+///   sorted-commitment primitive emits as bracket-leaf BGP slots.
+///
+/// The previous implementation used global `AtomicUsize` counters
+/// reset at the start of each `transform_query`. That race-window
+/// between reset and the first `fetch_add` was the audit's item 9
+/// concern (sparql_noir #37 row, generalised by #42's regression).
 #[derive(Default)]
 pub(crate) struct FreshSource {
-    counter: usize,
+    var_counter: usize,
+    optional_counter: usize,
+    bracket_counter: usize,
 }
 
 impl FreshSource {
-    fn next_id(&mut self) -> usize {
-        let id = self.counter;
-        self.counter += 1;
+    fn next_var_id(&mut self) -> usize {
+        let id = self.var_counter;
+        self.var_counter += 1;
+        id
+    }
+
+    pub(crate) fn next_optional_id(&mut self) -> usize {
+        let id = self.optional_counter;
+        self.optional_counter += 1;
+        id
+    }
+
+    pub(crate) fn next_bracket_id(&mut self) -> usize {
+        let id = self.bracket_counter;
+        self.bracket_counter += 1;
         id
     }
 
     fn fresh_variable(&mut self) -> TermPattern {
-        TermPattern::Variable(Variable::new_unchecked(format!("__v{}", self.next_id())))
+        TermPattern::Variable(Variable::new_unchecked(format!("__v{}", self.next_var_id())))
     }
 
     fn fresh_pred(&mut self) -> Variable {
-        Variable::new_unchecked(format!("__np{}", self.next_id()))
+        Variable::new_unchecked(format!("__np{}", self.next_var_id()))
     }
 
     /// Mint a fresh inner-only EXISTS variable name. The name carries
@@ -60,7 +77,7 @@ impl FreshSource {
     /// blocks (in the same query or across concurrent queries) ever
     /// produce the same `__exists_*` identifier.
     fn fresh_exists_var(&mut self, orig: &str) -> String {
-        format!("__exists_{}_{}", orig, self.next_id())
+        format!("__exists_{}_{}", orig, self.next_var_id())
     }
 }
 
@@ -132,7 +149,18 @@ fn process_patterns_with_graph(
             }
             NamedNodePattern::Variable(v) => {
                 let name = v.as_str().to_string();
-                if !seen_vars.contains(&name) {
+                if seen_vars.contains(&name) {
+                    // The same predicate variable appearing twice
+                    // in a BGP must be unified — without the
+                    // assertion the prover could pick two different
+                    // predicates for the two occurrences (audit item
+                    // 10, sparql_noir #37 row, 2026-05-03). Subject
+                    // and object positions already do this.
+                    info.assertions.push(Assertion(
+                        Term::Variable(name),
+                        Term::Input(i, 1),
+                    ));
+                } else {
                     seen_vars.insert(name.clone());
                     info.bindings.push(Binding {
                         variable: name,
@@ -742,8 +770,8 @@ fn lower_not_exists_into(
     // the strict-ordering / adjacency check `verify_non_membership`
     // emits in `checkBinding`.
     let outer_n = info.patterns.len();
-    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph));
-    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph));
+    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph, fresh));
+    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph, fresh));
 
     info.not_exists.push(crate::ir::NonExistenceConstraint {
         bracket_left_idx: outer_n,
@@ -804,9 +832,11 @@ fn absent_terms_from_pattern(ct: &ContextualizedTriple) -> Result<[Term; 4], Str
 /// graph context for legacy callers (NOT EXISTS / MINUS — already
 /// constrained to non-`GRAPH`-scoped inner patterns by the round-3
 /// main event).
-fn bracket_placeholder_pattern(graph: &GraphContext) -> ContextualizedTriple {
-    use std::sync::atomic::Ordering as A;
-    let id = BRACKET_COUNTER.fetch_add(1, A::SeqCst);
+fn bracket_placeholder_pattern(
+    graph: &GraphContext,
+    fresh: &mut FreshSource,
+) -> ContextualizedTriple {
+    let id = fresh.next_bracket_id();
     let s = Variable::new_unchecked(format!("__br_s_{}", id));
     let p = Variable::new_unchecked(format!("__br_p_{}", id));
     let o = Variable::new_unchecked(format!("__br_o_{}", id));
@@ -818,16 +848,6 @@ fn bracket_placeholder_pattern(graph: &GraphContext) -> ContextualizedTriple {
         },
         graph: graph.clone(),
     }
-}
-
-/// Per-query bracket placeholder counter. Reset at the start of each
-/// `transform_query` call so snapshot fixtures stay stable across
-/// many-queries-in-one-process runs.
-static BRACKET_COUNTER: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-pub(crate) fn reset_bracket_counter() {
-    BRACKET_COUNTER.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Collect the set of in-scope variable names of a `GraphPattern`.
@@ -1728,16 +1748,16 @@ fn process_graph_pattern_inner(
                 // prover actually witnessed a leaf in the right graph.
                 left_info
                     .patterns
-                    .push(bracket_placeholder_pattern(&GraphContext::Default));
+                    .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
                 left_info
                     .patterns
-                    .push(bracket_placeholder_pattern(&GraphContext::Default));
+                    .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
                 left_info
                     .patterns
-                    .push(bracket_placeholder_pattern(&GraphContext::Default));
+                    .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
 
                 left_info.easy_optionals.push(EasyOptional {
-                    id: next_optional_id(),
+                    id: fresh.next_optional_id(),
                     matched_idx,
                     bracket_left_idx,
                     bracket_right_idx,
@@ -1746,7 +1766,7 @@ fn process_graph_pattern_inner(
                 return Ok(left_info);
             }
 
-            let optional_id = next_optional_id();
+            let optional_id = fresh.next_optional_id();
 
             let adjusted_bindings: Vec<Binding> = right_info
                 .bindings
@@ -2201,12 +2221,13 @@ fn unwrap_project_inner<'a>(
 
 #[cfg(test)]
 pub(crate) fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
-    process_query_with_options(gp, &TransformOptions::default())
+    process_query_with_options_and_form(gp, &TransformOptions::default(), QueryForm::Select)
 }
 
-pub(crate) fn process_query_with_options(
+pub(crate) fn process_query_with_options_and_form(
     gp: &GraphPattern,
     options: &TransformOptions,
+    form: QueryForm,
 ) -> Result<QueryInfo, String> {
     let (inner, mut post) = strip_post_processing(gp)?;
 
@@ -2345,24 +2366,36 @@ pub(crate) fn process_query_with_options(
                 offset: post.offset,
             })
         }
-        // ASK queries do not have PROJECT — project all bound
-        // variables, except those with `__`-prefix (blank-node
-        // internals and `__exists_*` inner-only EXISTS witnesses,
-        // which must never appear in the disclosed projection).
+        // ASK queries return a boolean — they do NOT project bound
+        // variables. The previous behaviour ("auto-project all bound
+        // vars when no Project is present") leaked variable bindings
+        // for an ASK that should only disclose true/false (audit
+        // item 8, sparql_noir #37 row).
+        //
+        // Other formless paths (e.g. CONSTRUCT/DESCRIBE without a
+        // top-level Project, which spargebra produces for some shapes)
+        // continue to use the auto-project fallback so we don't
+        // regress those at the same time. The form is threaded from
+        // `parse::query_form` so we can distinguish.
         _ => {
             let pattern = process_graph_pattern_with_options(inner, options)?;
-            // Filter out `__`-prefix names: blank-node internals and
-            // `__exists_*` inner-only EXISTS witnesses must never
-            // appear in the disclosed projection (round 3 spike;
-            // mirrors the SELECT-with-aggregates fallback).
-            let mut vars: Vec<String> = pattern
-                .bindings
-                .iter()
-                .map(|b| b.variable.clone())
-                .filter(|v| !v.starts_with("__"))
-                .collect();
-            vars.sort();
-            vars.dedup();
+            let vars: Vec<String> = match form {
+                QueryForm::Ask => Vec::new(),
+                _ => {
+                    // Filter out `__`-prefix names: blank-node internals
+                    // and `__exists_*` inner-only EXISTS witnesses must
+                    // never appear in the disclosed projection.
+                    let mut all: Vec<String> = pattern
+                        .bindings
+                        .iter()
+                        .map(|b| b.variable.clone())
+                        .filter(|v| !v.starts_with("__"))
+                        .collect();
+                    all.sort();
+                    all.dedup();
+                    all
+                }
+            };
             Ok(QueryInfo {
                 variables: vars,
                 pattern,

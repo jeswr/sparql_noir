@@ -1290,23 +1290,128 @@ fn inner_only_predicate_variable_is_renamed_in_metadata() {
     );
 }
 
-/// ASK queries auto-project every bound variable. The roborev
-/// 2026-05-03 finding: with EXISTS now introducing `__exists_*` hidden
-/// vars, ASK must filter them out to avoid leaking inner-only witness
-/// names. This test guards that filter.
+/// Predicate variables reused across two patterns must be unified
+/// by an explicit BGP assertion. Without it the prover can supply two
+/// different predicate hashes for the two `?p` occurrences (audit
+/// item 10, sparql_noir #37 row, 2026-05-03).
 #[test]
-fn ask_with_exists_does_not_leak_inner_only_vars() {
+fn predicate_variable_reuse_is_constrained() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?p ?o ?x WHERE { ?s ?p ?o . ?x ?p ?o . }";
+    let result = transform_query(q).expect("transform should succeed");
+    // The shared predicate variable must produce a unification
+    // assertion `variables.p == bgp[1].terms[1]`.
+    assert!(
+        result.sparql_nr.contains("variables.p == bgp[1].terms[1]"),
+        "predicate-var reuse must add a unification assertion at index 1: {}",
+        result.sparql_nr
+    );
+}
+
+/// Per-query state must be isolated across concurrent transform
+/// calls. The previous implementation kept the optional / bracket
+/// counters in process-global atomics, with a `reset_*_counter` call
+/// at the start of each transform; that race window between reset
+/// and the first `fetch_add` was the audit's item 9 concern
+/// (sparql_noir #37 row, generalised by #42's regression). Per-query
+/// `FreshSource` removes the race entirely.
+#[test]
+fn per_query_isolation_is_thread_safe() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let q1 = "PREFIX ex: <http://example.org/>\n\
+              SELECT ?s ?o WHERE { ?s ex:knows ?o . OPTIONAL { ?s ex:age ?a . } }";
+    let q2 = "PREFIX ex: <http://example.org/>\n\
+              SELECT ?s ?o WHERE { ?s ex:knows ?o . OPTIONAL { ?s ex:age ?a . } }";
+
+    // Run two threads each compiling the same query 16 times. With
+    // global atomics the bracket / optional IDs would leak across
+    // queries and the snapshot equality below would be flaky.
+    let q1 = Arc::new(q1.to_string());
+    let q2 = Arc::new(q2.to_string());
+
+    let h1 = {
+        let q = Arc::clone(&q1);
+        thread::spawn(move || {
+            let mut outs = Vec::new();
+            for _ in 0..16 {
+                outs.push(transform_query(&q).expect("q1 transform"));
+            }
+            outs
+        })
+    };
+    let h2 = {
+        let q = Arc::clone(&q2);
+        thread::spawn(move || {
+            let mut outs = Vec::new();
+            for _ in 0..16 {
+                outs.push(transform_query(&q).expect("q2 transform"));
+            }
+            outs
+        })
+    };
+
+    let r1 = h1.join().expect("q1 thread");
+    let r2 = h2.join().expect("q2 thread");
+
+    let baseline_sparql = &r1[0].sparql_nr;
+    let baseline_main = &r1[0].main_nr;
+    for (i, r) in r1.iter().enumerate() {
+        assert_eq!(
+            &r.sparql_nr, baseline_sparql,
+            "q1 iteration {} produced a different sparql.nr — counter race",
+            i
+        );
+        assert_eq!(
+            &r.main_nr, baseline_main,
+            "q1 iteration {} produced a different main.nr — counter race",
+            i
+        );
+    }
+    for (i, r) in r2.iter().enumerate() {
+        assert_eq!(
+            &r.sparql_nr, baseline_sparql,
+            "q2 iteration {} produced a different sparql.nr — counter race",
+            i
+        );
+    }
+}
+
+/// ASK queries return a boolean — they must not disclose any bound
+/// variables (audit item 8, sparql_noir #37 row, 2026-05-03). The
+/// previous behaviour auto-projected every BGP-bound name, including
+/// `__exists_*` witnesses, leaking the multiset that should be hidden.
+#[test]
+fn ask_does_not_project_bound_variables() {
     let q = "PREFIX ex: <http://example.org/>\n\
              ASK WHERE { ?s ex:knows ?o . FILTER(EXISTS { ?o ex:age ?age . }) }";
     let result = transform_query(q).expect("transform should succeed");
+    // Inner-only EXISTS witnesses must of course not leak.
     assert!(
         !result.sparql_nr.contains("__exists_age"),
         "__exists_age_* should not appear in ASK projection: {}",
         result.sparql_nr
     );
-    // Sanity: the regular outer-bound variables ?s and ?o still project.
-    assert!(result.sparql_nr.contains("pub(crate) s: Field"));
-    assert!(result.sparql_nr.contains("pub(crate) o: Field"));
+    // Outer bindings ?s and ?o must also NOT be projected — ASK is a
+    // boolean, the variables stay hidden inside the circuit.
+    assert!(
+        !result.sparql_nr.contains("pub(crate) s: Field"),
+        "?s must not be a public projected variable for ASK: {}",
+        result.sparql_nr
+    );
+    assert!(
+        !result.sparql_nr.contains("pub(crate) o: Field"),
+        "?o must not be a public projected variable for ASK: {}",
+        result.sparql_nr
+    );
+    // Metadata should likewise carry an empty `variables` list.
+    let vars = result
+        .metadata
+        .get("variables")
+        .and_then(|v| v.as_array())
+        .expect("variables array");
+    assert!(vars.is_empty(), "ASK metadata.variables must be empty: {:?}", vars);
 }
 
 /// EXISTS with a fully-ground inner pattern lowers cleanly: the inner
