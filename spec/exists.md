@@ -142,7 +142,12 @@ The OPTIONAL block qualifies for collapse iff **all** of:
 2. Every variable position of the inner triple is bound by the outer mapping μ (i.e. the variable already appears in the outer scope's `bindings`). Constant positions are always fine.
 3. No inner FILTER, no nested OPTIONAL, no UNION inside the inner, no EXISTS / NOT EXISTS inside the inner.
 4. No outer LeftJoin filter expression (`OPTIONAL { … FILTER(…) }` is hoisted to a `LeftJoin` filter and is rejected from the easy case).
-5. If the inner triple sits in a `GRAPH ?g` context, `?g` itself is outer-bound.
+5. If the inner triple sits in a `GRAPH ?g` context, `?g` itself is outer-bound (or bindable post-Join — see clause 7).
+
+Two further conditions are checked **post-classification** because they depend on the surrounding lowering context, not just the OPTIONAL's own structure (Copilot review on PR #46, issue #57):
+
+6. The OPTIONAL must not sit inside a UNION branch. Branch-internal `easy_optionals` would be silently dropped by the emit + metadata layers (only top-level `info.pattern.easy_optionals` are consumed), so the BGP would grow by 3 phantom slots that `main.nr` inclusion-checks but which carry no constraint relating them to the OPTIONAL inner triple. Mirrors the pre-existing rejection of NOT EXISTS / MINUS in UNION branches. Caught by the `Union` handler in `transform/src/lower.rs`.
+7. If the easy-OPTIONAL's inner triple references `?g` from a `GRAPH ?g` wrapper that has no real (non-easy-OPTIONAL) BGP slot to bind `?g` from, then a sibling pattern in the surrounding Join must bind `?g`. The `validate_easy_optional_var_bindings` step in `process_query_with_options_and_form` walks every `Term::Variable` in `easy_optionals[*].inner_terms` and rejects when the variable is not bound by `info.bindings` (top-level) nor by every UNION branch's `bindings`. Without this check the unmatched arm becomes a vacuous proof: `verify_non_membership_no_inclusion_check` over an arbitrary-leaf hash including `variables.g` lets the prover claim `?g = ex:not_in_dataset` and prove the inner triple isn't in that graph — true for any unused IRI, hence `?g` is unconstrained against the dataset.
 
 Anything else falls through to the existing `optional_cap`-guarded power-set path. The classifier is conservative: false negatives cost a power-set variant; false positives would corrupt soundness.
 
