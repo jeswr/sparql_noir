@@ -1,5 +1,11 @@
 name: Benchmark
 
+# Informational workflow: collects circuit gate counts / timings.
+# Failures here are NOT a merge gate — branch protection only requires
+# the unit-test workflows. The job is marked `continue-on-error: true`
+# so a partial failure (e.g. a single circuit failing to compile)
+# surfaces in the PR check rollup as "informational" rather than red.
+
 on:
   push:
     branches: [ main ]
@@ -10,8 +16,14 @@ on:
 
 jobs:
   benchmark:
+    # Skip the heavy Noir-installing benchmark on draft PRs (per
+    # workspace convention: draft PR minimal CI). Push-to-main and
+    # ready-for-review PRs still run the full benchmark.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Informational only — see header comment.
+    continue-on-error: true
 
     steps:
     - name: Checkout repository
@@ -27,25 +39,23 @@ jobs:
       run: npm install
 
     - name: Install Noir
-      run: |
-        # Install noirup
-        bash noir_install.sh
-        
-        # Source bashrc and install nargo
-        export PATH="/home/runner/.nargo/bin:$PATH"
-        echo 'export PATH="/home/runner/.nargo/bin:$PATH"' >> ~/.bashrc
-        source ~/.bashrc
-        ~/.noirup/bin/noirup
+      # Pin nargo to the same version range as the JS toolchain pinned in
+      # `package.json` (`@noir-lang/noir_js@1.0.0-beta.17`,
+      # `@noir-lang/noirc_abi@1.0.0-beta.17`). Without an explicit version
+      # the action installs whatever Noir release is "current", which can
+      # silently drift from the ABI the JS bindings expect — flagged in
+      # https://github.com/jeswr/sparql_noir/pull/48#discussion-r3178788417.
+      uses: noir-lang/noirup@v0.1.4
+      with:
+        toolchain: 1.0.0-beta.17
 
     - name: Verify Noir installation
-      run: |
-        export PATH="/home/runner/.nargo/bin:$PATH"
-        nargo --version
+      run: nargo --version
 
     - name: Build project
-      run: |
-        export PATH="/home/runner/.nargo/bin:$PATH"
-        npm run build:tsc
+      # `prebuild:tsc` in package.json runs `bundle:noir-lib` automatically,
+      # so the workflow no longer duplicates that step.
+      run: npm run build:tsc
 
     # Try to build individual circuits to check compatibility
     - name: Check circuit compatibility

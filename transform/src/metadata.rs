@@ -160,6 +160,15 @@ pub(crate) fn build_base_metadata(
     let order_by_json: Vec<serde_json::Value> =
         info.order_by.iter().map(order_key_to_json).collect();
 
+    // Per-constraint metadata for NOT EXISTS / MINUS lowering. The TS
+    // prover uses `bracketLeftIdx` / `bracketRightIdx` to locate the
+    // bracket BGP slots and reads `boundaryCaseDispatch` (one map per
+    // NOT EXISTS constraint) to translate the public
+    // `boundary_cases[i]` integer back to the chosen primitive name
+    // (`lower` / `middle` / `upper`). The actual boundary tag is a
+    // *prove-time* fact -- the prover computes
+    // `cmp(absent_hash, sorted_real_leaf_hashes)` and picks the
+    // matching tag. See `spec/exists.md` Sec.3.3.
     let not_exists_json: Vec<serde_json::Value> = info
         .pattern
         .not_exists
@@ -170,6 +179,36 @@ pub(crate) fn build_base_metadata(
                 "bracketRightIdx": ne.bracket_right_idx,
                 "bracket_left_idx": ne.bracket_left_idx,
                 "bracket_right_idx": ne.bracket_right_idx,
+                // Tag → primitive mapping. Prover supplies the
+                // matching tag at proof time as the public
+                // `boundary_cases[i]` input.
+                "boundaryCaseDispatch": {
+                    "0": "lower",
+                    "1": "middle",
+                    "2": "upper",
+                },
+            })
+        })
+        .collect();
+
+    // Easy-case OPTIONAL collapse metadata (round-3 follow-up — see
+    // `spec/exists.md` §4.1). One entry per collapsed OPTIONAL,
+    // exposing the matched-arm slot and the two bracket slots so the
+    // verifier (and the prover-side glue in `ts.js`) knows where to
+    // place witnesses for each arm.
+    let easy_optionals_json: Vec<serde_json::Value> = info
+        .pattern
+        .easy_optionals
+        .iter()
+        .map(|eo| {
+            serde_json::json!({
+                "id": eo.id,
+                "matchedIdx": eo.matched_idx,
+                "matched_idx": eo.matched_idx,
+                "bracketLeftIdx": eo.bracket_left_idx,
+                "bracketRightIdx": eo.bracket_right_idx,
+                "bracket_left_idx": eo.bracket_left_idx,
+                "bracket_right_idx": eo.bracket_right_idx,
             })
         })
         .collect();
@@ -194,6 +233,8 @@ pub(crate) fn build_base_metadata(
         "offset": info.offset,
         "notExists": not_exists_json,
         "not_exists": not_exists_json,
+        "easyOptionals": easy_optionals_json,
+        "easy_optionals": easy_optionals_json,
     })
 }
 

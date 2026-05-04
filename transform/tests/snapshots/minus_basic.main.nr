@@ -8,13 +8,19 @@ use dep::types::Root;
 use dep::utils::{verify_inclusion, verify_signature};
 use dep::consts::signature::PubKey;
 
-use sparql::{BGP, checkBinding, Variables};
+use dep::types::SentinelLeaf;
+use dep::utils::{verify_low_sentinel_inclusion, verify_high_sentinel_inclusion};
+
+use sparql::{BGP, checkBinding, Variables, BoundaryCases};
 
 fn main(
     public_key: [PubKey; 1],
     roots: [Root; 1],
     bgp: BGP,
-    variables: pub Variables
+    variables: pub Variables,
+    low_sentinel: SentinelLeaf,
+    high_sentinel: SentinelLeaf,
+    boundary_cases: pub BoundaryCases
 ) {
     // Verify signatures on all roots
     for i in 0..roots.len() {
@@ -27,7 +33,13 @@ fn main(
         verify_inclusion(triple, roots[0].value);
     }
 
+    // Sentinel inclusion -- dataset-wide brackets that make the
+    // boundary cases of `verify_non_membership_*_no_inclusion`
+    // witnessable. See `spec/exists.md` Sec.3.3.
+    verify_low_sentinel_inclusion(low_sentinel, roots[0].value);
+    verify_high_sentinel_inclusion(high_sentinel, roots[0].value);
+
     // Check that the bgp patterns satisfy the sparql query and produce the
     // public variables
-    checkBinding(bgp, variables)
+    checkBinding(bgp, variables, low_sentinel, high_sentinel, boundary_cases)
 }

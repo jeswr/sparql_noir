@@ -7,7 +7,6 @@
 //! pure data; no Noir code is emitted here.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
@@ -15,43 +14,61 @@ use spargebra::algebra::{
 };
 use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 
+use crate::parse::QueryForm;
 use crate::{
-    Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, GraphContext,
+    Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, EasyOptional, GraphContext,
     OptionalBlock, OrderDirection, OrderKey, PatternInfo, QueryInfo, Term, TransformOptions,
 };
 
-static OPTIONAL_BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-pub(crate) fn next_optional_id() -> usize {
-    OPTIONAL_BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst)
-}
-
-pub(crate) fn reset_optional_counter() {
-    OPTIONAL_BLOCK_COUNTER.store(0, Ordering::SeqCst);
-}
-
-/// Per-query source of fresh variable / predicate names. Threaded
-/// through the lowering instead of a global atomic so concurrent
-/// `transform_query` callers don't race on counter values (and so the
-/// snapshot test's many-queries-in-one-process pattern is stable).
+/// Per-query source of fresh identifiers. Threaded through the
+/// lowering instead of a global atomic so concurrent
+/// `transform_query` callers don't race on counter values (and so
+/// the snapshot test's many-queries-in-one-process pattern is
+/// stable).
+///
+/// Owns three independent counters:
+/// - `var_counter` for the `__v*` / `__np*` / `__exists_*_*` names
+///   used by path expansion / EXISTS lowering.
+/// - `optional_counter` for OPTIONAL block IDs.
+/// - `bracket_counter` for the `__br_*_*` placeholders the NOT EXISTS
+///   sorted-commitment primitive emits as bracket-leaf BGP slots.
+///
+/// The previous implementation used global `AtomicUsize` counters
+/// reset at the start of each `transform_query`. That race-window
+/// between reset and the first `fetch_add` was the audit's item 9
+/// concern (sparql_noir #37 row, generalised by #42's regression).
 #[derive(Default)]
 pub(crate) struct FreshSource {
-    counter: usize,
+    var_counter: usize,
+    optional_counter: usize,
+    bracket_counter: usize,
 }
 
 impl FreshSource {
-    fn next_id(&mut self) -> usize {
-        let id = self.counter;
-        self.counter += 1;
+    fn next_var_id(&mut self) -> usize {
+        let id = self.var_counter;
+        self.var_counter += 1;
+        id
+    }
+
+    pub(crate) fn next_optional_id(&mut self) -> usize {
+        let id = self.optional_counter;
+        self.optional_counter += 1;
+        id
+    }
+
+    pub(crate) fn next_bracket_id(&mut self) -> usize {
+        let id = self.bracket_counter;
+        self.bracket_counter += 1;
         id
     }
 
     fn fresh_variable(&mut self) -> TermPattern {
-        TermPattern::Variable(Variable::new_unchecked(format!("__v{}", self.next_id())))
+        TermPattern::Variable(Variable::new_unchecked(format!("__v{}", self.next_var_id())))
     }
 
     fn fresh_pred(&mut self) -> Variable {
-        Variable::new_unchecked(format!("__np{}", self.next_id()))
+        Variable::new_unchecked(format!("__np{}", self.next_var_id()))
     }
 
     /// Mint a fresh inner-only EXISTS variable name. The name carries
@@ -60,7 +77,7 @@ impl FreshSource {
     /// blocks (in the same query or across concurrent queries) ever
     /// produce the same `__exists_*` identifier.
     fn fresh_exists_var(&mut self, orig: &str) -> String {
-        format!("__exists_{}_{}", orig, self.next_id())
+        format!("__exists_{}_{}", orig, self.next_var_id())
     }
 }
 
@@ -132,7 +149,18 @@ fn process_patterns_with_graph(
             }
             NamedNodePattern::Variable(v) => {
                 let name = v.as_str().to_string();
-                if !seen_vars.contains(&name) {
+                if seen_vars.contains(&name) {
+                    // The same predicate variable appearing twice
+                    // in a BGP must be unified — without the
+                    // assertion the prover could pick two different
+                    // predicates for the two occurrences (audit item
+                    // 10, sparql_noir #37 row, 2026-05-03). Subject
+                    // and object positions already do this.
+                    info.assertions.push(Assertion(
+                        Term::Variable(name),
+                        Term::Input(i, 1),
+                    ));
+                } else {
                     seen_vars.insert(name.clone());
                     info.bindings.push(Binding {
                         variable: name,
@@ -230,6 +258,16 @@ fn shift_pattern_inputs(info: &mut PatternInfo, offset: usize) {
             }
         }
     }
+    for eo in &mut info.easy_optionals {
+        eo.matched_idx += offset;
+        eo.bracket_left_idx += offset;
+        eo.bracket_right_idx += offset;
+        for term in &mut eo.inner_terms {
+            if let Term::Input(i, j) = term {
+                *term = Term::Input(*i + offset, *j);
+            }
+        }
+    }
 }
 
 /// Compute `Join(left, right)` over two `PatternInfo`s with the
@@ -273,6 +311,8 @@ fn join_pattern_infos(
             merged.optional_blocks.extend(right.optional_blocks);
             merged.not_exists.extend(left.not_exists);
             merged.not_exists.extend(right.not_exists);
+            merged.easy_optionals.extend(left.easy_optionals);
+            merged.easy_optionals.extend(right.easy_optionals);
             Ok(merged)
         }
         (true, false) => {
@@ -322,11 +362,14 @@ fn join_pattern_infos(
                 union_branches: Some(combined),
                 optional_blocks: Vec::new(),
                 not_exists: Vec::new(),
+                easy_optionals: Vec::new(),
             };
             merged.optional_blocks.extend(left.optional_blocks);
             merged.optional_blocks.extend(right.optional_blocks);
             merged.not_exists.extend(left.not_exists);
             merged.not_exists.extend(right.not_exists);
+            merged.easy_optionals.extend(left.easy_optionals);
+            merged.easy_optionals.extend(right.easy_optionals);
             Ok(merged)
         }
     }
@@ -387,6 +430,7 @@ fn distribute_into_branches(
         union_branches: Some(combined),
         optional_blocks: Vec::new(),
         not_exists: Vec::new(),
+        easy_optionals: Vec::new(),
     };
     // Optionals and non-existence obligations are top-level concerns —
     // preserve them outside the branches.
@@ -394,6 +438,8 @@ fn distribute_into_branches(
     merged.optional_blocks.extend(plain.optional_blocks);
     merged.not_exists.extend(with_branches.not_exists);
     merged.not_exists.extend(plain.not_exists);
+    merged.easy_optionals.extend(with_branches.easy_optionals);
+    merged.easy_optionals.extend(plain.easy_optionals);
     merged
 }
 
@@ -724,8 +770,8 @@ fn lower_not_exists_into(
     // the strict-ordering / adjacency check `verify_non_membership`
     // emits in `checkBinding`.
     let outer_n = info.patterns.len();
-    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph));
-    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph));
+    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph, fresh));
+    info.patterns.push(bracket_placeholder_pattern(&inner_pattern.graph, fresh));
 
     info.not_exists.push(crate::ir::NonExistenceConstraint {
         bracket_left_idx: outer_n,
@@ -776,9 +822,21 @@ fn absent_terms_from_pattern(ct: &ContextualizedTriple) -> Result<[Term; 4], Str
 /// hash. We synthesise free-variable placeholders (`?__br_*`) so the
 /// metadata round-trips deterministically; their `__`-prefix excludes
 /// them from projections (`process_query` ~L780).
-fn bracket_placeholder_pattern(graph: &GraphContext) -> ContextualizedTriple {
-    use std::sync::atomic::Ordering as A;
-    let id = BRACKET_COUNTER.fetch_add(1, A::SeqCst);
+///
+/// The `graph` argument fixes the placeholder's graph context. Pass
+/// `GraphContext::Default` when the placeholder must be free across
+/// all graphs (the round-3-follow-up easy-OPTIONAL collapse uses this
+/// mode so the unmatched-arm placeholders can witness ANY valid leaf
+/// regardless of which graph the inner pattern was scoped to —
+/// roborev finding 2026-05-03, second high). Pass the source pattern's
+/// graph context for legacy callers (NOT EXISTS / MINUS — already
+/// constrained to non-`GRAPH`-scoped inner patterns by the round-3
+/// main event).
+fn bracket_placeholder_pattern(
+    graph: &GraphContext,
+    fresh: &mut FreshSource,
+) -> ContextualizedTriple {
+    let id = fresh.next_bracket_id();
     let s = Variable::new_unchecked(format!("__br_s_{}", id));
     let p = Variable::new_unchecked(format!("__br_p_{}", id));
     let o = Variable::new_unchecked(format!("__br_o_{}", id));
@@ -790,16 +848,6 @@ fn bracket_placeholder_pattern(graph: &GraphContext) -> ContextualizedTriple {
         },
         graph: graph.clone(),
     }
-}
-
-/// Per-query bracket placeholder counter. Reset at the start of each
-/// `transform_query` call so snapshot fixtures stay stable across
-/// many-queries-in-one-process runs.
-static BRACKET_COUNTER: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-pub(crate) fn reset_bracket_counter() {
-    BRACKET_COUNTER.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Collect the set of in-scope variable names of a `GraphPattern`.
@@ -1356,6 +1404,94 @@ fn expand_negated_property_set(
     })
 }
 
+/// True iff the right-hand side of a `LeftJoin` (i.e. the inner
+/// pattern of an OPTIONAL block) qualifies for the round-3-follow-up
+/// **easy-case collapse** — single-triple inner with every variable
+/// position outer-bound, no inner FILTER / nested OPTIONAL / UNION /
+/// EXISTS / NOT-EXISTS, no outer LeftJoin filter expression, no
+/// non-default graph context with a free graph variable.
+///
+/// **Soundness rationale.** Under these conditions the inner triple,
+/// after substituting the outer μ, is fully ground — every position is
+/// a concrete term (a constant or a value the outer scope already
+/// witnessed). The OPTIONAL therefore becomes the boolean disjunction
+/// "the ground inner triple is in the dataset OR it is not" with no
+/// inner-only variables to bind, so the projected solution multiset is
+/// identical regardless of which arm the prover witnesses. The emit
+/// layer encodes both arms as `assert(matched | unmatched)` and
+/// soundness reduces to the existing matched-arm inclusion check
+/// (Merkle-binding) and the existing unmatched-arm
+/// `verify_non_membership` primitive (`spec/exists.md` §3.3).
+///
+/// Anything that violates these conditions falls through to the
+/// existing `2^n` power-set generation path — defaulting to the safe
+/// pre-collapse behaviour. The classifier is **conservative**: false
+/// negatives cost a power-set variant; false positives would corrupt
+/// soundness.
+fn optional_inner_is_easy_case(
+    right_info: &PatternInfo,
+    expression: &Option<Expression>,
+    left_info: &PatternInfo,
+) -> bool {
+    // The outer `LeftJoin` may carry a FILTER expression
+    // (`OPTIONAL { … FILTER(…) }` is hoisted there by spargebra). The
+    // easy case forbids it: any non-trivial filter would constrain the
+    // matched arm beyond a simple inclusion check, breaking the
+    // "matched ↔ inclusion of the substituted ground triple"
+    // equivalence the soundness argument relies on.
+    if expression.is_some() {
+        return false;
+    }
+    // No inner FILTER (same reason).
+    if !right_info.filters.is_empty() {
+        return false;
+    }
+    // No UNION / nested OPTIONAL / NOT EXISTS / inner easy-case
+    // OPTIONAL inside the OPTIONAL we're classifying.
+    if right_info.union_branches.is_some()
+        || !right_info.optional_blocks.is_empty()
+        || !right_info.not_exists.is_empty()
+        || !right_info.easy_optionals.is_empty()
+    {
+        return false;
+    }
+    // Single-triple inner. Multi-triple is round-4 (prefix-tree
+    // commitments).
+    if right_info.patterns.len() != 1 {
+        return false;
+    }
+    // Every variable position in the inner triple must be outer-bound.
+    // `right_info.bindings` lists the variables that `process_patterns`
+    // saw as fresh-to-this-BGP — i.e. exactly the variables in the
+    // inner triple (they appear once each). For the easy case to fire,
+    // every such variable must already be bound by the outer μ
+    // (`left_info.bindings`).
+    let outer_bound: std::collections::BTreeSet<&str> = left_info
+        .bindings
+        .iter()
+        .map(|b| b.variable.as_str())
+        .collect();
+    for binding in &right_info.bindings {
+        if !outer_bound.contains(binding.variable.as_str()) {
+            return false;
+        }
+    }
+    // No graph variable that isn't outer-bound either. The graph
+    // context lives on the `ContextualizedTriple` and is folded into
+    // the `inner_terms` array; if it's a `Variable(name)` that the
+    // outer hasn't seen, we'd be substituting a free variable. The
+    // outer-bound check above covers `right_info.bindings`, but a
+    // graph variable doesn't go through that path — we have to check
+    // the pattern's graph context directly.
+    let pattern = &right_info.patterns[0];
+    if let GraphContext::Variable(name) = &pattern.graph {
+        if !outer_bound.contains(name.as_str()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Helper to adjust input indices in an optional block by an offset
 fn adjust_optional_block_indices(block: &mut OptionalBlock, offset: usize) {
     for binding in &mut block.bindings {
@@ -1543,7 +1679,94 @@ fn process_graph_pattern_inner(
 
             let offset = left_info.patterns.len();
 
-            let optional_id = next_optional_id();
+            // Tiered partial OPTIONAL collapse — easy case
+            // (round 3 follow-up; see `spec/exists.md` §4.1).
+            //
+            // The easy case is: a single-triple inner pattern with
+            // every variable position bound by the outer μ. After
+            // substitution the inner triple is fully ground, so the
+            // OPTIONAL is a boolean disjunction — the matched arm
+            // proves the substituted triple is in the dataset; the
+            // unmatched arm proves it is not. Both arms preserve the
+            // outer row's projected bindings unchanged (no inner-only
+            // variables to bind).
+            //
+            // When the easy case fires we lower the OPTIONAL to a
+            // single `EasyOptional` and skip the power-set path; the
+            // `optional_circuits[]` array is unaffected, so multiple
+            // easy-case OPTIONALs in the same query do *not*
+            // contribute to the `2^n` variant explosion.
+            if optional_inner_is_easy_case(&right_info, expression, &left_info) {
+                let inner_pattern = &right_info.patterns[0];
+                let inner_terms = absent_terms_from_pattern(inner_pattern)?;
+
+                // Three appended BGP slots: a free placeholder for
+                // the matched arm followed by the two unmatched-arm
+                // bracket leaves. All three are inclusion-checked by
+                // `main.nr` regardless of which arm the prover
+                // actually witnesses — soundness lives in the
+                // `assert(matched | unmatched)` disjunction the emit
+                // layer produces.
+                //
+                // **All three slots are free placeholders** (not the
+                // concrete inner triple). This is load-bearing: the
+                // prover-side binding resolver iterates every
+                // `inputPatterns[i]` and matches it against the
+                // dataset. If we left a concrete pattern at the
+                // matched slot, the resolver would fail to produce a
+                // witness when the inner triple is *not* in the
+                // dataset (the unmatched case) — the very case the
+                // collapse is supposed to support. Free placeholders
+                // let the prover pick any valid leaf for each slot;
+                // the matched-arm position assertions in
+                // `checkBinding` then evaluate to true iff the
+                // prover happened to bind the matched slot to the
+                // substituted ground inner triple, which is only
+                // possible when that triple really is in the dataset
+                // — Merkle binding does the soundness work.
+                //
+                // Roborev finding 2026-05-03 (high) on the first
+                // round-3-follow-up commit: "easy-OPTIONAL slots
+                // appear as required input patterns".
+                let matched_idx = offset;
+                let bracket_left_idx = offset + 1;
+                let bracket_right_idx = offset + 2;
+
+                // **Graph context is also free** — `GraphContext::Default`
+                // serialises as `DefaultGraph` in metadata, which the
+                // prover treats as a wildcard (alongside `Variable`-typed
+                // graph terms). Passing through `inner_pattern.graph`
+                // would, for `OPTIONAL { GRAPH ex:g { ... } }` blocks,
+                // pin the placeholder to graph `ex:g` and prevent the
+                // unmatched arm from witnessing any leaf when `ex:g`
+                // happens to be empty (roborev finding 2026-05-03,
+                // second high — same family as the first finding,
+                // generalised to the graph dimension). The matched-arm
+                // assertions in `checkBinding` still pin
+                // `bgp[matched_idx].terms[3]` to the substituted graph
+                // term, so the matched arm only succeeds when the
+                // prover actually witnessed a leaf in the right graph.
+                left_info
+                    .patterns
+                    .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
+                left_info
+                    .patterns
+                    .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
+                left_info
+                    .patterns
+                    .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
+
+                left_info.easy_optionals.push(EasyOptional {
+                    id: fresh.next_optional_id(),
+                    matched_idx,
+                    bracket_left_idx,
+                    bracket_right_idx,
+                    inner_terms,
+                });
+                return Ok(left_info);
+            }
+
+            let optional_id = fresh.next_optional_id();
 
             let adjusted_bindings: Vec<Binding> = right_info
                 .bindings
@@ -1657,6 +1880,7 @@ fn process_graph_pattern_inner(
                 union_branches: Some(branches),
                 optional_blocks: Vec::new(),
                 not_exists: Vec::new(),
+                easy_optionals: Vec::new(),
             })
         }
 
@@ -1668,13 +1892,67 @@ fn process_graph_pattern_inner(
                 NamedNodePattern::Variable(v) => GraphContext::Variable(v.as_str().to_string()),
             };
 
-            for pattern in &mut info.patterns {
-                pattern.graph = graph_context.clone();
+            // Easy-OPTIONAL synthetic slots (`matched_idx`,
+            // `bracket_left_idx`, `bracket_right_idx`) must remain
+            // wildcard in the graph dimension so the unmatched arm
+            // can witness any valid leaf. The matched-arm assertions
+            // in `checkBinding` already pin
+            // `bgp[matched_idx].terms[3]` to the substituted graph
+            // term, so the matched arm only succeeds when the
+            // prover witnessed a leaf in the right graph (and the
+            // bracket slots in the unmatched arm don't constrain the
+            // graph). Roborev finding 2026-05-03 (third high) — an
+            // enclosing `GRAPH ex:g { ... OPTIONAL { ... } }` was
+            // overwriting the placeholder graph back to `ex:g`,
+            // reintroducing the witness-failure bug from finding 2.
+            let easy_slot_indices: std::collections::BTreeSet<usize> = info
+                .easy_optionals
+                .iter()
+                .flat_map(|eo| {
+                    [eo.matched_idx, eo.bracket_left_idx, eo.bracket_right_idx]
+                })
+                .collect();
+
+            for (i, pattern) in info.patterns.iter_mut().enumerate() {
+                if !easy_slot_indices.contains(&i) {
+                    pattern.graph = graph_context.clone();
+                }
+            }
+
+            // The easy-OPTIONAL's `inner_terms[3]` (the graph
+            // position of the substituted ground inner triple) was
+            // computed against the inner pattern's own graph context
+            // — `GraphContext::Default` if the OPTIONAL inherits
+            // graph scope from this enclosing GRAPH. Rewrite it to
+            // the effective graph term so the matched-arm assertion
+            // pins to `ex:g` (or the bound variable), not to the
+            // empty-string IRI used for the default graph.
+            let effective_graph_term = match name {
+                NamedNodePattern::NamedNode(nn) => {
+                    Term::Static(GroundTerm::NamedNode(nn.clone()))
+                }
+                NamedNodePattern::Variable(v) => Term::Variable(v.as_str().to_string()),
+            };
+            for eo in &mut info.easy_optionals {
+                // Only rewrite the graph slot if the inner pattern
+                // saw the default graph (no inner GRAPH wrapper); a
+                // pre-existing inner GRAPH already substituted a
+                // concrete term.
+                let is_default = matches!(
+                    &eo.inner_terms[3],
+                    Term::Static(GroundTerm::NamedNode(nn)) if nn.as_str().is_empty()
+                );
+                if is_default {
+                    eo.inner_terms[3] = effective_graph_term.clone();
+                }
             }
 
             match name {
                 NamedNodePattern::NamedNode(nn) => {
                     for i in 0..info.patterns.len() {
+                        if easy_slot_indices.contains(&i) {
+                            continue;
+                        }
                         info.assertions.push(Assertion(
                             Term::Static(GroundTerm::NamedNode(nn.clone())),
                             Term::Input(i, 3),
@@ -1683,12 +1961,34 @@ fn process_graph_pattern_inner(
                 }
                 NamedNodePattern::Variable(v) => {
                     let var_name = v.as_str().to_string();
-                    if !info.patterns.is_empty() {
+                    // Find the first non-easy-slot to bind the graph
+                    // variable from. If every slot is an easy-OPTIONAL
+                    // slot (degenerate: a query whose entire WHERE is
+                    // `GRAPH ?g { OPTIONAL { ground } }`), the
+                    // easy-OPTIONAL's `inner_terms[3]` was already
+                    // rewritten to `Term::Variable(?g)` by the loop
+                    // above. We do **not** error here because a sibling
+                    // pattern outside this `GRAPH` (e.g.
+                    // `?x ex:g ?g . GRAPH ?g { OPTIONAL { … } }`) may
+                    // bind `?g` later in the surrounding Join. The
+                    // post-Join `process_query` layer is the right
+                    // place to validate that `?g` ends up bound; if
+                    // not, noir codegen produces a `variables.g`
+                    // reference that fails to compile (loud failure,
+                    // not silent soundness corruption). Roborev
+                    // finding 2026-05-03 (fourth pass, medium):
+                    // earlier rejection was too aggressive.
+                    let first_real = (0..info.patterns.len())
+                        .find(|i| !easy_slot_indices.contains(i));
+                    if let Some(first) = first_real {
                         info.bindings.push(Binding {
                             variable: var_name.clone(),
-                            term: Term::Input(0, 3),
+                            term: Term::Input(first, 3),
                         });
-                        for i in 1..info.patterns.len() {
+                        for i in (first + 1)..info.patterns.len() {
+                            if easy_slot_indices.contains(&i) {
+                                continue;
+                            }
                             info.assertions.push(Assertion(
                                 Term::Variable(var_name.clone()),
                                 Term::Input(i, 3),
@@ -1817,7 +2117,7 @@ fn aggregate_expression_to_kind(
 /// Slice { inner: Project { inner: OrderBy { inner: Extend* {
 ///     Group { inner: <pattern>, aggregates: [...] } } } } }
 /// ```
-fn strip_post_processing(gp: &GraphPattern) -> (&GraphPattern, PostProcessing) {
+fn strip_post_processing(gp: &GraphPattern) -> Result<(&GraphPattern, PostProcessing), String> {
     let mut post = PostProcessing::empty();
     let mut current = gp;
     loop {
@@ -1839,19 +2139,22 @@ fn strip_post_processing(gp: &GraphPattern) -> (&GraphPattern, PostProcessing) {
                 current = inner;
             }
             // Top-level ORDER BY is rare (it's normally inside the
-            // Project), but unwrap it defensively.
+            // Project), but unwrap it defensively. Propagate the
+            // error rather than silently dropping unsupported keys —
+            // an unsupported expression here would otherwise vanish
+            // and the verifier would receive an unsorted disclosed
+            // multiset (audit item 5, sparql_noir #39 row).
             GraphPattern::OrderBy { inner, expression } => {
                 for e in expression {
-                    if let Ok(key) = order_expression_to_key(e) {
-                        post.order_by.push(key);
-                    }
+                    let key = order_expression_to_key(e)?;
+                    post.order_by.push(key);
                 }
                 current = inner;
             }
             _ => break,
         }
     }
-    (current, post)
+    Ok((current, post))
 }
 
 /// Does the eventual leaf of this pattern (after stripping
@@ -1918,14 +2221,15 @@ fn unwrap_project_inner<'a>(
 
 #[cfg(test)]
 pub(crate) fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
-    process_query_with_options(gp, &TransformOptions::default())
+    process_query_with_options_and_form(gp, &TransformOptions::default(), QueryForm::Select)
 }
 
-pub(crate) fn process_query_with_options(
+pub(crate) fn process_query_with_options_and_form(
     gp: &GraphPattern,
     options: &TransformOptions,
+    form: QueryForm,
 ) -> Result<QueryInfo, String> {
-    let (inner, mut post) = strip_post_processing(gp);
+    let (inner, mut post) = strip_post_processing(gp)?;
 
     match inner {
         GraphPattern::Project { inner, variables } => {
@@ -1972,7 +2276,7 @@ pub(crate) fn process_query_with_options(
             // circuit bindings. Replace each aggregate output in the
             // projected variable list with its source variable, then
             // dedupe while preserving the first-seen order.
-            let circuit_vars = if aggregates.is_empty() {
+            let mut circuit_vars: Vec<String> = if aggregates.is_empty() {
                 vars
             } else {
                 let agg_outputs: std::collections::HashSet<String> =
@@ -2014,6 +2318,45 @@ pub(crate) fn process_query_with_options(
                 }
             };
 
+            // ORDER BY keys must be disclosed too — otherwise the
+            // verifier can't sort the multiset (audit item 3,
+            // sparql_noir #39 row). Append any order-by variable not
+            // already in `circuit_vars`, preserving first-seen order
+            // and skipping `__`-prefixed witnesses. The `already`
+            // set is mutated as we go so a query that re-uses the
+            // same key in two ORDER BY positions doesn't push the
+            // variable twice.
+            let mut already: std::collections::HashSet<String> =
+                circuit_vars.iter().cloned().collect();
+            for key in &post.order_by {
+                if already.contains(&key.variable) || key.variable.starts_with("__") {
+                    continue;
+                }
+                // Reject ORDER BY references to a non-existent variable.
+                let bound = pattern
+                    .bindings
+                    .iter()
+                    .any(|b| b.variable == key.variable);
+                let in_branches = pattern
+                    .union_branches
+                    .as_ref()
+                    .map(|bs| {
+                        bs.iter()
+                            .any(|br| br.bindings.iter().any(|b| b.variable == key.variable))
+                    })
+                    .unwrap_or(false);
+                if !bound && !in_branches {
+                    return Err(format!(
+                        "ORDER BY key ?{} is not bound by the query body — \
+                         the verifier cannot sort the disclosed multiset by \
+                         an unknown variable",
+                        key.variable
+                    ));
+                }
+                already.insert(key.variable.clone());
+                circuit_vars.push(key.variable.clone());
+            }
+
             Ok(QueryInfo {
                 variables: circuit_vars,
                 pattern,
@@ -2023,24 +2366,36 @@ pub(crate) fn process_query_with_options(
                 offset: post.offset,
             })
         }
-        // ASK queries do not have PROJECT — project all bound
-        // variables, except those with `__`-prefix (blank-node
-        // internals and `__exists_*` inner-only EXISTS witnesses,
-        // which must never appear in the disclosed projection).
+        // ASK queries return a boolean — they do NOT project bound
+        // variables. The previous behaviour ("auto-project all bound
+        // vars when no Project is present") leaked variable bindings
+        // for an ASK that should only disclose true/false (audit
+        // item 8, sparql_noir #37 row).
+        //
+        // Other formless paths (e.g. CONSTRUCT/DESCRIBE without a
+        // top-level Project, which spargebra produces for some shapes)
+        // continue to use the auto-project fallback so we don't
+        // regress those at the same time. The form is threaded from
+        // `parse::query_form` so we can distinguish.
         _ => {
             let pattern = process_graph_pattern_with_options(inner, options)?;
-            // Filter out `__`-prefix names: blank-node internals and
-            // `__exists_*` inner-only EXISTS witnesses must never
-            // appear in the disclosed projection (round 3 spike;
-            // mirrors the SELECT-with-aggregates fallback).
-            let mut vars: Vec<String> = pattern
-                .bindings
-                .iter()
-                .map(|b| b.variable.clone())
-                .filter(|v| !v.starts_with("__"))
-                .collect();
-            vars.sort();
-            vars.dedup();
+            let vars: Vec<String> = match form {
+                QueryForm::Ask => Vec::new(),
+                _ => {
+                    // Filter out `__`-prefix names: blank-node internals
+                    // and `__exists_*` inner-only EXISTS witnesses must
+                    // never appear in the disclosed projection.
+                    let mut all: Vec<String> = pattern
+                        .bindings
+                        .iter()
+                        .map(|b| b.variable.clone())
+                        .filter(|v| !v.starts_with("__"))
+                        .collect();
+                    all.sort();
+                    all.dedup();
+                    all
+                }
+            };
             Ok(QueryInfo {
                 variables: vars,
                 pattern,

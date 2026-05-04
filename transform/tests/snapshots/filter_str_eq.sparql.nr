@@ -11,7 +11,6 @@ pub(crate) struct Variables {
 pub(crate) type Hidden = [Field; 1];
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables, hidden: Hidden) {
   assert(variables.s == bgp[0].terms[0]);
-  assert(bgp[0].terms[2] == bgp[0].terms[2]);
   assert(consts::hash2([0, consts::encode_string("http://example.org/label")]) == bgp[0].terms[1]);
   assert(hidden[0] == consts::encode_string("hi"));
 }

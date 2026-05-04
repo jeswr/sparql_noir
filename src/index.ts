@@ -93,6 +93,17 @@ export { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
 export { generateProofs } from './scripts/prove.js';
 export { verifyProofs } from './scripts/verify.js';
 
+// Boundary-case witness generation for NOT EXISTS / MINUS dispatch.
+// See `spec/exists.md` Sec.3.3.
+export {
+  computeBoundaryCase,
+  findMiddleBracketIndices,
+  BOUNDARY_CASE_LOWER,
+  BOUNDARY_CASE_MIDDLE,
+  BOUNDARY_CASE_UPPER,
+} from './boundaryCase.js';
+export type { BoundaryCaseTag } from './boundaryCase.js';
+
 // Verifier-side post-processing for aggregates / ORDER BY / LIMIT
 // (disclose-and-verify pattern, SPARQL_ROADMAP.md §8.6 Q6 decision).
 export { applyPostProcessing } from './aggregates.js';

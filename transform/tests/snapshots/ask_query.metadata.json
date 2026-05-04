@@ -1,5 +1,7 @@
 {
   "aggregates": [],
+  "easyOptionals": [],
+  "easy_optionals": [],
   "hiddenInputs": [],
   "hidden_inputs": [],
   "inputPatterns": [
@@ -53,8 +55,5 @@
   "total_patterns": 1,
   "unionBranches": [],
   "union_branches": [],
-  "variables": [
-    "o",
-    "s"
-  ]
+  "variables": []
 }
