@@ -170,6 +170,17 @@ pub fn encode_string<let N: u32>(string: str<N>) -> Field {
 /// entirely; the `verify_low_sentinel_inclusion` /
 /// `verify_high_sentinel_inclusion` primitives skip the
 /// `hash4(terms) == path[0]` step.
+///
+/// **BREAKING -- root rotation.** Inserting sentinels changes the
+/// committed Merkle root for every dataset; signatures and inclusion
+/// paths produced by the pre-sentinel `merkle()` (every release prior
+/// to the round-3 follow-up) are no longer valid against this
+/// circuit. Datasets must be re-signed via `src/scripts/sign.ts` (the
+/// public `sign()` API now calls the sentinel-aware `merkle()`).
+/// Stored signatures need to be regenerated at the same time as
+/// upgrading the prover/verifier sub-repo; mixing pre- and
+/// post-sentinel artefacts will fail the inclusion check. There is no
+/// in-circuit migration path -- this is a one-time corpus rotation.
 pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M, N> {
     // Capacity bound. Level-0 of the tree stores `N + 2` populated
     // leaves (sentinels at indices `0` and `N + 1` plus the `N` real
@@ -450,7 +461,10 @@ fn test_non_membership_low_boundary() {
     for i in 0..3 {
         let mut idx: u64 = 0;
         let mut bit: u64 = 1;
-        for j in 0..10 {
+        // Inner-leaf direction has `MERKLE_DEPTH - 1` siblings (the leaf
+        // sits below the bottom internal level). Iterate by the constant
+        // so the test stays correct if `MERKLE_DEPTH` is retuned.
+        for j in 0..(consts::MERKLE_DEPTH - 1) {
             if info.direction[i][j] == 1 {
                 idx += bit;
             }
@@ -500,7 +514,8 @@ fn test_non_membership_high_boundary() {
     for i in 0..3 {
         let mut idx: u64 = 0;
         let mut bit: u64 = 1;
-        for j in 0..10 {
+        // Same MERKLE_DEPTH-driven loop bound as the low-boundary test above.
+        for j in 0..(consts::MERKLE_DEPTH - 1) {
             if info.direction[i][j] == 1 {
                 idx += bit;
             }
@@ -637,8 +652,13 @@ pub fn verify_non_membership_no_inclusion(
 /// 2. `right` is a valid leaf of the same tree.
 /// 3. `LOW_SENTINEL_HASH < absent_hash < right.path[0]` -- strict
 ///    ordering. Since `LOW_SENTINEL_HASH = 0`, the left-hand strict
-///    inequality reduces to `absent_hash != 0`, which holds for every
-///    `consts::hash4(triple)` under Pedersen-hash collision-resistance.
+///    inequality reduces to `absent_hash != 0`. This is a preimage
+///    event (a specific output value), not a collision, so it is
+///    bounded by Pedersen-hash preimage-resistance: the probability of
+///    any specific `consts::hash4(triple)` equalling `0` is `<= 1/p`
+///    under the random-oracle model (BN254 has `p ~= 2^254`, so `2^-254`
+///    -- negligible). A real-world preimage would itself be a
+///    publishable cryptographic finding; rotate the sentinel constants.
 /// 4. `right`'s reconstructed sorted index is `1` (adjacency to the
 ///    sentinel at index 0).
 ///
@@ -669,9 +689,10 @@ pub fn verify_non_membership_low_sentinel_no_inclusion(
 ) {
     // Ordering: LOW_SENTINEL_HASH < absent < right (strict). The
     // left-side strict comparison ensures the absent hash is not the
-    // sentinel itself (a real triple cannot have hash `0` under
-    // Pedersen-hash collision-resistance, so this is also implicitly
-    // a non-collision check).
+    // sentinel itself. A real triple having `hash4(...) == 0` is a
+    // preimage event (not a collision); under Pedersen-hash preimage-
+    // resistance the probability is `<= 1/p ~= 2^-254`, so this is
+    // negligible rather than impossible.
     assert_eq(low.path[0], consts::LOW_SENTINEL_HASH, "non-membership: low sentinel hash mismatch");
     assert(consts::LOW_SENTINEL_HASH.lt(absent_hash), "non-membership: absent hash <= low sentinel");
     assert(absent_hash.lt(right.path[0]), "non-membership: absent hash >= right leaf hash");
@@ -707,9 +728,12 @@ pub fn verify_non_membership_low_sentinel_no_inclusion(
 ///    inclusion path leads to `root_value`).
 /// 3. `left.path[0] < absent_hash < HIGH_SENTINEL_HASH` -- strict
 ///    ordering. Since `HIGH_SENTINEL_HASH = p - 1`, the right-hand
-///    strict inequality reduces to `absent_hash != p - 1`, which
-///    holds for every `consts::hash4(triple)` under Pedersen-hash
-///    collision-resistance.
+///    strict inequality reduces to `absent_hash != p - 1`. This is a
+///    preimage event (a specific output value), not a collision, so
+///    it is bounded by Pedersen-hash preimage-resistance: the
+///    probability of any specific `consts::hash4(triple)` equalling
+///    `p - 1` is `<= 1/p` under the random-oracle model
+///    (BN254 has `p ~= 2^254`, so `2^-254` -- negligible).
 /// 4. The high sentinel's reconstructed sorted index equals
 ///    `left_idx + 1` (adjacency).
 ///

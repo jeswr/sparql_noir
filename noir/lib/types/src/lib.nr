@@ -13,9 +13,14 @@ pub struct Triple {
 /// `consts::LOW_SENTINEL_HASH = 0`, and a high sentinel at sorted
 /// index `N + 1` with leaf-hash `consts::HIGH_SENTINEL_HASH = -1`
 /// (= the BN254 prime minus one). They make every `absent_hash`
-/// witnessable by `verify_non_membership_*` -- including ones that
-/// fall below the smallest real leaf or above the largest. See
-/// `spec/exists.md` Sec.3.3.
+/// **strictly between** the sentinels (i.e. `0 < absent_hash < p - 1`)
+/// witnessable by `verify_non_membership_*` -- including hashes that
+/// fall below the smallest real leaf or above the largest. The strict
+/// `<` bracketing means an `absent_hash` equal to a sentinel value
+/// itself is unwitnessable, but that requires the verifier to supply
+/// `absent_hash` in `{0, p - 1}`; for `absent_hash = consts::hash4(...)`
+/// this is a preimage event with probability `<= 1/p ~= 2^-254` and is
+/// therefore negligible. See `spec/exists.md` Sec.3.3.
 ///
 /// Sentinels have **no `terms`** (the leaf hash is fixed by ABI, not
 /// derived from a quad), so the standard `verify_inclusion` step
