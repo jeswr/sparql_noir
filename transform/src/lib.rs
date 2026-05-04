@@ -89,6 +89,16 @@ pub const DEFAULT_OPTIONAL_CAP: usize = 4;
 /// [`TransformOptions::path_segment_max`].
 pub const DEFAULT_PATH_SEGMENT_MAX: usize = 4;
 
+/// Default upper bound on the bounded byte-array term witness
+/// (`STRING_LEN_MAX`). Each `TermWitness` carries `[u8; STRING_LEN_MAX]`
+/// plus a `length: u32`; round-2 string operators bind these locally
+/// at use-sites (see `spec/encoding.md` §6). The Rust transform stores
+/// the value so callers / verifiers can sanity-check that the
+/// generated circuit and the prover-side encoder agree on the bound;
+/// `STRING_LEN_MAX` itself lives in `noir/lib/consts/src/lib.nr` and is
+/// substituted at setup time.
+pub const DEFAULT_STRING_LEN_MAX: usize = 64;
+
 /// Options for the transform operation
 #[derive(Clone, Debug)]
 pub struct TransformOptions {
@@ -100,6 +110,13 @@ pub struct TransformOptions {
     /// Maximum unrolled depth for `+` / `*` Kleene paths. Defaults to
     /// [`DEFAULT_PATH_SEGMENT_MAX`].
     pub path_segment_max: usize,
+    /// Upper bound on the bounded byte-array witness per term. The
+    /// transform itself doesn't currently emit `bytes`-touching code
+    /// (round-2 work) — this option is propagated into metadata so
+    /// callers can confirm the generated circuit's `STRING_LEN_MAX`
+    /// matches their prover-side encoder. Defaults to
+    /// [`DEFAULT_STRING_LEN_MAX`] (64). See `spec/encoding.md` §6.5.
+    pub string_len_max: usize,
 }
 
 impl Default for TransformOptions {
@@ -108,6 +125,7 @@ impl Default for TransformOptions {
             skip_signing: false,
             optional_cap: DEFAULT_OPTIONAL_CAP,
             path_segment_max: DEFAULT_PATH_SEGMENT_MAX,
+            string_len_max: DEFAULT_STRING_LEN_MAX,
         }
     }
 }
@@ -173,7 +191,13 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     });
     let nargo_toml = build_nargo_toml(options.skip_signing, needs_ebv, needs_xpath);
 
-    let metadata = build_base_metadata(&info, &all_optionals, options.skip_signing, &base_hidden);
+    let metadata = build_base_metadata(
+        &info,
+        &all_optionals,
+        options.skip_signing,
+        &base_hidden,
+        options.string_len_max,
+    );
 
     // Power-set of OPTIONAL bitmasks, minus the all-matched case (that's
     // the base circuit). For n=0 this loop runs zero times.
@@ -199,6 +223,7 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
                 &matched_indices,
                 options.skip_signing,
                 &circuit_hidden,
+                options.string_len_max,
             );
 
             optional_circuits.push(OptionalCircuit {

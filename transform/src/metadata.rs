@@ -115,6 +115,7 @@ pub(crate) fn build_base_metadata(
     all_optionals: &[OptionalBlock],
     skip_signing: bool,
     base_hidden: &[serde_json::Value],
+    string_len_max: usize,
 ) -> serde_json::Value {
     let total_patterns: usize = info.pattern.patterns.len()
         + all_optionals.iter().map(|o| o.patterns.len()).sum::<usize>();
@@ -194,6 +195,11 @@ pub(crate) fn build_base_metadata(
         "offset": info.offset,
         "notExists": not_exists_json,
         "not_exists": not_exists_json,
+        // Bounded byte-array witness configuration (`spec/encoding.md` §6.5).
+        // Both spellings emitted for the camelCase / snake_case parity the
+        // rest of this document follows.
+        "stringLenMax": string_len_max,
+        "string_len_max": string_len_max,
     })
 }
 
@@ -204,6 +210,7 @@ pub(crate) fn build_variant_metadata(
     matched_indices: &[usize],
     skip_signing: bool,
     circuit_hidden: &[serde_json::Value],
+    string_len_max: usize,
 ) -> serde_json::Value {
     let mut optional_only_vars: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -262,5 +269,7 @@ pub(crate) fn build_variant_metadata(
         "order_by": order_by_json,
         "limit": info.limit,
         "offset": info.offset,
+        "stringLenMax": string_len_max,
+        "string_len_max": string_len_max,
     })
 }

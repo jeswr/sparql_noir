@@ -324,6 +324,63 @@ SELECT ?s ?a ?b ?c ?d ?e WHERE {
     transform_with_opts(q, opts).expect("should succeed with raised cap");
 }
 
+/// `STRING_LEN_MAX` defaults to 64 and is propagated into metadata.
+/// Regression for `spec/encoding.md` §6.5.
+#[test]
+fn string_len_max_defaults_to_64() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:knows ?o . }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert_eq!(
+        r.metadata.get("stringLenMax").and_then(|v| v.as_u64()),
+        Some(64),
+        "default stringLenMax must be 64"
+    );
+    assert_eq!(
+        r.metadata.get("string_len_max").and_then(|v| v.as_u64()),
+        Some(64),
+        "snake_case mirror must also be 64"
+    );
+}
+
+/// Custom `string_len_max` is reflected in metadata. Callers picking
+/// (e.g.) 128 for wider IRI coverage must see the bound surfaced.
+#[test]
+fn string_len_max_is_configurable() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { ?s ex:knows ?o . }";
+    let opts = TransformOptions {
+        string_len_max: 128,
+        ..TransformOptions::default()
+    };
+    let r = transform_with_opts(q, opts).expect("transform succeeds with custom bound");
+    assert_eq!(
+        r.metadata.get("stringLenMax").and_then(|v| v.as_u64()),
+        Some(128),
+        "custom stringLenMax must propagate to metadata"
+    );
+}
+
+/// The bounded byte-array witness redesign means BGP equality reads the
+/// `.hash` projection of each `TermWitness`. Regression for the design
+/// recorded in `spec/encoding.md` §6.6.
+#[test]
+fn bgp_path_uses_term_witness_hash_projection() {
+    let q = "PREFIX ex: <http://example.org/>\nSELECT ?s ?p ?o WHERE { ?s ?p ?o . }";
+    let r = transform_query(q).expect("transform succeeds");
+    // Each variable assertion must read `.hash` not the bare term.
+    assert!(
+        r.sparql_nr.contains("variables.s == bgp[0].terms[0].hash"),
+        "BGP equality must project through `.hash`:\n{}",
+        r.sparql_nr
+    );
+    // Sanity: the bare-Field form (pre-redesign) must not appear.
+    assert!(
+        !r.sparql_nr.contains("variables.s == bgp[0].terms[0]\n")
+            && !r.sparql_nr.contains("variables.s == bgp[0].terms[0];"),
+        "no bare `terms[k]` reads should remain:\n{}",
+        r.sparql_nr
+    );
+}
+
 /// `+` paths past `path_segment_max` must still work — but past the
 /// configured bound only the first `max` depths are explored.
 #[test]
@@ -411,7 +468,7 @@ fn union_path_join_with_sibling_keeps_all_constraints() {
             .and_then(|v| v.as_str())
             .expect("predicate IRI");
         let needle = format!(
-            "encode_string(\"{}\")]) == bgp[{}].terms[1]",
+            "encode_string(\"{}\")]) == bgp[{}].terms[1].hash",
             predicate_iri, i
         );
         assert!(
@@ -752,7 +809,7 @@ fn exists_grounded_lowers_to_two_triple_bgp() {
     // `?s ex:type ex:Person`.
     assert!(result.sparql_nr.contains("type BGP = [Triple; 2]"));
     // The inner subject unifies with the outer-bound variable `?s`.
-    assert!(result.sparql_nr.contains("variables.s == bgp[1].terms[0]"));
+    assert!(result.sparql_nr.contains("variables.s == bgp[1].terms[0].hash"));
     // Inner predicate / object land as constant assertions.
     assert!(result.sparql_nr.contains("http://example.org/type"));
     assert!(result.sparql_nr.contains("http://example.org/Person"));

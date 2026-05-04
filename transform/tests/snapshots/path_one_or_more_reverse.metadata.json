@@ -152,6 +152,8 @@
   "orderBy": [],
   "order_by": [],
   "skip_signing": false,
+  "stringLenMax": 64,
+  "string_len_max": 64,
   "total_patterns": 4,
   "unionBranches": [
     [

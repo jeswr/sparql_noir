@@ -39,7 +39,17 @@ pub fn verify_inclusion(triple: Triple, root_value: Field) {
     }
     // TODO: Cleanup - we shouldn't need this check
     assert_eq(current, root_value, "Path does not lead to the correct root");
-    assert_eq(consts::hash4(triple.terms), triple.path[0], "Triple does not hash to the root");
+    // The Merkle commitment is over the term-hash quartet, not over the
+    // bounded byte witness — see `spec/encoding.md` §6.3. The `bytes` /
+    // `length` fields of each `TermWitness` are advisory at the Triple
+    // level; round-2 string operators bind them locally at use-sites.
+    let term_hashes: [Field; 4] = [
+        triple.terms[0].hash,
+        triple.terms[1].hash,
+        triple.terms[2].hash,
+        triple.terms[3].hash,
+    ];
+    assert_eq(consts::hash4(term_hashes), triple.path[0], "Triple does not hash to the root");
 }
 
 pub fn encode_string<let N: u32>(string: str<N>) -> Field {
@@ -311,4 +321,107 @@ pub fn verify_non_membership_no_inclusion(
         left_idx + 1,
         "non-membership: right leaf is not adjacent to left leaf",
     );
+}
+
+// =============================================================================
+// Bounded byte-array witness -- round-1 plumbing tests
+// =============================================================================
+// These tests live alongside the inclusion / non-membership tests because
+// they exercise the same `Triple` shape under the new
+// `terms: [TermWitness; 4]` layout. Round 2 will add string-operator
+// tests in `noir/lib/xpath`; round 1 only demonstrates that the BGP
+// path still works and the `bytes` field is reachable.
+
+use dep::types::TermWitness;
+
+/// Helper: build a `Triple` whose hashes match the sorted-tree leaf at
+/// position `i` and whose byte witnesses are the supplied `bytes` /
+/// `length` values. Round-1 contract (see `spec/encoding.md` sec.6.3): the
+/// byte witness is advisory -- `verify_inclusion` only binds the `hash`
+/// field to the Merkle root.
+fn make_triple_with_bytes(
+    info: MerkleInfo<11, 3>,
+    i: u32,
+    bytes: [[u8; consts::STRING_LEN_MAX]; 4],
+    length: [u32; 4],
+) -> Triple {
+    let raw = info.triples[i];
+    let mut path: [Field; 11] = [0; 11];
+    for j in 0..11 {
+        path[j] = info.paths[i][j];
+    }
+    let mut directions: [u8; 10] = [0; 10];
+    for j in 0..10 {
+        directions[j] = info.direction[i][j];
+    }
+    let terms: [TermWitness; 4] = [
+        TermWitness { hash: raw[0], bytes: bytes[0], length: length[0] },
+        TermWitness { hash: raw[1], bytes: bytes[1], length: length[1] },
+        TermWitness { hash: raw[2], bytes: bytes[2], length: length[2] },
+        TermWitness { hash: raw[3], bytes: bytes[3], length: length[3] },
+    ];
+    Triple { terms, path, directions }
+}
+
+/// BGP path regression: a `Triple` constructed with the new
+/// `[TermWitness; 4]` shape still passes `verify_inclusion` against the
+/// sorted-tree root, regardless of what its `bytes` / `length`
+/// witnesses are. Demonstrates the round-1 contract that the byte
+/// witness is advisory at the Triple level.
+#[test]
+fn term_witness_bgp_path_unaffected() {
+    let triples = [[8, 9, 10, 11], [0, 1, 2, 3], [4, 5, 6, 7]];
+    let info = merkle::<11, 3>(triples);
+
+    let zero_bytes: [[u8; consts::STRING_LEN_MAX]; 4] = [[0; consts::STRING_LEN_MAX]; 4];
+    let zero_lengths: [u32; 4] = [0; 4];
+    for i in 0..3 {
+        let t = make_triple_with_bytes(info, i, zero_bytes, zero_lengths);
+        verify_inclusion(t, info.root);
+    }
+}
+
+/// `bytes` and `length` witnesses are observable from inside the
+/// circuit body -- round-2 string operators will read them. This test
+/// verifies the access pattern compiles and produces the supplied
+/// values, which is all round-1 needs to demonstrate the wiring.
+#[test]
+fn term_witness_bytes_field_reachable() {
+    let triples = [[8, 9, 10, 11], [0, 1, 2, 3], [4, 5, 6, 7]];
+    let info = merkle::<11, 3>(triples);
+
+    let mut sample: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    sample[0] = 0x68; // 'h'
+    sample[1] = 0x69; // 'i'
+    let bytes_array: [[u8; consts::STRING_LEN_MAX]; 4] = [sample, sample, sample, sample];
+    let length_array: [u32; 4] = [2, 2, 2, 2];
+
+    let t = make_triple_with_bytes(info, 0, bytes_array, length_array);
+    // Inclusion still holds.
+    verify_inclusion(t, info.root);
+    // Bytes / length round-trip through the witness.
+    assert_eq(t.terms[0].bytes[0], 0x68, "byte witness must round-trip 'h'");
+    assert_eq(t.terms[0].bytes[1], 0x69, "byte witness must round-trip 'i'");
+    assert_eq(t.terms[0].length, 2, "length witness must round-trip 2");
+    // Byte index 2 is unconstrained padding (0 here, but a malicious
+    // prover could supply anything -- `length` is the source of truth).
+    assert_eq(t.terms[0].bytes[2], 0, "padding byte is what the prover supplied");
+}
+
+/// `consts::encode_string_bounded` is the round-2 string-operator
+/// helper. Round-1 only checks that the helper compiles and produces
+/// stable output for a given `(bytes, length)` pair -- the equality
+/// constraint that ties this output to the term's lexical hash will be
+/// emitted at use sites by the round-2 lowering (see
+/// `spec/encoding.md` sec.6.3).
+#[test]
+fn encode_string_bounded_is_callable() {
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    bytes[0] = 0x61; // 'a'
+    bytes[1] = 0x62; // 'b'
+    bytes[2] = 0x63; // 'c'
+    let h1 = consts::encode_string_bounded(bytes, 3);
+    let h2 = consts::encode_string_bounded(bytes, 3);
+    // Determinism: same (bytes, length) yields the same Field.
+    assert_eq(h1, h2, "encode_string_bounded must be deterministic");
 }

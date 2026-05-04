@@ -30,6 +30,7 @@ export default {
       schnorr: "schnorr",
     },
     stringHashOutputSize: {},
+    stringLenMax: {},
   },
   rename: {
     hash2: "fieldHash",

@@ -1,6 +1,13 @@
 pub use signature;
 
 pub global MERKLE_DEPTH: u32 = 11;
+/// Maximum number of bytes the bounded byte-array term witness
+/// (`types::TermWitness`) can hold. Per-triple input size grows by
+/// `4 x STRING_LEN_MAX` bytes plus four `u32` length witnesses. See
+/// `spec/encoding.md` sec.6 for the soundness contract and gate-cost
+/// trade-off; configurable via `setup.ts --string-len-max <n>`
+/// (default 64).
+pub global STRING_LEN_MAX: u32 = {{stringLenMax}};
 // pub global hash2: fn([Field; 2]) -> Field = {{hash2}};
 // pub global hash4: fn([Field; 4]) -> Field = {{hash4}};
 // pub global verify_signature: fn([u8; 32], [u8; 32], [u8; 64], [u8; 32]) -> bool = {{signature}};
@@ -19,6 +26,26 @@ pub fn hash_string<let N: u32>(input: [u8; N]) -> [u8; {{stringHashOutputSize}}]
 
 pub fn encode_string<let N: u32>(string: str<N>) -> Field {
   Field::from_le_bytes(hash_string(string.as_bytes()))
+}
+
+/// Compute the lexical-form hash of a bounded byte-array witness.
+///
+/// `bytes[0..length]` is the meaningful prefix; bytes at indices
+/// `length..N` are unconstrained padding (typically zero). The
+/// implementation copies the prefix into a fixed-size buffer of
+/// length `N` (the hash-input domain stays compile-time constant)
+/// and zero-pads the tail before hashing. Round-2 string operators
+/// will pair this with an equality assertion against the term's
+/// committed lexical hash to bind the witness -- see
+/// `spec/encoding.md` sec.6.3 for the soundness argument.
+pub fn encode_string_bounded<let N: u32>(bytes: [u8; N], length: u32) -> Field {
+  let mut buf: [u8; N] = [0; N];
+  for i in 0..N {
+    if (i as u32) < length {
+      buf[i] = bytes[i];
+    }
+  }
+  Field::from_le_bytes(hash_string(buf))
 }
 
 // Recursion
