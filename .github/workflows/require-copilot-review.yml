@@ -22,7 +22,17 @@ name: Require Copilot review
 on:
   pull_request:
     branches: [main]
-    types: [opened, reopened, ready_for_review, synchronize]
+    # `edited` covers PR retarget from another base to `main` (which fires
+    # `pull_request.edited`, not `opened`/`reopened`); `converted_to_draft`
+    # lets the draft exemption take effect when a PR is moved back to
+    # draft after the check has already failed.
+    types:
+      - opened
+      - reopened
+      - ready_for_review
+      - synchronize
+      - edited
+      - converted_to_draft
   pull_request_review:
     types: [submitted, edited, dismissed]
 
@@ -40,6 +50,9 @@ jobs:
       github.event_name == 'pull_request' ||
       github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
+    # Fail fast if the GitHub API call hangs — every other workflow in the
+    # repo sets a timeout, and a stuck merge gate is the worst kind of red.
+    timeout-minutes: 5
     steps:
       - name: Resolve PR number
         id: pr
@@ -86,9 +99,11 @@ jobs:
           # endpoint reports `Copilot` (same identity, different surface).
           # We check `/reviews` which uses the bot login. `--paginate` walks
           # every page so the gate cannot false-fail when a PR accumulates
-          # >30 reviews (default page size).
+          # >30 reviews (default page size). DISMISSED reviews are
+          # filtered out so dismissing Copilot's only review re-reds the
+          # gate (matches the policy in the deployment notes).
           reviewers=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" \
-            --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length' \
+            --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]") | select(.state != "DISMISSED")] | length' \
             | awk '{s+=$1} END {print s+0}')
           if [[ "$reviewers" -ge 1 ]]; then
             echo "::notice::Copilot has posted $reviewers review(s) on PR #$PR_NUMBER."
