@@ -1229,6 +1229,60 @@ fn multiple_not_exists_emit_independent_boundary_dispatches() {
     }
 }
 
+/// Round 5 -- a query mixing a round-3 ground-inner `NOT EXISTS`
+/// with a round-5 prefix-3 `NOT EXISTS` must emit **both** dispatch
+/// chains, with disjoint index spaces (`boundary_cases[]` vs
+/// `boundary_cases_prefix3[]`). Guards against shared-state
+/// regressions where the IR's two constraint vectors get conflated.
+#[test]
+fn mixed_round3_and_prefix3_not_exists() {
+    // Use a MINUS for the prefix-3 case: `MINUS { ?p ex:age ?age }`
+    // -- `?p` outer-bound, `?age` inner-only -- to avoid stacking
+    // two FILTER(NOT EXISTS) which spargebra normalises into a
+    // single `&&`-joined filter (rejected as nested-EXISTS-in-and).
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               FILTER(NOT EXISTS { ?s ex:type ex:Person . }) \
+               MINUS { ?p ex:age ?age . } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    assert!(
+        result.sparql_nr.contains("type BoundaryCases = [Field; 1]"),
+        "expected one round-3 dispatch, got:\n{}",
+        result.sparql_nr
+    );
+    assert!(
+        result
+            .sparql_nr
+            .contains("type BoundaryCasesPrefix3 = [Field; 1]"),
+        "expected one prefix-3 dispatch, got:\n{}",
+        result.sparql_nr
+    );
+    // Both dispatch chains must appear in the body.
+    assert!(
+        result.sparql_nr.contains("if boundary_cases[0] == 0")
+            && result
+                .sparql_nr
+                .contains("if boundary_cases_prefix3[0] == 0"),
+        "expected both dispatch chains, got:\n{}",
+        result.sparql_nr
+    );
+    // Round-3 NOT EXISTS still uses bgp[i] for brackets; prefix-3
+    // NOT EXISTS uses bgp_prefix3[i].
+    assert!(
+        result
+            .sparql_nr
+            .contains("utils::verify_non_membership_no_inclusion(bgp[")
+            && result
+                .sparql_nr
+                .contains("utils::prefix3::verify_non_membership_prefix3_no_inclusion(bgp_prefix3["),
+        "expected disjoint slot arrays for the two dispatches, got:\n{}",
+        result.sparql_nr
+    );
+}
+
 /// EXISTS nested under boolean operators is rejected for now (see
 /// `spec/exists.md` §7 open question 3).
 #[test]
