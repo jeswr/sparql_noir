@@ -8,7 +8,65 @@
       "bracketRightIdx": 3,
       "bracket_left_idx": 2,
       "bracket_right_idx": 3,
+      "fixedPositions": null,
+      "fixed_positions": null,
+      "freePosition": null,
+      "free_position": null,
       "id": 0,
+      "innerTerms": [
+        {
+          "kind": "variable",
+          "name": "s"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/type"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/Person"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": ""
+          }
+        }
+      ],
+      "inner_terms": [
+        {
+          "kind": "variable",
+          "name": "s"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/type"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/Person"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": ""
+          }
+        }
+      ],
       "matchedIdx": 1,
       "matched_idx": 1,
       "prefixKind": null,
@@ -21,7 +79,65 @@
       "bracketRightIdx": 3,
       "bracket_left_idx": 2,
       "bracket_right_idx": 3,
+      "fixedPositions": null,
+      "fixed_positions": null,
+      "freePosition": null,
+      "free_position": null,
       "id": 0,
+      "innerTerms": [
+        {
+          "kind": "variable",
+          "name": "s"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/type"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/Person"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": ""
+          }
+        }
+      ],
+      "inner_terms": [
+        {
+          "kind": "variable",
+          "name": "s"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/type"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/Person"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": ""
+          }
+        }
+      ],
       "matchedIdx": 1,
       "matched_idx": 1,
       "prefixKind": null,

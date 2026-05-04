@@ -8,7 +8,67 @@
       "bracketRightIdx": 1,
       "bracket_left_idx": 0,
       "bracket_right_idx": 1,
+      "fixedPositions": [
+        0,
+        1,
+        3
+      ],
+      "fixed_positions": [
+        0,
+        1,
+        3
+      ],
+      "freePosition": 2,
+      "free_position": 2,
       "id": 0,
+      "innerTerms": [
+        {
+          "kind": "variable",
+          "name": "p"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          }
+        },
+        {
+          "kind": "variable",
+          "name": "o"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": ""
+          }
+        }
+      ],
+      "inner_terms": [
+        {
+          "kind": "variable",
+          "name": "p"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          }
+        },
+        {
+          "kind": "variable",
+          "name": "o"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": ""
+          }
+        }
+      ],
       "matchedIdx": 1,
       "matched_idx": 1,
       "prefixKind": "prefix3_sp_g",
@@ -21,7 +81,67 @@
       "bracketRightIdx": 1,
       "bracket_left_idx": 0,
       "bracket_right_idx": 1,
+      "fixedPositions": [
+        0,
+        1,
+        3
+      ],
+      "fixed_positions": [
+        0,
+        1,
+        3
+      ],
+      "freePosition": 2,
+      "free_position": 2,
       "id": 0,
+      "innerTerms": [
+        {
+          "kind": "variable",
+          "name": "p"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          }
+        },
+        {
+          "kind": "variable",
+          "name": "o"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": ""
+          }
+        }
+      ],
+      "inner_terms": [
+        {
+          "kind": "variable",
+          "name": "p"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          }
+        },
+        {
+          "kind": "variable",
+          "name": "o"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": ""
+          }
+        }
+      ],
       "matchedIdx": 1,
       "matched_idx": 1,
       "prefixKind": "prefix3_sp_g",
