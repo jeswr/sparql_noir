@@ -66,6 +66,18 @@ const CORPUS: &[Case] = &[
         name: "optional_basic",
         query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
     },
+    // Round-3 follow-up — tiered partial OPTIONAL collapse (easy
+    // case). The inner triple `?s ex:type ex:Person` has every
+    // variable position outer-bound (`?s`) and constant positions
+    // (`ex:type`, `ex:Person`); after substitution it is fully
+    // ground. The OPTIONAL therefore collapses to a single
+    // `assert(matched | unmatched)` line — no power-set generation,
+    // no `optional_circuits[]` entry. See `spec/exists.md` §4.1.
+    Case {
+        name: "optional_easy_collapse",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s ?o WHERE { ?s ex:knows ?o . OPTIONAL { ?s ex:type ex:Person . } }",
+    },
     Case {
         name: "union_basic",
         query: "PREFIX ex: <http://example.org/>\nSELECT ?s WHERE { { ?s ex:a ?o . } UNION { ?s ex:b ?o . } }",
@@ -583,6 +595,375 @@ fn minus_variable_disjoint_is_noop() {
         ne.len(),
         0,
         "variable-disjoint MINUS must emit no NonExistenceConstraint"
+    );
+}
+
+/// Round-3 follow-up — tiered partial OPTIONAL collapse easy case.
+/// `?s ex:knows ?o . OPTIONAL { ?s ex:type ex:Person . }` — every
+/// position of the inner triple is either an outer-bound variable
+/// (`?s`) or a constant (`ex:type`, `ex:Person`). The OPTIONAL must
+/// collapse to a single `assert(matched | unmatched)` line, with
+/// `verify_non_membership_no_inclusion_check` in the unmatched arm
+/// and inclusion-style position assertions on the matched arm. No
+/// `optional_circuits[]` entry is produced. See `spec/exists.md` §4.1.
+#[test]
+fn optional_easy_case_collapses_to_single_circuit() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { ?s ex:knows ?o . OPTIONAL { ?s ex:type ex:Person . } }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    // No power-set variants: easy-case OPTIONAL does not contribute
+    // to the `optional_circuits[]` array.
+    assert!(
+        result.optional_circuits.is_empty(),
+        "easy-case OPTIONAL must not produce power-set variants, got {} circuits",
+        result.optional_circuits.len()
+    );
+    // Three appended slots (outer triple + matched-arm slot + 2 brackets).
+    assert!(
+        result.sparql_nr.contains("type BGP = [Triple; 4]"),
+        "expected BGP of size 4 (1 outer + 1 matched + 2 brackets), got:\n{}",
+        result.sparql_nr
+    );
+    // Body must contain the boolean non-membership check inside the
+    // unmatched arm of an `assert(... | ...)` line.
+    assert!(
+        result.sparql_nr.contains("verify_non_membership_no_inclusion_check"),
+        "expected verify_non_membership_no_inclusion_check call, got:\n{}",
+        result.sparql_nr
+    );
+    // Metadata exposes the easy-case OPTIONAL.
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(easy.len(), 1, "expected one easy-case OPTIONAL, got {:?}", easy);
+    // No regular `optionalPatterns` entry — the easy-case OPTIONAL
+    // does not flow through the power-set machinery.
+    let opt = result
+        .metadata
+        .get("optionalPatterns")
+        .and_then(|v| v.as_array())
+        .expect("optionalPatterns metadata array");
+    assert_eq!(
+        opt.len(),
+        0,
+        "easy-case OPTIONAL must not appear in optionalPatterns, got {:?}",
+        opt
+    );
+}
+
+/// Round-3 follow-up — tiered partial OPTIONAL collapse fall-through.
+/// `OPTIONAL { ?p ex:age ?o }` (where `?p` is outer-bound but `?o` is
+/// inner-only) does **not** satisfy the easy-case predicate; it must
+/// still flow through the existing `2^n` power-set path unchanged —
+/// `optional_circuits` non-empty, regular `optionalPatterns` populated.
+#[test]
+fn optional_inner_only_var_falls_through_to_power_set() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    // Power-set path preserved.
+    assert_eq!(
+        result.optional_circuits.len(),
+        1,
+        "fall-through OPTIONAL must produce one power-set variant, got {}",
+        result.optional_circuits.len()
+    );
+    let opt = result
+        .metadata
+        .get("optionalPatterns")
+        .and_then(|v| v.as_array())
+        .expect("optionalPatterns metadata array");
+    assert_eq!(opt.len(), 1, "fall-through OPTIONAL must populate optionalPatterns");
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert!(
+        easy.is_empty(),
+        "fall-through OPTIONAL must NOT register as easy-case, got {:?}",
+        easy
+    );
+    assert!(
+        !result
+            .sparql_nr
+            .contains("verify_non_membership_no_inclusion_check"),
+        "fall-through OPTIONAL must NOT emit the boolean non-membership check"
+    );
+}
+
+/// Round-3 follow-up — graph-scoped easy-case OPTIONAL. The
+/// placeholder slots' graph context must be `DefaultGraph` (a
+/// prover-side wildcard), NOT the inner pattern's named graph —
+/// otherwise the unmatched arm cannot witness when the named graph
+/// has no leaves (roborev finding 2026-05-03, second high). The
+/// matched-arm assertions in `checkBinding` still pin the graph
+/// position to the substituted graph term.
+#[test]
+fn optional_easy_case_graph_scoped_uses_wildcard_placeholders() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?o . \
+               OPTIONAL { GRAPH ex:g { ?s ex:type ex:Person . } } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(easy.len(), 1, "graph-scoped easy OPTIONAL must collapse");
+
+    // The placeholder slots in `inputPatterns` (slots 1-3 after the
+    // outer triple) must have `DefaultGraph` graph context, not the
+    // named graph `ex:g`. Otherwise the prover-side resolver would
+    // require quads from `ex:g` for those slots even in the
+    // unmatched arm.
+    let patterns = result
+        .metadata
+        .get("inputPatterns")
+        .and_then(|v| v.as_array())
+        .expect("inputPatterns array");
+    assert_eq!(patterns.len(), 4, "expected 1 outer + 3 placeholder slots");
+    for i in 1..=3 {
+        let graph = patterns[i].get("graph").expect("graph field");
+        let term_type = graph.get("termType").and_then(|v| v.as_str());
+        assert_eq!(
+            term_type,
+            Some("DefaultGraph"),
+            "placeholder slot {} must have wildcard (DefaultGraph) graph, got {:?}",
+            i,
+            graph
+        );
+    }
+    // The checkBinding body must still pin the matched-arm graph
+    // position to `ex:g`, otherwise the matched arm would accept
+    // any-graph witnesses and the disjunction would always be true.
+    assert!(
+        result
+            .sparql_nr
+            .contains("http://example.org/g")
+            && result
+                .sparql_nr
+                .contains("bgp[1].terms[3]"),
+        "matched arm should pin bgp[1].terms[3] to ex:g, got:\n{}",
+        result.sparql_nr
+    );
+}
+
+/// Round-3 follow-up — easy-case OPTIONAL inheriting graph scope
+/// from an enclosing `GRAPH ex:g { ... }`. Roborev finding
+/// 2026-05-03 (third high): the GRAPH wrapper was overwriting the
+/// easy-OPTIONAL placeholders' graph context back to `ex:g`,
+/// reintroducing the witness-failure bug from finding 2.
+///
+/// The `Graph` lowering now skips the easy-OPTIONAL synthetic slots
+/// when rewriting `pattern.graph` and adding graph assertions.
+/// Separately, the `EasyOptional.inner_terms[3]` is rewritten from
+/// the default-graph empty-IRI to the effective graph term so the
+/// matched-arm assertion still pins the substituted graph to `ex:g`.
+#[test]
+fn optional_easy_case_inside_enclosing_graph_keeps_placeholders_wildcard() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               GRAPH ex:g { \
+                 ?s ex:knows ?o . \
+                 OPTIONAL { ?s ex:type ex:Person . } \
+               } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    // Easy-case lowering still fires.
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(
+        easy.len(),
+        1,
+        "OPTIONAL inside enclosing GRAPH must still collapse"
+    );
+
+    // Placeholder slots stay `DefaultGraph` (wildcard) in the
+    // metadata, even though the outer triple was rewritten to `ex:g`.
+    let patterns = result
+        .metadata
+        .get("inputPatterns")
+        .and_then(|v| v.as_array())
+        .expect("inputPatterns array");
+    assert_eq!(patterns.len(), 4, "expected 1 outer + 3 placeholder slots");
+    let outer_graph = patterns[0].get("graph").expect("outer graph");
+    assert_eq!(
+        outer_graph.get("termType").and_then(|v| v.as_str()),
+        Some("NamedNode"),
+        "outer triple's graph must be the enclosing GRAPH's IRI"
+    );
+    assert_eq!(
+        outer_graph.get("value").and_then(|v| v.as_str()),
+        Some("http://example.org/g"),
+        "outer triple's graph must be ex:g"
+    );
+    for i in 1..=3 {
+        let graph = patterns[i].get("graph").expect("graph field");
+        assert_eq!(
+            graph.get("termType").and_then(|v| v.as_str()),
+            Some("DefaultGraph"),
+            "placeholder slot {} must stay wildcard (DefaultGraph), got {:?}",
+            i,
+            graph
+        );
+    }
+
+    // The matched-arm assertion in `checkBinding` must pin the
+    // matched-slot's graph position to `ex:g`. It should appear
+    // **inside the OR disjunction** (matched-arm branch), not as a
+    // free-standing assertion line. We check both: bgp[1].terms[3]
+    // is referenced AND it occurs in the disjunction line, NOT in a
+    // separate `assert(...)` line. Roborev finding 2026-05-03
+    // (third high, sub-finding 2): without this stronger check, a
+    // global graph assertion on bgp[1].terms[3] could slip through
+    // and silently force the matched-arm graph in both arms.
+    let bgp1_count = result
+        .sparql_nr
+        .matches("bgp[1].terms[3]")
+        .count();
+    assert_eq!(
+        bgp1_count, 1,
+        "bgp[1].terms[3] should appear exactly once (inside the matched-arm \
+         disjunction), got {} occurrences:\n{}",
+        bgp1_count, result.sparql_nr
+    );
+    // Sanity: that one occurrence must be inside the
+    // `assert(... | utils::verify_non_membership_no_inclusion_check)`
+    // line, not in a free-standing `assert(... == bgp[1].terms[3])`.
+    let or_line_with_bgp1 = result.sparql_nr.lines().any(|l| {
+        l.contains("bgp[1].terms[3]")
+            && l.contains("verify_non_membership_no_inclusion_check")
+    });
+    assert!(
+        or_line_with_bgp1,
+        "bgp[1].terms[3] must appear inside the matched|unmatched disjunction line, got:\n{}",
+        result.sparql_nr
+    );
+
+    // The Graph wrapper's per-slot graph assertion must NOT cover
+    // the easy-OPTIONAL placeholder slots (slots 1, 2, 3). Look for
+    // the assertion form: `consts::hash2([0, ... "ex:g"]) ==
+    // bgp[i].terms[3]`. It should appear for slot 0 only.
+    let graph_iri_count = result
+        .sparql_nr
+        .matches("== bgp[0].terms[3]")
+        .count();
+    assert_eq!(
+        graph_iri_count, 1,
+        "expected exactly one outer graph assertion at bgp[0].terms[3], got:\n{}",
+        result.sparql_nr
+    );
+    // No graph assertion on bgp[2] / bgp[3] (the bracket slots).
+    assert!(
+        !result.sparql_nr.contains("== bgp[2].terms[3]")
+            && !result.sparql_nr.contains("== bgp[3].terms[3]"),
+        "bracket slots must not have a graph-pinning assertion, got:\n{}",
+        result.sparql_nr
+    );
+}
+
+/// Round-3 follow-up — `?g` bound by a sibling pattern outside the
+/// `GRAPH ?g { ... }` wrapper. The transform must NOT reject this
+/// case (roborev finding 2026-05-03, fourth medium: an earlier
+/// over-aggressive rejection blocked it). The easy-case collapse
+/// fires; the matched-arm graph reference resolves to `variables.g`
+/// (bound by the sibling triple at the post-Join scope).
+///
+/// Roborev finding 2026-05-03 (sixth pass, medium): the regression
+/// must inspect the lowered output, not just check `Ok(_)`, so a
+/// silent fall-through wouldn't pass.
+#[test]
+fn optional_easy_case_graph_var_bound_by_sibling() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?x ?g WHERE { \
+               ?x ex:g ?g . \
+               GRAPH ?g { OPTIONAL { ex:a ex:p ex:b . } } \
+             }";
+    let result = transform_query(q).expect(
+        "transform should succeed: ?g is bound by the sibling triple outside the GRAPH wrapper",
+    );
+
+    // The easy-case collapse MUST fire (single-triple ground inner,
+    // no inner-only variables, sibling triple binds the GRAPH
+    // variable at the surrounding Join level).
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(
+        easy.len(),
+        1,
+        "expected one collapsed easy OPTIONAL, got {:?}",
+        easy
+    );
+    // No power-set fall-through.
+    assert!(
+        result.optional_circuits.is_empty(),
+        "easy-case collapse must not also produce power-set variants"
+    );
+
+    // The matched-arm graph position must reference `variables.g`,
+    // not a stale empty-IRI default-graph constant. The presence of
+    // `variables.g` in the disjunction line is the binding the
+    // sibling-triple Join contributes; the absence of
+    // `consts::encode_string("")` against a `bgp[*].terms[3]` slot
+    // says we did NOT silently revert to default-graph soundness.
+    let or_line = result
+        .sparql_nr
+        .lines()
+        .find(|l| l.contains("verify_non_membership_no_inclusion_check"))
+        .expect("expected an `assert(matched | unmatched)` line");
+    assert!(
+        or_line.contains("variables.g"),
+        "matched-arm disjunction must reference variables.g (the sibling-bound \
+         GRAPH variable), got line:\n{}",
+        or_line
+    );
+    // `?g` ends up in the projected variables via the sibling
+    // triple's binding.
+    assert!(
+        result.sparql_nr.contains("pub(crate) g: Field"),
+        "?g must be projected (bound by sibling triple), got:\n{}",
+        result.sparql_nr
+    );
+}
+
+/// Multi-triple inner `OPTIONAL` falls through to power-set even when
+/// every variable is outer-bound — easy-case scope is single-triple
+/// inner only. Round-4's prefix-tree commitments will lift this.
+#[test]
+fn optional_multi_triple_inner_falls_through() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?s ex:type ex:Person . ?p ex:type ex:Person . } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+    assert_eq!(
+        result.optional_circuits.len(),
+        1,
+        "multi-triple OPTIONAL must fall through to power-set"
+    );
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert!(
+        easy.is_empty(),
+        "multi-triple OPTIONAL must NOT register as easy-case"
     );
 }
 

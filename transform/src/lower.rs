@@ -16,7 +16,7 @@ use spargebra::algebra::{
 use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 
 use crate::{
-    Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, GraphContext,
+    Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, EasyOptional, GraphContext,
     OptionalBlock, OrderDirection, OrderKey, PatternInfo, QueryInfo, Term, TransformOptions,
 };
 
@@ -230,6 +230,16 @@ fn shift_pattern_inputs(info: &mut PatternInfo, offset: usize) {
             }
         }
     }
+    for eo in &mut info.easy_optionals {
+        eo.matched_idx += offset;
+        eo.bracket_left_idx += offset;
+        eo.bracket_right_idx += offset;
+        for term in &mut eo.inner_terms {
+            if let Term::Input(i, j) = term {
+                *term = Term::Input(*i + offset, *j);
+            }
+        }
+    }
 }
 
 /// Compute `Join(left, right)` over two `PatternInfo`s with the
@@ -273,6 +283,8 @@ fn join_pattern_infos(
             merged.optional_blocks.extend(right.optional_blocks);
             merged.not_exists.extend(left.not_exists);
             merged.not_exists.extend(right.not_exists);
+            merged.easy_optionals.extend(left.easy_optionals);
+            merged.easy_optionals.extend(right.easy_optionals);
             Ok(merged)
         }
         (true, false) => {
@@ -322,11 +334,14 @@ fn join_pattern_infos(
                 union_branches: Some(combined),
                 optional_blocks: Vec::new(),
                 not_exists: Vec::new(),
+                easy_optionals: Vec::new(),
             };
             merged.optional_blocks.extend(left.optional_blocks);
             merged.optional_blocks.extend(right.optional_blocks);
             merged.not_exists.extend(left.not_exists);
             merged.not_exists.extend(right.not_exists);
+            merged.easy_optionals.extend(left.easy_optionals);
+            merged.easy_optionals.extend(right.easy_optionals);
             Ok(merged)
         }
     }
@@ -387,6 +402,7 @@ fn distribute_into_branches(
         union_branches: Some(combined),
         optional_blocks: Vec::new(),
         not_exists: Vec::new(),
+        easy_optionals: Vec::new(),
     };
     // Optionals and non-existence obligations are top-level concerns —
     // preserve them outside the branches.
@@ -394,6 +410,8 @@ fn distribute_into_branches(
     merged.optional_blocks.extend(plain.optional_blocks);
     merged.not_exists.extend(with_branches.not_exists);
     merged.not_exists.extend(plain.not_exists);
+    merged.easy_optionals.extend(with_branches.easy_optionals);
+    merged.easy_optionals.extend(plain.easy_optionals);
     merged
 }
 
@@ -776,6 +794,16 @@ fn absent_terms_from_pattern(ct: &ContextualizedTriple) -> Result<[Term; 4], Str
 /// hash. We synthesise free-variable placeholders (`?__br_*`) so the
 /// metadata round-trips deterministically; their `__`-prefix excludes
 /// them from projections (`process_query` ~L780).
+///
+/// The `graph` argument fixes the placeholder's graph context. Pass
+/// `GraphContext::Default` when the placeholder must be free across
+/// all graphs (the round-3-follow-up easy-OPTIONAL collapse uses this
+/// mode so the unmatched-arm placeholders can witness ANY valid leaf
+/// regardless of which graph the inner pattern was scoped to —
+/// roborev finding 2026-05-03, second high). Pass the source pattern's
+/// graph context for legacy callers (NOT EXISTS / MINUS — already
+/// constrained to non-`GRAPH`-scoped inner patterns by the round-3
+/// main event).
 fn bracket_placeholder_pattern(graph: &GraphContext) -> ContextualizedTriple {
     use std::sync::atomic::Ordering as A;
     let id = BRACKET_COUNTER.fetch_add(1, A::SeqCst);
@@ -1356,6 +1384,94 @@ fn expand_negated_property_set(
     })
 }
 
+/// True iff the right-hand side of a `LeftJoin` (i.e. the inner
+/// pattern of an OPTIONAL block) qualifies for the round-3-follow-up
+/// **easy-case collapse** — single-triple inner with every variable
+/// position outer-bound, no inner FILTER / nested OPTIONAL / UNION /
+/// EXISTS / NOT-EXISTS, no outer LeftJoin filter expression, no
+/// non-default graph context with a free graph variable.
+///
+/// **Soundness rationale.** Under these conditions the inner triple,
+/// after substituting the outer μ, is fully ground — every position is
+/// a concrete term (a constant or a value the outer scope already
+/// witnessed). The OPTIONAL therefore becomes the boolean disjunction
+/// "the ground inner triple is in the dataset OR it is not" with no
+/// inner-only variables to bind, so the projected solution multiset is
+/// identical regardless of which arm the prover witnesses. The emit
+/// layer encodes both arms as `assert(matched | unmatched)` and
+/// soundness reduces to the existing matched-arm inclusion check
+/// (Merkle-binding) and the existing unmatched-arm
+/// `verify_non_membership` primitive (`spec/exists.md` §3.3).
+///
+/// Anything that violates these conditions falls through to the
+/// existing `2^n` power-set generation path — defaulting to the safe
+/// pre-collapse behaviour. The classifier is **conservative**: false
+/// negatives cost a power-set variant; false positives would corrupt
+/// soundness.
+fn optional_inner_is_easy_case(
+    right_info: &PatternInfo,
+    expression: &Option<Expression>,
+    left_info: &PatternInfo,
+) -> bool {
+    // The outer `LeftJoin` may carry a FILTER expression
+    // (`OPTIONAL { … FILTER(…) }` is hoisted there by spargebra). The
+    // easy case forbids it: any non-trivial filter would constrain the
+    // matched arm beyond a simple inclusion check, breaking the
+    // "matched ↔ inclusion of the substituted ground triple"
+    // equivalence the soundness argument relies on.
+    if expression.is_some() {
+        return false;
+    }
+    // No inner FILTER (same reason).
+    if !right_info.filters.is_empty() {
+        return false;
+    }
+    // No UNION / nested OPTIONAL / NOT EXISTS / inner easy-case
+    // OPTIONAL inside the OPTIONAL we're classifying.
+    if right_info.union_branches.is_some()
+        || !right_info.optional_blocks.is_empty()
+        || !right_info.not_exists.is_empty()
+        || !right_info.easy_optionals.is_empty()
+    {
+        return false;
+    }
+    // Single-triple inner. Multi-triple is round-4 (prefix-tree
+    // commitments).
+    if right_info.patterns.len() != 1 {
+        return false;
+    }
+    // Every variable position in the inner triple must be outer-bound.
+    // `right_info.bindings` lists the variables that `process_patterns`
+    // saw as fresh-to-this-BGP — i.e. exactly the variables in the
+    // inner triple (they appear once each). For the easy case to fire,
+    // every such variable must already be bound by the outer μ
+    // (`left_info.bindings`).
+    let outer_bound: std::collections::BTreeSet<&str> = left_info
+        .bindings
+        .iter()
+        .map(|b| b.variable.as_str())
+        .collect();
+    for binding in &right_info.bindings {
+        if !outer_bound.contains(binding.variable.as_str()) {
+            return false;
+        }
+    }
+    // No graph variable that isn't outer-bound either. The graph
+    // context lives on the `ContextualizedTriple` and is folded into
+    // the `inner_terms` array; if it's a `Variable(name)` that the
+    // outer hasn't seen, we'd be substituting a free variable. The
+    // outer-bound check above covers `right_info.bindings`, but a
+    // graph variable doesn't go through that path — we have to check
+    // the pattern's graph context directly.
+    let pattern = &right_info.patterns[0];
+    if let GraphContext::Variable(name) = &pattern.graph {
+        if !outer_bound.contains(name.as_str()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Helper to adjust input indices in an optional block by an offset
 fn adjust_optional_block_indices(block: &mut OptionalBlock, offset: usize) {
     for binding in &mut block.bindings {
@@ -1543,6 +1659,93 @@ fn process_graph_pattern_inner(
 
             let offset = left_info.patterns.len();
 
+            // Tiered partial OPTIONAL collapse — easy case
+            // (round 3 follow-up; see `spec/exists.md` §4.1).
+            //
+            // The easy case is: a single-triple inner pattern with
+            // every variable position bound by the outer μ. After
+            // substitution the inner triple is fully ground, so the
+            // OPTIONAL is a boolean disjunction — the matched arm
+            // proves the substituted triple is in the dataset; the
+            // unmatched arm proves it is not. Both arms preserve the
+            // outer row's projected bindings unchanged (no inner-only
+            // variables to bind).
+            //
+            // When the easy case fires we lower the OPTIONAL to a
+            // single `EasyOptional` and skip the power-set path; the
+            // `optional_circuits[]` array is unaffected, so multiple
+            // easy-case OPTIONALs in the same query do *not*
+            // contribute to the `2^n` variant explosion.
+            if optional_inner_is_easy_case(&right_info, expression, &left_info) {
+                let inner_pattern = &right_info.patterns[0];
+                let inner_terms = absent_terms_from_pattern(inner_pattern)?;
+
+                // Three appended BGP slots: a free placeholder for
+                // the matched arm followed by the two unmatched-arm
+                // bracket leaves. All three are inclusion-checked by
+                // `main.nr` regardless of which arm the prover
+                // actually witnesses — soundness lives in the
+                // `assert(matched | unmatched)` disjunction the emit
+                // layer produces.
+                //
+                // **All three slots are free placeholders** (not the
+                // concrete inner triple). This is load-bearing: the
+                // prover-side binding resolver iterates every
+                // `inputPatterns[i]` and matches it against the
+                // dataset. If we left a concrete pattern at the
+                // matched slot, the resolver would fail to produce a
+                // witness when the inner triple is *not* in the
+                // dataset (the unmatched case) — the very case the
+                // collapse is supposed to support. Free placeholders
+                // let the prover pick any valid leaf for each slot;
+                // the matched-arm position assertions in
+                // `checkBinding` then evaluate to true iff the
+                // prover happened to bind the matched slot to the
+                // substituted ground inner triple, which is only
+                // possible when that triple really is in the dataset
+                // — Merkle binding does the soundness work.
+                //
+                // Roborev finding 2026-05-03 (high) on the first
+                // round-3-follow-up commit: "easy-OPTIONAL slots
+                // appear as required input patterns".
+                let matched_idx = offset;
+                let bracket_left_idx = offset + 1;
+                let bracket_right_idx = offset + 2;
+
+                // **Graph context is also free** — `GraphContext::Default`
+                // serialises as `DefaultGraph` in metadata, which the
+                // prover treats as a wildcard (alongside `Variable`-typed
+                // graph terms). Passing through `inner_pattern.graph`
+                // would, for `OPTIONAL { GRAPH ex:g { ... } }` blocks,
+                // pin the placeholder to graph `ex:g` and prevent the
+                // unmatched arm from witnessing any leaf when `ex:g`
+                // happens to be empty (roborev finding 2026-05-03,
+                // second high — same family as the first finding,
+                // generalised to the graph dimension). The matched-arm
+                // assertions in `checkBinding` still pin
+                // `bgp[matched_idx].terms[3]` to the substituted graph
+                // term, so the matched arm only succeeds when the
+                // prover actually witnessed a leaf in the right graph.
+                left_info
+                    .patterns
+                    .push(bracket_placeholder_pattern(&GraphContext::Default));
+                left_info
+                    .patterns
+                    .push(bracket_placeholder_pattern(&GraphContext::Default));
+                left_info
+                    .patterns
+                    .push(bracket_placeholder_pattern(&GraphContext::Default));
+
+                left_info.easy_optionals.push(EasyOptional {
+                    id: next_optional_id(),
+                    matched_idx,
+                    bracket_left_idx,
+                    bracket_right_idx,
+                    inner_terms,
+                });
+                return Ok(left_info);
+            }
+
             let optional_id = next_optional_id();
 
             let adjusted_bindings: Vec<Binding> = right_info
@@ -1657,6 +1860,7 @@ fn process_graph_pattern_inner(
                 union_branches: Some(branches),
                 optional_blocks: Vec::new(),
                 not_exists: Vec::new(),
+                easy_optionals: Vec::new(),
             })
         }
 
@@ -1668,13 +1872,67 @@ fn process_graph_pattern_inner(
                 NamedNodePattern::Variable(v) => GraphContext::Variable(v.as_str().to_string()),
             };
 
-            for pattern in &mut info.patterns {
-                pattern.graph = graph_context.clone();
+            // Easy-OPTIONAL synthetic slots (`matched_idx`,
+            // `bracket_left_idx`, `bracket_right_idx`) must remain
+            // wildcard in the graph dimension so the unmatched arm
+            // can witness any valid leaf. The matched-arm assertions
+            // in `checkBinding` already pin
+            // `bgp[matched_idx].terms[3]` to the substituted graph
+            // term, so the matched arm only succeeds when the
+            // prover witnessed a leaf in the right graph (and the
+            // bracket slots in the unmatched arm don't constrain the
+            // graph). Roborev finding 2026-05-03 (third high) — an
+            // enclosing `GRAPH ex:g { ... OPTIONAL { ... } }` was
+            // overwriting the placeholder graph back to `ex:g`,
+            // reintroducing the witness-failure bug from finding 2.
+            let easy_slot_indices: std::collections::BTreeSet<usize> = info
+                .easy_optionals
+                .iter()
+                .flat_map(|eo| {
+                    [eo.matched_idx, eo.bracket_left_idx, eo.bracket_right_idx]
+                })
+                .collect();
+
+            for (i, pattern) in info.patterns.iter_mut().enumerate() {
+                if !easy_slot_indices.contains(&i) {
+                    pattern.graph = graph_context.clone();
+                }
+            }
+
+            // The easy-OPTIONAL's `inner_terms[3]` (the graph
+            // position of the substituted ground inner triple) was
+            // computed against the inner pattern's own graph context
+            // — `GraphContext::Default` if the OPTIONAL inherits
+            // graph scope from this enclosing GRAPH. Rewrite it to
+            // the effective graph term so the matched-arm assertion
+            // pins to `ex:g` (or the bound variable), not to the
+            // empty-string IRI used for the default graph.
+            let effective_graph_term = match name {
+                NamedNodePattern::NamedNode(nn) => {
+                    Term::Static(GroundTerm::NamedNode(nn.clone()))
+                }
+                NamedNodePattern::Variable(v) => Term::Variable(v.as_str().to_string()),
+            };
+            for eo in &mut info.easy_optionals {
+                // Only rewrite the graph slot if the inner pattern
+                // saw the default graph (no inner GRAPH wrapper); a
+                // pre-existing inner GRAPH already substituted a
+                // concrete term.
+                let is_default = matches!(
+                    &eo.inner_terms[3],
+                    Term::Static(GroundTerm::NamedNode(nn)) if nn.as_str().is_empty()
+                );
+                if is_default {
+                    eo.inner_terms[3] = effective_graph_term.clone();
+                }
             }
 
             match name {
                 NamedNodePattern::NamedNode(nn) => {
                     for i in 0..info.patterns.len() {
+                        if easy_slot_indices.contains(&i) {
+                            continue;
+                        }
                         info.assertions.push(Assertion(
                             Term::Static(GroundTerm::NamedNode(nn.clone())),
                             Term::Input(i, 3),
@@ -1683,12 +1941,34 @@ fn process_graph_pattern_inner(
                 }
                 NamedNodePattern::Variable(v) => {
                     let var_name = v.as_str().to_string();
-                    if !info.patterns.is_empty() {
+                    // Find the first non-easy-slot to bind the graph
+                    // variable from. If every slot is an easy-OPTIONAL
+                    // slot (degenerate: a query whose entire WHERE is
+                    // `GRAPH ?g { OPTIONAL { ground } }`), the
+                    // easy-OPTIONAL's `inner_terms[3]` was already
+                    // rewritten to `Term::Variable(?g)` by the loop
+                    // above. We do **not** error here because a sibling
+                    // pattern outside this `GRAPH` (e.g.
+                    // `?x ex:g ?g . GRAPH ?g { OPTIONAL { … } }`) may
+                    // bind `?g` later in the surrounding Join. The
+                    // post-Join `process_query` layer is the right
+                    // place to validate that `?g` ends up bound; if
+                    // not, noir codegen produces a `variables.g`
+                    // reference that fails to compile (loud failure,
+                    // not silent soundness corruption). Roborev
+                    // finding 2026-05-03 (fourth pass, medium):
+                    // earlier rejection was too aggressive.
+                    let first_real = (0..info.patterns.len())
+                        .find(|i| !easy_slot_indices.contains(i));
+                    if let Some(first) = first_real {
                         info.bindings.push(Binding {
                             variable: var_name.clone(),
-                            term: Term::Input(0, 3),
+                            term: Term::Input(first, 3),
                         });
-                        for i in 1..info.patterns.len() {
+                        for i in (first + 1)..info.patterns.len() {
+                            if easy_slot_indices.contains(&i) {
+                                continue;
+                            }
                             info.assertions.push(Assertion(
                                 Term::Variable(var_name.clone()),
                                 Term::Input(i, 3),

@@ -174,6 +174,28 @@ pub(crate) fn build_base_metadata(
         })
         .collect();
 
+    // Easy-case OPTIONAL collapse metadata (round-3 follow-up — see
+    // `spec/exists.md` §4.1). One entry per collapsed OPTIONAL,
+    // exposing the matched-arm slot and the two bracket slots so the
+    // verifier (and the prover-side glue in `ts.js`) knows where to
+    // place witnesses for each arm.
+    let easy_optionals_json: Vec<serde_json::Value> = info
+        .pattern
+        .easy_optionals
+        .iter()
+        .map(|eo| {
+            serde_json::json!({
+                "id": eo.id,
+                "matchedIdx": eo.matched_idx,
+                "matched_idx": eo.matched_idx,
+                "bracketLeftIdx": eo.bracket_left_idx,
+                "bracketRightIdx": eo.bracket_right_idx,
+                "bracket_left_idx": eo.bracket_left_idx,
+                "bracket_right_idx": eo.bracket_right_idx,
+            })
+        })
+        .collect();
+
     serde_json::json!({
         "variables": info.variables,
         "skip_signing": skip_signing,
@@ -194,6 +216,8 @@ pub(crate) fn build_base_metadata(
         "offset": info.offset,
         "notExists": not_exists_json,
         "not_exists": not_exists_json,
+        "easyOptionals": easy_optionals_json,
+        "easy_optionals": easy_optionals_json,
     })
 }
 
