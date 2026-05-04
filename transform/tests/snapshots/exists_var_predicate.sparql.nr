@@ -10,8 +10,6 @@ pub(crate) struct Variables {
 
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables) {
   assert(variables.s == bgp[0].terms[0]);
-  assert(bgp[0].terms[2] == bgp[0].terms[2]);
-  assert(bgp[1].terms[1] == bgp[1].terms[1]);
   assert(consts::hash2([0, consts::encode_string("http://example.org/knows")]) == bgp[0].terms[1]);
   assert(bgp[0].terms[2] == bgp[1].terms[0]);
   assert(consts::hash2([2, consts::hash4([consts::encode_string("hello"), consts::encode_string("hello"), consts::encode_string(""), consts::encode_string("http://www.w3.org/2001/XMLSchema#string")])]) == bgp[1].terms[2]);

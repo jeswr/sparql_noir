@@ -37,7 +37,7 @@ use crate::emit::{
     build_nargo_toml, collect_all_optional_blocks, fill_main_nr_template,
     generate_circuit_for_optional_combination,
 };
-use crate::lower::{process_query_with_options, reset_bracket_counter, reset_optional_counter};
+use crate::lower::process_query_with_options_and_form;
 use crate::metadata::{build_base_metadata, build_variant_metadata};
 
 #[cfg(target_arch = "wasm32")]
@@ -125,15 +125,16 @@ pub fn transform_query(query_str: &str) -> Result<TransformResult, String> {
 
 /// Transform a SPARQL query into Noir circuit files with options.
 pub fn transform_query_with_options(query_str: &str, options: TransformOptions) -> Result<TransformResult, String> {
-    // Reset per-query counters so snapshot fixtures stay stable across
-    // many-queries-in-one-process runs.
-    reset_optional_counter();
-    reset_bracket_counter();
-    
+    // Per-query counters now live inside `FreshSource` (threaded
+    // through the lowering pipeline) — there are no global atomics
+    // to reset. See audit item 9 in
+    // `notes/research/pr-review-audit-2026-05-03.md` (sparql_noir
+    // #37 row, generalised by #42's regression).
     let query = crate::parse::parse_query(query_str)?;
     let root = crate::parse::root_pattern(&query);
+    let form = crate::parse::query_form(&query);
 
-    let info = process_query_with_options(root, &options)?;
+    let info = process_query_with_options_and_form(root, &options, form)?;
 
     // Collect all optional blocks (flatten nested optionals for now).
     // Easy-case OPTIONALs don't show up here — they bypass the
