@@ -111,6 +111,11 @@
   "limit": null,
   "notExists": [
     {
+      "boundaryCaseDispatch": {
+        "0": "lower",
+        "1": "middle",
+        "2": "upper"
+      },
       "bracketLeftIdx": 1,
       "bracketRightIdx": 2,
       "bracket_left_idx": 1,
@@ -119,6 +124,11 @@
   ],
   "not_exists": [
     {
+      "boundaryCaseDispatch": {
+        "0": "lower",
+        "1": "middle",
+        "2": "upper"
+      },
       "bracketLeftIdx": 1,
       "bracketRightIdx": 2,
       "bracket_left_idx": 1,

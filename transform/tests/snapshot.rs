@@ -624,7 +624,8 @@ fn not_exists_ground_inner_lowers_to_non_membership() {
         "expected BGP of size 3 (1 outer + 2 brackets), got:\n{}",
         result.sparql_nr
     );
-    // Body must call `verify_non_membership_no_inclusion`.
+    // Body must call `verify_non_membership_no_inclusion` (the Middle
+    // arm of the runtime dispatch).
     assert!(
         result.sparql_nr.contains("utils::verify_non_membership_no_inclusion"),
         "expected verify_non_membership_no_inclusion call, got:\n{}",
@@ -637,6 +638,108 @@ fn not_exists_ground_inner_lowers_to_non_membership() {
         .and_then(|v| v.as_array())
         .expect("notExists metadata array");
     assert_eq!(ne.len(), 1, "expected one NonExistenceConstraint");
+}
+
+/// Boundary-sentinel transform wiring: the generated circuit must
+/// expose all three `verify_non_membership_*_no_inclusion` primitives
+/// (Lower / Middle / Upper) under a runtime dispatch on the public
+/// `boundary_cases[i]` Field, so the prover can witness any
+/// `absent_hash` regardless of where it falls in the sorted leaf
+/// distribution. See `spec/exists.md` §3.3 and the
+/// `transform_dispatch_*` Noir tests in
+/// `noir/lib/utils/src/lib.nr`.
+#[test]
+fn not_exists_emits_boundary_sentinel_dispatch() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?o . \
+               FILTER(NOT EXISTS { ?s ex:type ex:Person . }) \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    // All three dispatch arms must appear in the generated body.
+    for arm in [
+        "utils::verify_non_membership_low_sentinel_no_inclusion",
+        "utils::verify_non_membership_no_inclusion",
+        "utils::verify_non_membership_high_sentinel_no_inclusion",
+    ] {
+        assert!(
+            result.sparql_nr.contains(arm),
+            "expected dispatch arm `{arm}` in generated sparql.nr, got:\n{}",
+            result.sparql_nr
+        );
+    }
+    // The dispatch must gate on `boundary_cases[0]`.
+    assert!(
+        result.sparql_nr.contains("if boundary_cases[0] == 0")
+            && result.sparql_nr.contains("} else if boundary_cases[0] == 1")
+            && result.sparql_nr.contains("} else if boundary_cases[0] == 2"),
+        "expected boundary_cases[0] dispatch chain, got:\n{}",
+        result.sparql_nr
+    );
+    // Out-of-range tag must reject.
+    assert!(
+        result.sparql_nr.contains("must be 0 (Lower), 1 (Middle), or 2 (Upper)"),
+        "expected out-of-range boundary_case rejection, got:\n{}",
+        result.sparql_nr
+    );
+
+    // The `BoundaryCases` type and its length must match the
+    // constraint count.
+    assert!(
+        result.sparql_nr.contains("type BoundaryCases = [Field; 1]"),
+        "expected BoundaryCases sized to 1 (one constraint), got:\n{}",
+        result.sparql_nr
+    );
+
+    // `main.nr` must run sentinel inclusion + thread the sentinel
+    // arguments into checkBinding.
+    assert!(
+        result.main_nr.contains("verify_low_sentinel_inclusion(low_sentinel, roots[0].value)")
+            && result
+                .main_nr
+                .contains("verify_high_sentinel_inclusion(high_sentinel, roots[0].value)"),
+        "expected sentinel inclusion calls in main.nr, got:\n{}",
+        result.main_nr
+    );
+    assert!(
+        result.main_nr.contains("low_sentinel: SentinelLeaf")
+            && result.main_nr.contains("high_sentinel: SentinelLeaf")
+            && result.main_nr.contains("boundary_cases: pub BoundaryCases"),
+        "expected SentinelLeaf + BoundaryCases parameters in main.nr signature, got:\n{}",
+        result.main_nr
+    );
+}
+
+/// `MINUS` paired with a `FILTER(NOT EXISTS { … })` produces two
+/// independent `NonExistenceConstraint`s, each with its own
+/// boundary-case dispatch. Guards against accidental shared-state
+/// regressions where the dispatch index gets mis-aligned to the
+/// constraint index.
+#[test]
+fn multiple_not_exists_emit_independent_boundary_dispatches() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?o . \
+               FILTER(NOT EXISTS { ?s ex:type ex:Person . }) \
+               MINUS { ?s ex:status ex:Banned . } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    assert!(
+        result.sparql_nr.contains("type BoundaryCases = [Field; 2]"),
+        "expected BoundaryCases sized to 2 (two constraints), got:\n{}",
+        result.sparql_nr
+    );
+    // Each constraint dispatches on a distinct index.
+    for idx in 0..2 {
+        let needle = format!("if boundary_cases[{idx}] == 0");
+        assert!(
+            result.sparql_nr.contains(&needle),
+            "expected dispatch on boundary_cases[{idx}], got:\n{}",
+            result.sparql_nr
+        );
+    }
 }
 
 /// EXISTS nested under boolean operators is rejected for now (see
