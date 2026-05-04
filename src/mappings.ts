@@ -26,9 +26,13 @@ export default {
      * Variable-length string hash, dispatched per `stringHash`. Must
      * satisfy: `stringHashVar(buf, len) == stringHash(buf[0..len])` for
      * any honest prover. Round-2 byte-binding only ships under sha256;
-     * the remaining hashes lack a variable-length Noir API and
+     * the remaining hashes lack a variable-length Noir API (or use an
+     * incompatible `BoundedVec` shape, in sha512's case) and
      * therefore assert (so the round-2 byte-binding contract remains
-     * sound). Round-3 scope -- see `spec/encoding.md` sec.6.5.
+     * sound). `setup.ts` emits a runtime warning when a non-sha256
+     * string hash is selected so callers know to expect proving-time
+     * assertions if their circuits exercise round-2 byte binding.
+     * Round-3 scope -- see `spec/encoding.md` sec.6.5.
      */
     stringHashVar: {
       sha256: "dep::sha256::sha256_var(input, length as u64)",

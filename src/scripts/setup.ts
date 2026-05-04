@@ -109,6 +109,20 @@ console.log(`  Signature:     ${config.signature}`);
 console.log(`  Merkle depth:  ${config.merkleDepth}`);
 console.log(`  STRING_LEN_MAX: ${config.stringLenMax}`);
 
+// Round-2 byte binding (STRLEN / STRSTARTS / CONTAINS) requires a
+// variable-length string hash. Today only sha256 is plumbed end-to-end;
+// the other configured hashes assert at proving time if a circuit
+// exercises `encode_string_bounded`. Surface this here rather than
+// failing silently at proof generation. See `spec/encoding.md` sec.6.5.
+if (config.stringHash !== 'sha256') {
+  console.warn(
+    `\nWARNING: round-2 byte binding (STRLEN / STRSTARTS / CONTAINS) is sha256-only.\n` +
+    `         Selected string hash '${config.stringHash}' will assert at proving\n` +
+    `         time for any circuit that exercises encode_string_bounded.\n` +
+    `         Use --string-hash sha256 to enable round-2 string ops.\n`
+  );
+}
+
 for (const file of fs.readdirSync(noirDir, { recursive: true })) {
   if (typeof file === 'string' && file.endsWith('.template')) {
     let libTemplate = fs.readFileSync(path.join(noirDir, file), 'utf8');

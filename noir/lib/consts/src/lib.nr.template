@@ -31,13 +31,17 @@ pub fn hash_string<let N: u32>(input: [u8; N]) -> [u8; {{stringHashOutputSize}}]
 /// byte-array witness path) to `encode_string` (the credential-layer
 /// canonical hash). See `spec/encoding.md` sec.6.3.
 ///
-/// **Round-2 scope.** Only `sha256` and `sha512` are wired with a true
-/// variable-length implementation. The other supported string hashes
-/// (`blake2s`, `blake3`, `keccak256`, `sha384`) lack a variable-length
-/// API in their Noir implementations, so this function asserts under
-/// those configs -- the round-2 byte-binding path is sha256-only until
-/// a variable-length API lands for the remaining hashes (round-3
-/// scope, see `spec/encoding.md` sec.6.5).
+/// **Round-2 scope.** Only `sha256` is wired with a true variable-length
+/// implementation today. The other supported string hashes (`blake2s`,
+/// `blake3`, `keccak256`, `sha384`, `sha512`) either lack a
+/// variable-length API in their Noir implementations or use an
+/// incompatible `BoundedVec` shape that we've not yet plumbed through;
+/// `hash_string_var` asserts under those configs so honest provers
+/// can't silently land mismatched bindings. `setup.ts` warns when a
+/// non-sha256 string hash is selected for round-2 byte binding. The
+/// round-2 byte-binding path is sha256-only until a variable-length
+/// API lands for the remaining hashes (round-3 scope, see
+/// `spec/encoding.md` sec.6.5).
 pub fn hash_string_var<let N: u32>(input: [u8; N], length: u32) -> [u8; {{stringHashOutputSize}}] {
   {{stringHashVar}}
 }
