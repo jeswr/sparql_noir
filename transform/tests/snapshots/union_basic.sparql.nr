@@ -9,7 +9,7 @@ pub(crate) struct Variables {
 }
 
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables) {
-  let branch_0 = (variables.s == bgp[0].terms[0]) & (bgp[0].terms[2] == bgp[0].terms[2]) & (consts::hash2([0, consts::encode_string("http://example.org/a")]) == bgp[0].terms[1]);
-  let branch_1 = (variables.s == bgp[0].terms[0]) & (bgp[0].terms[2] == bgp[0].terms[2]) & (consts::hash2([0, consts::encode_string("http://example.org/b")]) == bgp[0].terms[1]);
+  let branch_0 = (variables.s == bgp[0].terms[0]) & (consts::hash2([0, consts::encode_string("http://example.org/a")]) == bgp[0].terms[1]);
+  let branch_1 = (variables.s == bgp[0].terms[0]) & (consts::hash2([0, consts::encode_string("http://example.org/b")]) == bgp[0].terms[1]);
   assert(branch_0 | branch_1);
 }

@@ -10,7 +10,5 @@ pub(crate) struct Variables {
 
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables) {
   assert(variables.s == bgp[0].terms[0]);
-  assert(bgp[0].terms[1] == bgp[0].terms[1]);
-  assert(bgp[0].terms[2] == bgp[0].terms[2]);
   assert(true);
 }

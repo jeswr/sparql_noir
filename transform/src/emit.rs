@@ -171,19 +171,22 @@ pub(crate) fn generate_sparql_nr_from_query_info(
 
             for b in &branch.bindings {
                 let left = Term::Variable(b.variable.clone());
-                branch_asserts.push(format!(
-                    "{} == {}",
-                    serialize_term(&left, info, &branch_bindings),
-                    serialize_term(&b.term, info, &branch_bindings)
-                ));
+                let l = serialize_term(&left, info, &branch_bindings);
+                let r = serialize_term(&b.term, info, &branch_bindings);
+                // Same tautology guard as the non-union branch below.
+                if l == r {
+                    continue;
+                }
+                branch_asserts.push(format!("{} == {}", l, r));
             }
 
-            for Assertion(l, r) in &branch.assertions {
-                branch_asserts.push(format!(
-                    "{} == {}",
-                    serialize_term(l, info, &branch_bindings),
-                    serialize_term(r, info, &branch_bindings)
-                ));
+            for Assertion(l_term, r_term) in &branch.assertions {
+                let l = serialize_term(l_term, info, &branch_bindings);
+                let r = serialize_term(r_term, info, &branch_bindings);
+                if l == r {
+                    continue;
+                }
+                branch_asserts.push(format!("{} == {}", l, r));
             }
 
             for f in &branch.filters {
@@ -196,19 +199,27 @@ pub(crate) fn generate_sparql_nr_from_query_info(
     } else {
         for b in &info.pattern.bindings {
             let left = Term::Variable(b.variable.clone());
-            assertions.push(format!(
-                "{} == {}",
-                serialize_term(&left, info, &binding_map),
-                serialize_term(&b.term, info, &binding_map)
-            ));
+            let l = serialize_term(&left, info, &binding_map);
+            let r = serialize_term(&b.term, info, &binding_map);
+            // Both sides resolve to the same `bgp[i].terms[j]` slot when the
+            // variable is not projected and is bound by the same triple
+            // position (e.g. ASK queries with no projected variables). The
+            // assertion is then a tautology — skip it. Per
+            // https://github.com/jeswr/sparql_noir/pull/50#discussion-r3178804193
+            if l == r {
+                continue;
+            }
+            assertions.push(format!("{} == {}", l, r));
         }
 
-        for Assertion(l, r) in &info.pattern.assertions {
-            assertions.push(format!(
-                "{} == {}",
-                serialize_term(l, info, &binding_map),
-                serialize_term(r, info, &binding_map)
-            ));
+        for Assertion(l_term, r_term) in &info.pattern.assertions {
+            let l = serialize_term(l_term, info, &binding_map);
+            let r = serialize_term(r_term, info, &binding_map);
+            // Same tautology guard as the binding loop above.
+            if l == r {
+                continue;
+            }
+            assertions.push(format!("{} == {}", l, r));
         }
 
         for f in &info.pattern.filters {
