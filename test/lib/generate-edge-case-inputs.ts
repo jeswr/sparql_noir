@@ -16,11 +16,13 @@ import type { Term, Quad, Literal, NamedNode } from '@rdfjs/types';
 import { fileURLToPath } from 'url';
 
 import { generateEdgeCaseTestsV2, EdgeCaseTestV2 } from './edge-case-tests.js';
-import { 
-  signDataInMemory, 
+import {
+  signDataInMemory,
   transformQueryInMemory,
   generateCheckBindingInputs,
-  SignedData, 
+  termHashToWitness,
+  STRING_LEN_MAX,
+  SignedData,
   CircuitMetadata,
   CheckBindingInputs,
 } from './check-binding-inputs.js';
@@ -69,13 +71,26 @@ function termToBindingString(term: Term): string {
   }
 }
 
+/**
+ * Round-1 placeholder term-witness shape for generated inputs. Mirrors
+ * `TermWitness` in `noir/lib/types::TermWitness`; round-2 will populate
+ * `bytes` / `length` from the source quad's lexical form (until then
+ * the byte witness is zero-padded and advisory; see
+ * `spec/encoding.md` sec.6.3).
+ */
+interface TermWitnessJson {
+  hash: string;
+  bytes: number[];
+  length: number;
+}
+
 interface GeneratedInputs {
   test: EdgeCaseTestV2;
   validInputs: {
     public_key: object[];
     roots: object[];
     bgp: Array<{
-      terms: string[];
+      terms: TermWitnessJson[];
       path: string[];
       directions: (0 | 1)[];
     }>;
@@ -85,7 +100,7 @@ interface GeneratedInputs {
     public_key: object[];
     roots: object[];
     bgp: Array<{
-      terms: string[];
+      terms: TermWitnessJson[];
       path: string[];
       directions: (0 | 1)[];
     }>;
@@ -184,9 +199,16 @@ async function generateInputsForTest(test: EdgeCaseTestV2): Promise<GeneratedInp
       }
       
       // Create the invalid BGP using the signed data's merkle proof
-      // but with the explicitly defined term encodings
+      // but with the explicitly defined term encodings. Wrap each
+      // term-hash as a round-1 placeholder `TermWitness`
+      // (`spec/encoding.md` sec.6.3).
       const invalidBgp = [{
-        terms: [encodedSubject, encodedPredicate, encodedObject, encodedGraph],
+        terms: [
+          termHashToWitness(encodedSubject),
+          termHashToWitness(encodedPredicate),
+          termHashToWitness(encodedObject),
+          termHashToWitness(encodedGraph),
+        ],
         path: invalidSignedData.paths[0] || [],
         directions: (invalidSignedData.direction[0] || []).map(d => (d ? 1 : 0) as 0 | 1),
       }];

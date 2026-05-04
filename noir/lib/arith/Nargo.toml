@@ -5,3 +5,4 @@ authors = [""]
 
 [dependencies]
 consts = { path = "../consts" }
+xpath = { path = "../xpath" }

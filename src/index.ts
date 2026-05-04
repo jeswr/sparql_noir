@@ -11,7 +11,7 @@ import type { VerifyResult } from './scripts/verify.js';
 import { defaultConfig } from './config.js';
 import N3 from 'n3';
 import { RDFC10 } from 'rdfjs-c14n';
-import { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
+import { processQuadsForMerkle, processQuadsForPrefix3, generateSignature } from './scripts/sign.js';
 import { runJson } from './encode.js';
 import { quadToStringQuad } from 'rdf-string-ttl';
 import { UltraHonkBackend } from '@aztec/bb.js';
@@ -92,6 +92,29 @@ function isAbsolutePath(p: string): boolean {
 export { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
 export { generateProofs } from './scripts/prove.js';
 export { verifyProofs } from './scripts/verify.js';
+
+// Boundary-case witness generation for NOT EXISTS / MINUS dispatch.
+// See `spec/exists.md` Sec.3.3.
+export {
+  computeBoundaryCase,
+  findMiddleBracketIndices,
+  BOUNDARY_CASE_LOWER,
+  BOUNDARY_CASE_MIDDLE,
+  BOUNDARY_CASE_UPPER,
+} from './boundaryCase.js';
+export type { BoundaryCaseTag } from './boundaryCase.js';
+
+// Verifier-side post-processing for aggregates / ORDER BY / LIMIT
+// (disclose-and-verify pattern, SPARQL_ROADMAP.md §8.6 Q6 decision).
+export { applyPostProcessing } from './aggregates.js';
+export type {
+  AggregateKindTag,
+  AggregateMetadata,
+  OrderByMetadata,
+  PostProcessingMetadata,
+  DisclosedRow,
+  ResultRow,
+} from './aggregates.js';
 
 // Export types
 export type { SignedData, ProveResult, VerifyResult };
@@ -364,17 +387,51 @@ export async function sign(
   
   // Convert dataset to canonicalized quads
   const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(dataset));
-  
-  // Process quads for Merkle tree
+
+  // Process quads for Merkle tree (round-3 leaf-hash sorted commitment)
+  // and the round-6 prefix-3 sorted commitment in **separate** Noir
+  // executions -- the two `merkle*` helpers return different generic
+  // struct types, so wrapping them in a single homogeneous array
+  // fails Noir's array-element type-equality check.
   const { noirInput } = await processQuadsForMerkle(quads);
-  
-  // Generate Merkle tree via Noir execution
-  const jsonRes = runJson(`[${noirInput}]`)[0];
-  
+  const prefix3Spec = await processQuadsForPrefix3(quads);
+
+  const jsonRes: any = runJson(`[${noirInput}]`)[0];
+
+  // Surface round-3 sentinel inclusion paths to the prover. Mirrors
+  // `signRdfData` (see `src/scripts/sign.ts` for the rationale).
+  jsonRes.lowSentinelPath = jsonRes.low_sentinel_path;
+  jsonRes.lowSentinelDirections = jsonRes.low_sentinel_directions;
+  jsonRes.highSentinelPath = jsonRes.high_sentinel_path;
+  jsonRes.highSentinelDirections = jsonRes.high_sentinel_directions;
+  delete jsonRes.low_sentinel_path;
+  delete jsonRes.low_sentinel_directions;
+  delete jsonRes.high_sentinel_path;
+  delete jsonRes.high_sentinel_directions;
+
+  if (prefix3Spec) {
+    const prefix3Res: any = runJson(`[${prefix3Spec.noirInput}]`)[0];
+    jsonRes.rootPrefix3 = prefix3Res.root;
+    jsonRes.rootPrefix3_u8 = prefix3Res.root_u8;
+    jsonRes.prefix3 = {
+      prefixes: prefix3Res.prefixes,
+      paths: prefix3Res.paths,
+      direction: prefix3Res.direction,
+      lowSentinelPath: prefix3Res.low_sentinel_path,
+      lowSentinelDirections: prefix3Res.low_sentinel_directions,
+      highSentinelPath: prefix3Res.high_sentinel_path,
+      highSentinelDirections: prefix3Res.high_sentinel_directions,
+    };
+  } else {
+    jsonRes.rootPrefix3 = "0x0";
+  }
+
   // Add quad string representations
   jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
-  
-  // Generate cryptographic signature using shared logic
+
+  // Two-root signer ABI -- separate signatures over `root` and
+  // `rootPrefix3` under the same key. See
+  // `spec/prefix-tree-commitment.md` Sec.8.6.
   await generateSignature(jsonRes, effectiveConfig.signature);
 
   return jsonRes as SignedData;

@@ -17,7 +17,94 @@ import { Store, DataFactory as DF } from 'n3';
 import { stringQuadToQuad as rdfStringToQuad, termToString } from 'rdf-string-ttl';
 import type { Term, Quad, Literal } from '@rdfjs/types';
 import type { SignedData } from './sign.js';
-import { encodeString, encodeDatatypeIri, encodeNamedNode } from '../encode.js';
+import { encodeString, encodeDatatypeIri, encodeNamedNode, getTermEncodingString, runJson } from '../encode.js';
+import { buildPrefix3Inputs, type AbsentTermDescriptor, type PrefixNotExistsMeta } from './prove-prefix3.js';
+import { defaultConfig } from '../config.js';
+
+/**
+ * Wrap a bare term-hash hex string as a `TermWitness` matching the
+ * Noir `types::TermWitness` shape, with `bytes` / `length` populated
+ * from the source RDF term's lexical form.
+ *
+ * **Round-2 contract** (`spec/encoding.md` sec.6.3). The bytes carry the
+ * UTF-8 encoding of the term's lexical value:
+ *   - NamedNode: the IRI string verbatim.
+ *   - Literal: the literal's value field (no datatype, no language tag).
+ *   - BlankNode: the blank-node label.
+ *   - DefaultGraph: empty.
+ * `length` is the byte count of the encoded prefix (clamped to
+ * `STRING_LEN_MAX`); positions `[length..STRING_LEN_MAX)` are zero-
+ * padded. The bytes are advisory at the Triple level until a string
+ * operator binds them at its use site via
+ * `utils::bind_term_bytes_*`.
+ *
+ * **Truncation behaviour.** If the lexical form exceeds
+ * `STRING_LEN_MAX`, the leading bytes are kept and `length` is set to
+ * `STRING_LEN_MAX`. Any subsequent string-operator binding will fail
+ * (the term's full lexical hash differs from the truncated bytes'
+ * hash), surfacing as a proof-construction error. Callers can lift the
+ * `STRING_LEN_MAX` ceiling via `setup.ts --string-len-max <n>`.
+ */
+function termToWitness(term: Term, hash: string, stringLenMax: number): { hash: string; bytes: number[]; length: number } {
+  const lexical = lexicalFormBytes(term);
+  const cap = stringLenMax;
+  const bytes = new Array<number>(cap).fill(0);
+  const len = Math.min(lexical.length, cap);
+  for (let i = 0; i < len; i++) {
+    const b = lexical[i];
+    if (b !== undefined) bytes[i] = b;
+  }
+  return {
+    hash,
+    bytes,
+    length: len,
+  };
+}
+
+/**
+ * Resolve the bounded byte-array witness cap (`STRING_LEN_MAX`) to use
+ * for a given circuit run. Per-circuit metadata wins over the
+ * source-default; setup.ts can override the default via
+ * `--string-len-max <n>` and the new value is recorded in the
+ * circuit's metadata. Falling back to `defaultConfig.stringLenMax`
+ * keeps behaviour unchanged for circuits whose metadata predates the
+ * round-2 byte-array witness.
+ */
+function resolveStringLenMax(metadata: Record<string, unknown> | undefined | null): number {
+  if (metadata) {
+    const m = metadata as Record<string, unknown>;
+    const cand = (m.stringLenMax ?? m.string_len_max);
+    if (typeof cand === 'number' && Number.isFinite(cand) && Number.isInteger(cand) && cand > 0) {
+      return cand;
+    }
+  }
+  return defaultConfig.stringLenMax;
+}
+
+/**
+ * Extract the UTF-8 byte sequence of an RDF term's lexical form
+ * (matching the Noir `consts::encode_string_bounded` input domain).
+ *
+ * Mirrors the encoding in `spec/encoding.md` sec.3:
+ *   - NamedNode -> `term.value` (the IRI string).
+ *   - Literal -> `term.value` (the literal's value, NOT including
+ *     datatype IRI or language tag).
+ *   - BlankNode -> `term.value` (the blank-node label).
+ *   - DefaultGraph -> empty bytes.
+ *   - Variable / Quad -> empty (these don't appear in signed quads).
+ */
+function lexicalFormBytes(term: Term): Uint8Array {
+  switch (term.termType) {
+    case 'NamedNode':
+    case 'BlankNode':
+    case 'Literal':
+      return new TextEncoder().encode(term.value);
+    case 'DefaultGraph':
+      return new Uint8Array(0);
+    default:
+      return new Uint8Array(0);
+  }
+}
 
 // --- Custom stringQuadToQuad that properly handles escape sequences ---
 
@@ -170,6 +257,13 @@ interface CircuitMetadata {
   hiddenInputs?: HiddenInput[];
   hidden_inputs?: HiddenInput[];
   variables: string[];
+  // Round-6 prefix-3 fields (`spec/prefix-tree-commitment.md` Sec.8.6).
+  prefixNotExists?: PrefixNotExistsMeta[];
+  prefix_not_exists?: PrefixNotExistsMeta[];
+  bgpPrefix3Length?: number;
+  bgp_prefix3_length?: number;
+  notExists?: unknown[];
+  not_exists?: unknown[];
 }
 
 interface HiddenInput {
@@ -177,6 +271,149 @@ interface HiddenInput {
   value?: [number, number] | TermJson;
   input?: { type: string; value: unknown };
   computedType?: string;
+  /** Round-2: the literal needle string for `contains_position` hidden inputs. */
+  needle?: string;
+}
+
+/**
+ * Convert an `@rdfjs/types::Term` into a plain object compatible with
+ * the {@link buildPrefix3Inputs} substitution path. The prefix-3
+ * helper doesn't depend on `@rdfjs/types`, so the binding values are
+ * passed as `{ termType, value, language?, datatype? }` objects.
+ */
+function termToPlainBinding(term: Term): { termType: string; value: string; language?: string; datatype?: { value: string } } {
+  if (term.termType === 'Literal') {
+    const lit = term as Literal;
+    const out: { termType: string; value: string; language?: string; datatype?: { value: string } } = {
+      termType: 'Literal',
+      value: lit.value,
+    };
+    if (lit.language) out.language = lit.language;
+    if (lit.datatype) out.datatype = { value: lit.datatype.value };
+    return out;
+  }
+  return { termType: term.termType, value: (term as { value: string }).value };
+}
+
+/**
+ * Encode an `absent_terms[j]` descriptor (from
+ * `metadata.prefixNotExists[i].absentTerms`) into the Field-string the
+ * Noir circuit's `hash3_sp_g(s, p, g)` call expects.
+ *
+ * - `static`: encode the ground term via the same `getTermEncodingString`
+ *   pipeline that the signer uses for tree leaves.
+ * - `variable`: look up the live binding's resolved RDF term and encode
+ *   it as above. Throws if the variable isn't in the binding (the
+ *   transform layer guarantees outer-bound variables substitute, but
+ *   defence-in-depth here surfaces a clearer error than a Noir trap).
+ * - `input`: the prefix-3 free-position case never lands here in
+ *   round-6 (the `Term::Input` lowering only fires for the matched
+ *   arm of an OPTIONAL collapse, not for `PrefixNonExistenceConstraint`),
+ *   but the helper handles it for symmetry: read the encoded term out
+ *   of `bgp[patternIdx].terms[position]`, which is already a Field
+ *   string.
+ */
+function encodeAbsentTerm(
+  descriptor: AbsentTermDescriptor,
+  binding: ReadonlyMap<string, { termType: string; value: string; language?: string; datatype?: { value: string } }>,
+  bgpTriples: ReadonlyArray<{ terms: string[] }>,
+): string {
+  if (descriptor.kind === 'static') {
+    const t = descriptor.term;
+    const rdfTerm = (() => {
+      switch (t.termType) {
+        case 'NamedNode':
+          return DF.namedNode(t.value!);
+        case 'Literal': {
+          const v = t.value!;
+          if (t.datatype && t.datatype.value && t.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string') {
+            return DF.literal(v, DF.namedNode(t.datatype.value));
+          }
+          if (t.language) {
+            return DF.literal(v, t.language);
+          }
+          return DF.literal(v);
+        }
+        case 'BlankNode':
+          return DF.blankNode(t.value!);
+        case 'DefaultGraph':
+          return DF.defaultGraph();
+        default:
+          throw new Error(`unsupported static term: ${t.termType}`);
+      }
+    })();
+    return getTermEncodingString(rdfTerm);
+  }
+  if (descriptor.kind === 'variable') {
+    const live = binding.get(descriptor.name);
+    if (!live) {
+      throw new Error(
+        `prefix-3 absent term references unbound variable ?${descriptor.name}; ` +
+        `the transform layer should have rejected this query`,
+      );
+    }
+    const rdfTerm = (() => {
+      switch (live.termType) {
+        case 'NamedNode':
+          return DF.namedNode(live.value);
+        case 'Literal': {
+          if (live.datatype && live.datatype.value && live.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string') {
+            return DF.literal(live.value, DF.namedNode(live.datatype.value));
+          }
+          if (live.language) {
+            return DF.literal(live.value, live.language);
+          }
+          return DF.literal(live.value);
+        }
+        case 'BlankNode':
+          return DF.blankNode(live.value);
+        case 'DefaultGraph':
+          return DF.defaultGraph();
+        default:
+          throw new Error(`unsupported binding term: ${live.termType}`);
+      }
+    })();
+    return getTermEncodingString(rdfTerm);
+  }
+  // descriptor.kind === 'input'
+  const triple = bgpTriples[descriptor.patternIdx];
+  if (!triple) {
+    throw new Error(`prefix-3 absent term references missing bgp[${descriptor.patternIdx}]`);
+  }
+  const term = triple.terms[descriptor.position];
+  if (term === undefined) {
+    throw new Error(
+      `prefix-3 absent term references bgp[${descriptor.patternIdx}].terms[${descriptor.position}] ` +
+      `but the triple has only ${triple.terms.length} terms`,
+    );
+  }
+  return term;
+}
+
+/**
+ * Build the round-3 sentinel inputs for the generated `main.nr`. The
+ * signer publishes `lowSentinelPath` / `highSentinelPath` etc. as
+ * top-level `signedData` fields (see `src/scripts/sign.ts`); this
+ * helper just wraps them in the `SentinelLeaf` slot shape.
+ *
+ * Returns `null` if any of the sentinel paths are missing -- in that
+ * case the caller skips wiring the sentinels (round-3 sentinel-aware
+ * circuits without a sentinel signer will fail at `nargo execute`,
+ * which is the correct behaviour: an old `signedData.json` doesn't
+ * carry sentinel paths and can't drive a round-3 NOT EXISTS proof).
+ */
+function buildRound3SentinelInputs(signedData: SignedData): { low_sentinel: { path: string[]; directions: boolean[] }; high_sentinel: { path: string[]; directions: boolean[] } } | null {
+  const lp = signedData.lowSentinelPath;
+  const ld = signedData.lowSentinelDirections;
+  const hp = signedData.highSentinelPath;
+  const hd = signedData.highSentinelDirections;
+  if (!lp || !ld || !hp || !hd) {
+    return null;
+  }
+  return {
+    low_sentinel: { path: lp, directions: ld },
+    high_sentinel: { path: hp, directions: hd },
+  };
 }
 
 // Helper function to parse datetime values in various formats
@@ -656,6 +893,64 @@ function computeHiddenInputs(
         console.warn(`Unknown hidden input type for ebv_datatype: ${input.type}`);
         return null;
       }
+    } else if (hidden.type === 'customComputed' && hidden.computedType === 'contains_position') {
+      // Round-2 CONTAINS witness: the prover supplies the byte
+      // offset where `needle` first occurs inside the bound term's
+      // lexical bytes. The circuit's `string_contains` helper checks
+      // the byte equality at that offset and `position + needle_len <= length`.
+      // If the needle is genuinely absent, no `position` satisfies the
+      // constraint and the proof fails to construct.
+      const input = hidden.input as { type: string; value: unknown } | undefined;
+      const needle = (hidden as unknown as { needle?: string }).needle;
+      if (!input || typeof needle !== 'string') {
+        console.warn('Hidden input missing input/needle for contains_position');
+        return null;
+      }
+      let lexical = '';
+      if (input.type === 'variable') {
+        const varName = input.value as string;
+        const boundTerm = binding.get(varName);
+        if (!boundTerm) {
+          console.warn(`Variable ${varName} not found in binding for contains_position`);
+          return null;
+        }
+        lexical = boundTerm.value;
+      } else if (input.type === 'static') {
+        const termJson = input.value as TermJson;
+        lexical = termJson?.value ?? '';
+      } else {
+        console.warn(`Unknown hidden input type for contains_position: ${input.type}`);
+        return null;
+      }
+      // Search by UTF-8 bytes (the circuit walks bytes).
+      const haystackBytes = new TextEncoder().encode(lexical);
+      const needleBytes = new TextEncoder().encode(needle);
+      let position = 0;
+      let found = false;
+      for (let i = 0; i + needleBytes.length <= haystackBytes.length; i++) {
+        let match = true;
+        for (let j = 0; j < needleBytes.length; j++) {
+          if (haystackBytes[i + j] !== needleBytes[j]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          position = i;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        // Needle absent. We still emit a position (zero); the circuit
+        // will reject because the byte equality fails. This makes the
+        // proof construction fail with a clear error rather than an
+        // index-out-of-range crash.
+        console.warn(
+          `CONTAINS: needle "${needle}" not found in "${lexical}" -- proof will fail to construct`
+        );
+      }
+      hiddenValues.push(position.toString());
     } else if (hidden.type === 'variable') {
       // Direct variable reference
       const varName = (hidden.value as unknown) as string;
@@ -924,16 +1219,46 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     return -1;
   }
 
-  // Build triple object for circuit input
+  // Build triple object for circuit input. Each term-hash is wrapped
+  // as a `TermWitness` whose `bytes` / `length` carry the source
+  // term's UTF-8 lexical form (round-2 contract -- see
+  // `spec/encoding.md` sec.6.3). Round-2 string operators
+  // (STRLEN / STRSTARTS / CONTAINS) bind the bytes at their use site
+  // via `utils::bind_term_bytes_*`. The byte-array width MUST match
+  // the circuit's compiled `STRING_LEN_MAX` (per-circuit metadata),
+  // not the source-default -- otherwise circuits compiled with
+  // `setup.ts --string-len-max <n>` for n != 64 receive mis-sized
+  // witnesses and the proof generation fails.
+  const stringLenMax = resolveStringLenMax(metadata as unknown as Record<string, unknown> | undefined);
   function getTripleObject(id: number) {
+    const rawTerms = signedData!.triples[id] ?? [];
+    const sourceQuad = quadArr[id];
+    const sourceTerms: Term[] = sourceQuad
+      ? [sourceQuad.subject, sourceQuad.predicate, sourceQuad.object, sourceQuad.graph]
+      : [];
+    const termWitnesses = rawTerms.map((hash, i) => {
+      const sourceTerm = sourceTerms[i];
+      if (sourceTerm) {
+        return termToWitness(sourceTerm, hash, stringLenMax);
+      }
+      // Fallback: zero-padded placeholder (round-1 behaviour). This
+      // path triggers when the signed dataset's `triples[id]` has
+      // hashes but no parsed quad, which shouldn't happen in normal
+      // operation but stays defensive against partial fixtures.
+      return {
+        hash,
+        bytes: new Array(stringLenMax).fill(0),
+        length: 0,
+      };
+    });
     if (skipSigning) {
       // Simplified: only terms, no Merkle proof data
       return {
-        terms: signedData!.triples[id],
+        terms: termWitnesses,
       };
     }
     return {
-      terms: signedData!.triples[id],
+      terms: termWitnesses,
       path: signedData!.paths[id],
       directions: signedData!.direction[id],
     };
@@ -1180,8 +1505,34 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       continue;
     }
 
+    // Round-6 prefix-3 inputs (`spec/prefix-tree-commitment.md`
+    // Sec.8.6). Compute absent prefix hashes against the live
+    // binding, locate bracketing leaves, and pick the boundary
+    // case. `null` means the circuit doesn't reference the
+    // prefix-3 commitment, so we omit the inputs entirely.
+    const bgpTriples = tripleIndices.map(i => ({ terms: signedData!.triples[i] as string[] }));
+    const plainBinding = new Map<string, { termType: string; value: string; language?: string; datatype?: { value: string } }>();
+    for (const [k, v] of binding) plainBinding.set(k, termToPlainBinding(v));
+    let prefix3Inputs: ReturnType<typeof buildPrefix3Inputs> = null;
+    try {
+      prefix3Inputs = buildPrefix3Inputs(signedData!, metadata as unknown as Record<string, unknown>, plainBinding, bgpTriples, encodeAbsentTerm);
+    } catch (err) {
+      // Skip this binding if absent-prefix hash collides with a real
+      // dataset prefix (the constraint is unsatisfiable for this μ).
+      const msg = String((err as Error).message || err);
+      if (msg.includes('found absent prefix already in the dataset')) {
+        continue;
+      }
+      throw err;
+    }
+
+    // Round-3 sentinel inputs -- always wired when the signer
+    // published them, since the cost is negligible and any NOT
+    // EXISTS / OPTIONAL collapse circuit needs them.
+    const round3Sentinels = buildRound3SentinelInputs(signedData!);
+
     // Build circuit input
-    const baseInput = skipSigning ? {
+    const baseInput: Record<string, unknown> = skipSigning ? {
       // Simplified circuit: only BGP and variables
       bgp: tripleIndices.map(i => getTripleObject(i)),
       variables,
@@ -1197,10 +1548,33 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       variables,
     };
 
+    // Round-6 two-root signer ABI: when the circuit declares
+    // `roots: [Root; 2]` (any prefix-3 dispatch present), append
+    // `(rootPrefix3, signaturePrefix3)`.
+    if (!skipSigning && prefix3Inputs && signedData!.rootPrefix3 && signedData!.rootPrefix3 !== '0x0') {
+      (baseInput.roots as unknown[]).push({
+        value: signedData!.rootPrefix3,
+        signature: signedData!.signaturePrefix3,
+        keyIndex: 0,
+      });
+    }
+
     // Add hidden inputs if present
-    const circuitInput = hiddenValues.length > 0 
+    let circuitInput: Record<string, unknown> = hiddenValues.length > 0
       ? { ...baseInput, hidden: hiddenValues }
       : baseInput;
+    if (!skipSigning && round3Sentinels && metadata && (metadata.notExists || metadata.not_exists || prefix3Inputs)) {
+      circuitInput = { ...circuitInput, low_sentinel: round3Sentinels.low_sentinel, high_sentinel: round3Sentinels.high_sentinel };
+    }
+    if (!skipSigning && prefix3Inputs) {
+      circuitInput = {
+        ...circuitInput,
+        bgp_prefix3: prefix3Inputs.bgp_prefix3,
+        low_sentinel_3: prefix3Inputs.low_sentinel_3,
+        high_sentinel_3: prefix3Inputs.high_sentinel_3,
+        boundary_cases_prefix3: prefix3Inputs.boundary_cases_prefix3,
+      };
+    }
 
     bindingInputs.push({ bindingIdx, circuitInput });
   }
@@ -1376,13 +1750,35 @@ export async function generateProofsInMemory(options: ProveOptionsInMemory): Pro
     return -1;
   }
 
-  // Build triple object for circuit input
+  // Build triple object for circuit input. Each term-hash is wrapped
+  // as a `TermWitness` whose `bytes` / `length` carry the source
+  // term's UTF-8 lexical form (round-2 contract -- see
+  // `spec/encoding.md` sec.6.3). Byte-array width follows per-circuit
+  // metadata (not the source-default) so circuits compiled with a
+  // non-default `STRING_LEN_MAX` get correctly-sized witnesses.
+  const stringLenMax = resolveStringLenMax(metadata as unknown as Record<string, unknown> | undefined);
   function getTripleObject(id: number) {
+    const rawTerms = signedData.triples[id] ?? [];
+    const sourceQuad = quadArr[id];
+    const sourceTerms: Term[] = sourceQuad
+      ? [sourceQuad.subject, sourceQuad.predicate, sourceQuad.object, sourceQuad.graph]
+      : [];
+    const termWitnesses = rawTerms.map((hash, i) => {
+      const sourceTerm = sourceTerms[i];
+      if (sourceTerm) {
+        return termToWitness(sourceTerm, hash, stringLenMax);
+      }
+      return {
+        hash,
+        bytes: new Array(stringLenMax).fill(0),
+        length: 0,
+      };
+    });
     if (skipSigning) {
-      return { terms: signedData.triples[id] };
+      return { terms: termWitnesses };
     }
     return {
-      terms: signedData.triples[id],
+      terms: termWitnesses,
       path: signedData.paths[id],
       directions: signedData.direction[id],
     };
@@ -1571,7 +1967,27 @@ export async function generateProofsInMemory(options: ProveOptionsInMemory): Pro
     const hiddenValues = computeHiddenInputs(hiddenInputs, binding);
     if (hiddenValues === null) continue;
 
-    const baseInput = skipSigning ? {
+    // Round-6 prefix-3 inputs (`spec/prefix-tree-commitment.md`
+    // Sec.8.6). Same logic as the file-based path -- substitute,
+    // hash, bracket. Skip the binding if the absent prefix is
+    // present in the dataset.
+    const bgpTriples = tripleIndices.map(i => ({ terms: signedData.triples[i] as string[] }));
+    const plainBinding = new Map<string, { termType: string; value: string; language?: string; datatype?: { value: string } }>();
+    for (const [k, v] of binding) plainBinding.set(k, termToPlainBinding(v));
+    let prefix3Inputs: ReturnType<typeof buildPrefix3Inputs> = null;
+    try {
+      prefix3Inputs = buildPrefix3Inputs(signedData, circuitMetadata as unknown as Record<string, unknown>, plainBinding, bgpTriples, encodeAbsentTerm);
+    } catch (err) {
+      const msg = String((err as Error).message || err);
+      if (msg.includes('found absent prefix already in the dataset')) {
+        continue;
+      }
+      throw err;
+    }
+
+    const round3Sentinels = buildRound3SentinelInputs(signedData);
+
+    const baseInput: Record<string, unknown> = skipSigning ? {
       bgp: tripleIndices.map(i => getTripleObject(i)),
       variables,
     } : {
@@ -1585,9 +2001,29 @@ export async function generateProofsInMemory(options: ProveOptionsInMemory): Pro
       variables,
     };
 
-    const circuitInput = hiddenValues.length > 0
+    if (!skipSigning && prefix3Inputs && signedData.rootPrefix3 && signedData.rootPrefix3 !== '0x0') {
+      (baseInput.roots as unknown[]).push({
+        value: signedData.rootPrefix3,
+        signature: signedData.signaturePrefix3,
+        keyIndex: 0,
+      });
+    }
+
+    let circuitInput: Record<string, unknown> = hiddenValues.length > 0
       ? { ...baseInput, hidden: hiddenValues }
       : baseInput;
+    if (!skipSigning && round3Sentinels && circuitMetadata && (circuitMetadata.notExists || circuitMetadata.not_exists || prefix3Inputs)) {
+      circuitInput = { ...circuitInput, low_sentinel: round3Sentinels.low_sentinel, high_sentinel: round3Sentinels.high_sentinel };
+    }
+    if (!skipSigning && prefix3Inputs) {
+      circuitInput = {
+        ...circuitInput,
+        bgp_prefix3: prefix3Inputs.bgp_prefix3,
+        low_sentinel_3: prefix3Inputs.low_sentinel_3,
+        high_sentinel_3: prefix3Inputs.high_sentinel_3,
+        boundary_cases_prefix3: prefix3Inputs.boundary_cases_prefix3,
+      };
+    }
 
     bindingInputs.push({ bindingIdx, circuitInput });
   }
