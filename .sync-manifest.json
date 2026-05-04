@@ -1,0 +1,7 @@
+{
+  "profile": "ts-circuit",
+  "ci_hooks": [],
+  "files": {
+    ".github/workflows/require-copilot-review.yml": "309b89fbd8e4156d7d2312d94d1ec96d8f5aa8771f8b0fbb129ab25f84717c82"
+  }
+}
