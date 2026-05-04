@@ -20,12 +20,59 @@ import { Fq } from '@aztec/foundation/fields';
 
 // --- Exported Types ---
 
+/**
+ * Round-5 prefix-3 sorted Merkle commitment scaffolding (`spec/prefix-tree-commitment.md`).
+ *
+ * The signer publishes **two roots** in the signed payload:
+ *
+ *   - `root` (alias `root_4`) — leaf-hash sorted commitment over `hash4(s, p, o, g)` (round 3).
+ *   - `rootPrefix3` (alias `root_3sp_g`) — prefix-3 sorted commitment over `hash3_sp_g(s, p, g)` (round 4).
+ *
+ * Both roots authenticate the same dataset; the verifier checks the
+ * signature once over the concatenated `(root_4, root_3sp_g)` payload
+ * (or two signatures over each root, depending on the chosen scheme).
+ *
+ * `prefixes3` carries the deduplicated `(s, p, g)` prefix multiset and
+ * its Merkle paths so the prover can construct `bgp_prefix3` slot
+ * witnesses for prefix-3 NOT EXISTS / OPTIONAL collapse circuits.
+ *
+ * Deployments that don't need the prefix tree can omit `prefixes3` and
+ * set `rootPrefix3 = "0x0"`; any prover attempting a prefix-3
+ * non-membership proof will fail because the genuine tree-build hash
+ * won't equal zero. See `spec/prefix-tree-commitment.md` Sec.6.3.
+ */
+export interface PrefixTree3Data {
+  /** Deduplicated `(s, p, g)` prefixes -- `[encoded_s, encoded_p, encoded_g]`. */
+  prefixes: string[][];
+  /** Per-prefix Merkle paths against `rootPrefix3`. */
+  paths: string[][];
+  /** Per-prefix direction bits. */
+  direction: boolean[][];
+  /** Low-sentinel inclusion path (sorted index 0). */
+  lowSentinelPath: string[];
+  lowSentinelDirections: boolean[];
+  /** High-sentinel inclusion path (sorted index N + 1). */
+  highSentinelPath: string[];
+  highSentinelDirections: boolean[];
+}
+
 export interface SignedData {
   triples: string[][];
   paths: string[][];
   direction: boolean[][];
   root: string;
   root_u8?: number[];
+  /**
+   * Round-5 two-root signer ABI. The prefix-3 sorted Merkle root,
+   * committed alongside `root` by the signer. Set to `"0x0"` for
+   * deployments that don't build the prefix tree.
+   */
+  rootPrefix3?: string;
+  /**
+   * Round-5 prefix-3 sorted Merkle commitment data. Optional --
+   * absent for round-3-only deployments.
+   */
+  prefix3?: PrefixTree3Data;
   signature: unknown;
   pubKey: unknown;
   nquads: Array<{
@@ -44,7 +91,8 @@ export interface SignOptions {
 // --- Core Signing Logic ---
 
 /**
- * Process RDF quads and generate a Merkle tree structure
+ * Process RDF quads and generate a Merkle tree structure (leaf-hash
+ * sorted, round 3).
  */
 export async function processQuadsForMerkle(quads: Quad[]): Promise<{
   triples: string[];
@@ -62,6 +110,44 @@ export async function processQuadsForMerkle(quads: Quad[]): Promise<{
   return {
     triples,
     noirInput: `utils::merkle::<consts::MERKLE_DEPTH, ${triples.length}>([${triples.join(',')}])`,
+  };
+}
+
+/**
+ * Process RDF quads and generate the round-5 prefix-3 sorted Merkle
+ * tree structure (`spec/prefix-tree-commitment.md` Sec.2). Leaves are
+ * keyed by `hash3_sp_g(s, p, g)` -- drop the `o` position -- and
+ * **deduplicated** at the input layer so adjacent equal-hash leaves
+ * don't ambiguate the bracket non-membership proofs.
+ *
+ * Returns a string-encoded `[s, p, g]` prefix multiset and the Noir
+ * call that builds the prefix-3 tree, or `null` if the dataset is
+ * empty.
+ */
+export async function processQuadsForPrefix3(quads: Quad[]): Promise<{
+  prefixes: string[];
+  noirInput: string;
+} | null> {
+  if (quads.length === 0) {
+    return null;
+  }
+  // Deduplicate by encoded (s, p, g) string -- two quads sharing the
+  // same prefix collapse to a single tree leaf. See
+  // `spec/prefix-tree-commitment.md` Sec.2.1.
+  const seen = new Set<string>();
+  const prefixes: string[] = [];
+  for (const quad of quads) {
+    const s = getTermEncodingString(quad.subject);
+    const p = getTermEncodingString(quad.predicate);
+    const g = getTermEncodingString(quad.graph);
+    const key = `${s}|${p}|${g}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    prefixes.push(`[${s},${p},${g}]`);
+  }
+  return {
+    prefixes,
+    noirInput: `utils::prefix3::merkle_prefix3::<consts::MERKLE_DEPTH, ${prefixes.length}>([${prefixes.join(',')}])`,
   };
 }
 
@@ -134,50 +220,89 @@ export async function generateSignature(jsonRes: any, signatureScheme: string = 
 }
 
 /**
- * Sign RDF data and return the signed data structure
+ * Sign RDF data and return the signed data structure.
+ *
+ * Round-5 two-root signer ABI: builds **two** sorted Merkle trees in
+ * parallel -- the leaf-hash sorted commitment over `(s, p, o, g)`
+ * (round 3) and the prefix-3 sorted commitment over `(s, p, g)`
+ * (round 4). Both roots are committed by the signer; circuits
+ * dispatch to whichever tree the SPARQL operator's free-position
+ * shape calls for. See `spec/prefix-tree-commitment.md` Sec.2.
  */
 export async function signRdfData(inputPath: string): Promise<SignedData> {
   // Dereference, parse and canonicalize the RDF dataset
   const { store } = await dereferenceToStore.default(inputPath, { localFiles: true });
   const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
-  
+
   const { noirInput } = await processQuadsForMerkle(quads);
-  
-  // Generate Merkle tree via Noir execution
-  const jsonRes = runJson(`[${noirInput}]`)[0];
-  
+  const prefix3Spec = await processQuadsForPrefix3(quads);
+
+  // Generate both Merkle trees via a single Noir execution. The
+  // returned array carries one entry per top-level call, in order.
+  const noirCalls = prefix3Spec
+    ? `[${noirInput},${prefix3Spec.noirInput}]`
+    : `[${noirInput}]`;
+  const noirResults = runJson(noirCalls);
+  const jsonRes: any = noirResults[0];
+
+  if (prefix3Spec) {
+    const prefix3Res: any = noirResults[1];
+    jsonRes.rootPrefix3 = prefix3Res.root;
+    jsonRes.prefix3 = {
+      prefixes: prefix3Res.prefixes,
+      paths: prefix3Res.paths,
+      direction: prefix3Res.direction,
+      lowSentinelPath: prefix3Res.low_sentinel_path,
+      lowSentinelDirections: prefix3Res.low_sentinel_directions,
+      highSentinelPath: prefix3Res.high_sentinel_path,
+      highSentinelDirections: prefix3Res.high_sentinel_directions,
+    };
+  } else {
+    // Empty dataset -- emit a sentinel zero root so the verifier ABI
+    // shape stays consistent.
+    jsonRes.rootPrefix3 = "0x0";
+  }
+
   // Add quad string representations
   jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
-  
-  // Generate cryptographic signature using shared logic
+
+  // Generate cryptographic signature using shared logic. The
+  // signature covers `root` (round-3 leaf-hash commitment); the
+  // round-5 ABI extends to a concatenated `(root, rootPrefix3)`
+  // payload once the verifier-side check is plumbed through (TODO
+  // in `noir/bin/signature/`).
   await generateSignature(jsonRes, defaultConfig.signature);
 
   return jsonRes as SignedData;
 }
 
 /**
- * Process RDF data without signing - minimal data for skip-signing mode
- * Still computes encoded triples (needed for binding) but skips Merkle tree/signature
+ * Process RDF data without signing - minimal data for skip-signing mode.
+ * Still computes encoded triples (needed for binding) but skips Merkle
+ * tree / signature. Skip-signing rejects NOT EXISTS / OPTIONAL collapse
+ * / prefix-tree non-membership upstream (in the transform layer), so
+ * the prefix-3 tree is not built here either.
  */
 export async function processRdfDataWithoutSigning(inputPath: string): Promise<SignedData> {
   // Dereference, parse and canonicalize the RDF dataset
   const { store } = await dereferenceToStore.default(inputPath, { localFiles: true });
   const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(store));
-  
-  const { triples, noirInput } = await processQuadsForMerkle(quads);
-  
+
+  const { triples: _triples, noirInput } = await processQuadsForMerkle(quads);
+
   // We still need to run the Noir execution to get the encoded triple values,
   // but we don't need the signature. The merkle function returns triples in encoded form.
-  const jsonRes = runJson(`[${noirInput}]`)[0];
-  
+  const jsonRes: any = runJson(`[${noirInput}]`)[0];
+
   // Add quad string representations
   jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
-  
+
   // Return with empty/placeholder signature data
   jsonRes.signature = [];
   jsonRes.pubKey = {};
+  jsonRes.rootPrefix3 = "0x0";
   delete jsonRes.root_u8;
-  
+
   return jsonRes as SignedData;
 }
 

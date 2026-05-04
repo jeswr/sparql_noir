@@ -31,7 +31,7 @@ pub use crate::expr::{ieee754_equal, ieee754_less_than, FloatSpecial};
 pub use crate::ir::{
     Aggregate, AggregateKind, Assertion, Binding, BoundaryCase, ContextualizedTriple, EasyOptional,
     GraphContext, NonExistenceConstraint, OptionalBlock, OrderDirection, OrderKey, PatternInfo,
-    QueryInfo, Term,
+    PrefixKind, PrefixNonExistenceConstraint, QueryInfo, Term,
 };
 
 use crate::emit::{
@@ -163,32 +163,34 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     }
     
     // Generate the base circuit (the "all optionals matched" variant).
-    let (base_sparql_nr, base_hidden, has_hidden, needs_xpath, has_not_exists) =
-        generate_circuit_for_optional_combination(
-            &info,
-            &all_optionals,
-            &(0..num_optionals).collect::<Vec<_>>(),
-            &options,
-        )?;
+    let base = generate_circuit_for_optional_combination(
+        &info,
+        &all_optionals,
+        &(0..num_optionals).collect::<Vec<_>>(),
+        &options,
+    )?;
 
     let num_not_exists = info.pattern.not_exists.len();
     let main_nr = fill_main_nr_template(
         options.skip_signing,
-        has_hidden,
-        has_not_exists,
+        base.has_hidden,
+        base.has_not_exists,
         num_not_exists,
+        base.has_prefix3,
+        base.bgp_prefix3_len,
+        base.num_prefix3_dispatches,
     );
 
     // EBV pulls in `dep::ebv`; that detection lives at the same layer as
     // the `Nargo.toml` shape, so they share a derivation step.
-    let needs_ebv = base_hidden.iter().any(|h| {
+    let needs_ebv = base.hidden.iter().any(|h| {
         h.get("computedType").and_then(|v| v.as_str())
             .map(|t| t == "ebv_value" || t == "ebv_datatype")
             .unwrap_or(false)
     });
-    let nargo_toml = build_nargo_toml(options.skip_signing, needs_ebv, needs_xpath);
+    let nargo_toml = build_nargo_toml(options.skip_signing, needs_ebv, base.needs_xpath);
 
-    let metadata = build_base_metadata(&info, &all_optionals, options.skip_signing, &base_hidden);
+    let metadata = build_base_metadata(&info, &all_optionals, options.skip_signing, &base.hidden);
 
     // Power-set of OPTIONAL bitmasks, minus the all-matched case (that's
     // the base circuit). For n=0 this loop runs zero times.
@@ -200,32 +202,31 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
                 .filter(|i| (combo >> i) & 1 == 1)
                 .collect();
 
-            let (circuit_sparql_nr, circuit_hidden, _, _, _) =
-                generate_circuit_for_optional_combination(
-                    &info,
-                    &all_optionals,
-                    &matched_indices,
-                    &options,
-                )?;
+            let circuit = generate_circuit_for_optional_combination(
+                &info,
+                &all_optionals,
+                &matched_indices,
+                &options,
+            )?;
 
             let circuit_metadata = build_variant_metadata(
                 &info,
                 &all_optionals,
                 &matched_indices,
                 options.skip_signing,
-                &circuit_hidden,
+                &circuit.hidden,
             );
 
             optional_circuits.push(OptionalCircuit {
                 matched_optionals: matched_indices,
-                sparql_nr: circuit_sparql_nr,
+                sparql_nr: circuit.sparql_nr,
                 metadata: circuit_metadata,
             });
         }
     }
 
     Ok(TransformResult {
-        sparql_nr: base_sparql_nr,
+        sparql_nr: base.sparql_nr,
         main_nr,
         nargo_toml,
         metadata,

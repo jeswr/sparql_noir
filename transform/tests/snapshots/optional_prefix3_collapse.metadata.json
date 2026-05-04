@@ -1,7 +1,7 @@
 {
   "aggregates": [],
-  "bgpPrefix3Length": 4,
-  "bgp_prefix3_length": 4,
+  "bgpPrefix3Length": 2,
+  "bgp_prefix3_length": 2,
   "easyOptionals": [
     {
       "bracketLeftIdx": 0,
@@ -11,17 +11,6 @@
       "id": 0,
       "matchedIdx": 1,
       "matched_idx": 1,
-      "prefixKind": "prefix3_sp_g",
-      "prefix_kind": "prefix3_sp_g"
-    },
-    {
-      "bracketLeftIdx": 2,
-      "bracketRightIdx": 3,
-      "bracket_left_idx": 2,
-      "bracket_right_idx": 3,
-      "id": 1,
-      "matchedIdx": 2,
-      "matched_idx": 2,
       "prefixKind": "prefix3_sp_g",
       "prefix_kind": "prefix3_sp_g"
     }
@@ -37,17 +26,6 @@
       "matched_idx": 1,
       "prefixKind": "prefix3_sp_g",
       "prefix_kind": "prefix3_sp_g"
-    },
-    {
-      "bracketLeftIdx": 2,
-      "bracketRightIdx": 3,
-      "bracket_left_idx": 2,
-      "bracket_right_idx": 3,
-      "id": 1,
-      "matchedIdx": 2,
-      "matched_idx": 2,
-      "prefixKind": "prefix3_sp_g",
-      "prefix_kind": "prefix3_sp_g"
     }
   ],
   "hiddenInputs": [],
@@ -59,11 +37,11 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "o"
+        "value": "p"
       },
       "predicate": {
         "termType": "NamedNode",
-        "value": "http://example.org/p"
+        "value": "http://example.org/knows"
       },
       "subject": {
         "termType": "Variable",
@@ -85,23 +63,6 @@
       "subject": {
         "termType": "Variable",
         "value": "__br_s_0"
-      }
-    },
-    {
-      "graph": {
-        "termType": "DefaultGraph"
-      },
-      "object": {
-        "termType": "Variable",
-        "value": "__br_o_1"
-      },
-      "predicate": {
-        "termType": "Variable",
-        "value": "__br_p_1"
-      },
-      "subject": {
-        "termType": "Variable",
-        "value": "__br_s_1"
       }
     }
   ],
@@ -112,11 +73,11 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "o"
+        "value": "p"
       },
       "predicate": {
         "termType": "NamedNode",
-        "value": "http://example.org/p"
+        "value": "http://example.org/knows"
       },
       "subject": {
         "termType": "Variable",
@@ -138,23 +99,6 @@
       "subject": {
         "termType": "Variable",
         "value": "__br_s_0"
-      }
-    },
-    {
-      "graph": {
-        "termType": "DefaultGraph"
-      },
-      "object": {
-        "termType": "Variable",
-        "value": "__br_o_1"
-      },
-      "predicate": {
-        "termType": "Variable",
-        "value": "__br_p_1"
-      },
-      "subject": {
-        "termType": "Variable",
-        "value": "__br_s_1"
       }
     }
   ],
@@ -170,12 +114,10 @@
   "prefixNotExists": [],
   "prefix_not_exists": [],
   "skip_signing": false,
-  "total_patterns": 3,
+  "total_patterns": 2,
   "unionBranches": [],
   "union_branches": [],
   "variables": [
-    "s",
-    "a",
-    "b"
+    "s"
   ]
 }

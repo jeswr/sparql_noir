@@ -1,5 +1,7 @@
 {
   "aggregates": [],
+  "bgpPrefix3Length": 0,
+  "bgp_prefix3_length": 0,
   "easyOptionals": [
     {
       "bracketLeftIdx": 2,
@@ -8,7 +10,9 @@
       "bracket_right_idx": 3,
       "id": 0,
       "matchedIdx": 1,
-      "matched_idx": 1
+      "matched_idx": 1,
+      "prefixKind": null,
+      "prefix_kind": null
     }
   ],
   "easy_optionals": [
@@ -19,7 +23,9 @@
       "bracket_right_idx": 3,
       "id": 0,
       "matchedIdx": 1,
-      "matched_idx": 1
+      "matched_idx": 1,
+      "prefixKind": null,
+      "prefix_kind": null
     }
   ],
   "hiddenInputs": [],
@@ -173,6 +179,8 @@
   "optional_patterns": [],
   "orderBy": [],
   "order_by": [],
+  "prefixNotExists": [],
+  "prefix_not_exists": [],
   "skip_signing": false,
   "total_patterns": 4,
   "unionBranches": [],

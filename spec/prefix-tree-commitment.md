@@ -1,7 +1,7 @@
-# Prefix-tree commitment (round 4)
+# Prefix-tree commitment (rounds 4 + 5)
 
-**Status:** scaffolding — design + prefix-3 primitive + property tests. Transform-side dispatch deferred. Round-4 unlock for multi-position non-membership.
-**Owner:** noir-circuits + sparql-semantics agents (round 4, branch `prefix-tree-commitment-round4`).
+**Status:** **shipped** -- round 4 (commitment scaffolding + prefix-3 primitive) and round 5 (transform-side dispatch + two-root signer ABI). The prefix-3 commitment is wired end-to-end for `NOT EXISTS` / `MINUS` / OPTIONAL collapse over single-triple inner patterns with one inner-only `o` position. Other 15 prefix variants follow the same template; land as new query classes call for them.
+**Owner:** noir-circuits + sparql-semantics agents (round 4 branch `prefix-tree-commitment-round4`; round 5 branch `prefix-tree-transform-dispatch`).
 **References:** `spec/exists.md` Sec.3.3 / Sec.6 (round-3 OPTIONAL collapse punt); `decisions/non-membership-sentinels-transform-wiring.md` (Approach A locked in for round 4); `paper/PLAN.md` Sec.4.3 (prefix-tree commitment claims); `feedback_modular_commitment_signature_design.md` (modular commitment-shape directive).
 
 ## 1. Background
@@ -159,60 +159,91 @@ Adding a new prefix variant is mechanical:
 
 **Round 4 ships only the prefix-3 (`{s, p, g}`) variant.** It is the highest-impact subset (covers OPTIONAL collapse, MINUS-over-UNION, multi-triple `NOT EXISTS` with shared `?g`) and validates the design pattern. The other 15 variants land as needed in subsequent rounds, when concrete query classes call for them. Per the modular-commitment directive (`feedback_modular_commitment_signature_design.md`), each variant must justify itself by enabling a query class the others don't.
 
-## 8. Transform-side dispatch (deferred)
+## 8. Transform-side dispatch (shipped — round 5)
 
-Round 4 **does not yet wire** prefix-tree non-membership into `transform/src/lower.rs` / `emit.rs`. The dispatch shape is documented here for the follow-up round.
+Round 5 wires prefix-tree non-membership into `transform/src/lower.rs` / `emit.rs`. The shape below describes what shipped; the prefix-3 (`(s, p, g)`) variant is end-to-end and other prefix variants land via the same hooks.
 
-### 8.1 Constraint type
+### 8.1 IR (shipped)
 
-A new IR constraint `PrefixNonExistenceConstraint` parallels round 3's `NonExistenceConstraint`:
+`transform/src/ir.rs` carries the new types:
 
 ```rust
+pub enum PrefixKind { Prefix3SpG /* + 15 future variants */ }
+
 pub struct PrefixNonExistenceConstraint {
-    pub prefix_kind: PrefixKind,         // Prefix3SpG, Prefix2Sp, ... (round 4 ships only Prefix3SpG)
-    pub fixed_terms: Vec<TermSlot>,      // ground positions, in canonical order for `prefix_kind`
-    pub bracket_left_slot: usize,        // index into `bgp` for the left bracket PrefixTriple
-    pub bracket_right_slot: usize,       // index into `bgp` for the right bracket PrefixTriple
-    pub boundary_case_input: usize,      // index into the public `boundary_case[]` array
+    pub prefix_kind: PrefixKind,
+    pub bracket_left_idx: usize,    // index into bgp_prefix3
+    pub bracket_right_idx: usize,   // index into bgp_prefix3
+    pub absent_terms: [Term; 4],    // s, p, o, g; the o slot is unused for hashing
+}
+
+pub struct EasyOptional {
+    /* round-3 fields ... */
+    pub prefix_kind: Option<PrefixKind>,  // Some(...) for prefix-tree collapses
+}
+
+pub struct PatternInfo {
+    /* ... */
+    pub prefix_not_exists: Vec<PrefixNonExistenceConstraint>,
+    pub bgp_prefix3_len: usize,           // total prefix-3 slots allocated
 }
 ```
 
-`bgp` grows a parallel slot type for prefix-triples: `PrefixTriple3` slots get their own inclusion check in `main.nr` (against `root_3sp_g`, not `root_4`).
+`bgp_prefix3` is a **separate slot array** from `bgp` -- prefix-3 brackets are typed `PrefixTriple3` (three terms), inclusion-checked against `roots[1]`. `PatternInfo::bgp_prefix3_len` is the single source of truth on slot allocation; merge sites shift right-side bracket indices by `left.bgp_prefix3_len`.
 
-### 8.2 Lowering
+### 8.2 Lowering (shipped)
 
-`lower::lower_filter_not_exists` learns to recognise the **prefix-3 case**: the inner pattern is a single triple, exactly one position is inner-only, and that position is `o`. Lowers to a `PrefixNonExistenceConstraint` with `prefix_kind: Prefix3SpG`. Other shapes continue to either:
+`lower::lower_not_exists_into` first checks `detect_prefix_kind(inner_pattern, outer_bound)`. If the inner-only shape matches a shipped prefix kind, lower to a `PrefixNonExistenceConstraint`; otherwise fall back to the round-3 ground-inner reject path with a pointer to `spec/prefix-tree-commitment.md` Sec.7.
 
-- Lower to round 3's `NonExistenceConstraint` (single-triple ground-inner — unchanged).
-- Be rejected with a clearer error pointing to the not-yet-shipped prefix variants.
+`lower::optional_inner_easy_case` returns one of `EasyCase::{Round3, Prefix(kind), FallThrough}`. The `LeftJoin` arm dispatches:
 
-### 8.3 Emit
+- `Round3` -- existing collapse, three slots in `bgp` (matched + 2 brackets).
+- `Prefix(kind)` -- one matched-arm slot in `bgp`, two bracket slots in `bgp_prefix3`. The matched arm pins the fixed positions; the inner-only `o` is unconstrained.
+- `FallThrough` -- existing power-set machinery (`optional_circuits[]`).
 
-`emit.rs::emit_constraints` adds an arm for `PrefixNonExistenceConstraint` that produces:
+### 8.3 Emit (shipped)
+
+`emit::generate_sparql_nr_from_query_info` emits a per-`PrefixNonExistenceConstraint` three-arm dispatch:
 
 ```rust
-if boundary_case[i] == 0 {
-    verify_non_membership_prefix3_low_sentinel_no_inclusion(low_sentinel_3, bgp_prefix3[k+1], absent_prefix_hash);
-} else if boundary_case[i] == 1 {
-    verify_non_membership_prefix3_no_inclusion(bgp_prefix3[k], bgp_prefix3[k+1], absent_prefix_hash);
-} else if boundary_case[i] == 2 {
-    verify_non_membership_prefix3_high_sentinel_no_inclusion(bgp_prefix3[k], high_sentinel_3, absent_prefix_hash);
+let absent_prefix_i = utils::prefix3::hash3_sp_g(s, p, g);
+if boundary_cases_prefix3[i] == 0 {
+    utils::prefix3::verify_non_membership_prefix3_low_sentinel_no_inclusion(low_sentinel_3, bgp_prefix3[right], absent_prefix_i);
+} else if boundary_cases_prefix3[i] == 1 {
+    utils::prefix3::verify_non_membership_prefix3_no_inclusion(bgp_prefix3[left], bgp_prefix3[right], absent_prefix_i);
+} else if boundary_cases_prefix3[i] == 2 {
+    utils::prefix3::verify_non_membership_prefix3_high_sentinel_no_inclusion(bgp_prefix3[left], high_sentinel_3, absent_prefix_i);
 } else {
-    assert(false, "non-membership: boundary_case must be 0, 1, or 2");
+    assert(false, "non-membership prefix3: boundary_cases_prefix3[i] must be 0, 1, or 2");
 }
 ```
 
-Identical shape to round 3's emitted dispatch — the only differences are the primitive names and the `bgp_prefix3` slot array.
+Prefix-3 OPTIONAL collapse uses the **boolean-returning** variants (`*_no_inclusion_check`) inside an `assert(matched | unmatched)` line, mirroring the round-3 collapse pattern. The matched arm omits the equality at `prefix_kind.free_position()` so the inner-only `o` can witness any value.
 
-### 8.4 Signer + main.nr ABI
+### 8.4 Public input layout
 
-Two ABI additions:
+The `BoundaryCasesPrefix3` array carries one tag per prefix-3 dispatch -- first all `PrefixNonExistenceConstraint`s (in IR order), then all prefix-3 `EasyOptional`s. Same prefix-3 sentinels and `bgp_prefix3` slot array are shared across all prefix-3 constraints.
 
-- `roots[1]: Root` for `root_3sp_g` (alongside `roots[0]` for `root_4`). Public input.
-- `low_sentinel_3` / `high_sentinel_3` SentinelLeaf inputs alongside the round-3 sentinels.
-- `bgp_prefix3: [PrefixTriple3; N_PREFIX]` for prefix-bracket leaves.
+### 8.5 Signer + main.nr ABI (shipped)
 
-`main.nr` walks `bgp_prefix3` for inclusion against `roots[1].value` (mirroring the round-3 `bgp` walk against `roots[0].value`).
+The signer publishes **two roots**: `(root_4, root_3sp_g)`. `main.nr` declares `roots: [Root; 2]` when `has_prefix3` and verifies the signature on each. Additional public inputs:
+
+- `low_sentinel_3` / `high_sentinel_3` (`SentinelLeaf`) -- prefix-3 sentinel inclusion paths.
+- `bgp_prefix3: BgpPrefix3` (`[PrefixTriple3; N]`) -- bracket leaves for inclusion against `roots[1]`.
+- `boundary_cases_prefix3: BoundaryCasesPrefix3` (`[Field; M]`) -- per-dispatch tag.
+
+The TS layer's `signRdfData` (`src/scripts/sign.ts`) computes both trees in parallel and emits:
+
+```ts
+{
+  root: "0x...",                           // round-3 leaf-hash sorted root
+  rootPrefix3: "0x...",                    // round-4 prefix-3 sorted root
+  prefix3: { prefixes, paths, direction, lowSentinel*, highSentinel* },
+  /* round-3 fields preserved */
+}
+```
+
+Deployments that don't need the prefix tree set `rootPrefix3 = "0x0"` and omit `prefix3`; any prover attempting a prefix-3 non-membership against an empty tree fails because the genuine tree-build hash never equals zero. See Sec.6.3.
 
 ## 9. Open questions for the follow-up round
 

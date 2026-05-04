@@ -291,21 +291,45 @@ const CORPUS: &[Case] = &[
         query: "PREFIX ex: <http://example.org/>\n\
                 SELECT ?s ?o WHERE { ?s ex:knows ?o . MINUS { ?s ex:hates ?o . } }",
     },
+    // Round 5 — NOT EXISTS over a single-triple inner pattern with
+    // one inner-only **object** position. The round-3 leaf-hash
+    // primitive cannot witness this (it hashes over a fully-ground
+    // 4-tuple); the round-5 prefix-3 commitment can. Lowers to a
+    // `PrefixNonExistenceConstraint` against `roots[1]`. See
+    // `spec/prefix-tree-commitment.md` Sec.8.
+    Case {
+        name: "not_exists_prefix3",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?p . FILTER(NOT EXISTS { ?p ex:age ?age . }) }",
+    },
+    // Round 5 — OPTIONAL collapse over a single-triple inner pattern
+    // with one inner-only **object** position. The round-3 ground-inner
+    // easy case can't fire (`?o` is inner-only); the round-5 prefix-3
+    // collapse takes over. The matched arm pins `s, p, g`; the
+    // unmatched arm proves `(s, p, g)`-prefix non-membership. See
+    // `spec/prefix-tree-commitment.md` Sec.8.
+    Case {
+        name: "optional_prefix3_collapse",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
+    },
 ];
 
 /// Round 2 §7 — defensive cap on OPTIONAL blocks. The transform must
 /// reject queries with more than `optional_cap` OPTIONAL blocks rather
-/// than silently generating `2^n` circuit variants.
+/// than silently generating `2^n` circuit variants. This test uses
+/// multi-triple inner OPTIONALs that fall through the round-3 / round-5
+/// easy-case predicates so the power-set path is exercised.
 #[test]
 fn rejects_too_many_optionals() {
     let q = "PREFIX ex: <http://example.org/>
 SELECT ?s ?a ?b ?c ?d ?e WHERE {
   ?s ex:p ?o .
-  OPTIONAL { ?s ex:a ?a }
-  OPTIONAL { ?s ex:b ?b }
-  OPTIONAL { ?s ex:c ?c }
-  OPTIONAL { ?s ex:d ?d }
-  OPTIONAL { ?s ex:e ?e }
+  OPTIONAL { ?s ex:a ?a . ?a ex:flag ex:A . }
+  OPTIONAL { ?s ex:b ?b . ?b ex:flag ex:B . }
+  OPTIONAL { ?s ex:c ?c . ?c ex:flag ex:C . }
+  OPTIONAL { ?s ex:d ?d . ?d ex:flag ex:D . }
+  OPTIONAL { ?s ex:e ?e . ?e ex:flag ex:E . }
 }";
     let err = match transform_query(q) {
         Err(e) => e,
@@ -323,11 +347,11 @@ fn raises_optional_cap() {
     let q = "PREFIX ex: <http://example.org/>
 SELECT ?s ?a ?b ?c ?d ?e WHERE {
   ?s ex:p ?o .
-  OPTIONAL { ?s ex:a ?a }
-  OPTIONAL { ?s ex:b ?b }
-  OPTIONAL { ?s ex:c ?c }
-  OPTIONAL { ?s ex:d ?d }
-  OPTIONAL { ?s ex:e ?e }
+  OPTIONAL { ?s ex:a ?a . ?a ex:flag ex:A . }
+  OPTIONAL { ?s ex:b ?b . ?b ex:flag ex:B . }
+  OPTIONAL { ?s ex:c ?c . ?c ex:flag ex:C . }
+  OPTIONAL { ?s ex:d ?d . ?d ex:flag ex:D . }
+  OPTIONAL { ?s ex:e ?e . ?e ex:flag ex:E . }
 }";
     let opts = TransformOptions {
         optional_cap: 8,
@@ -480,17 +504,21 @@ fn check_or_update(path: &PathBuf, actual: &str, update: bool, label: &str, name
     }
 }
 
-/// Non-ground-inner `NOT EXISTS` is rejected — round 3 main event ships
-/// single-triple ground-inner only. See `spec/exists.md` §7.
+/// Non-ground-inner `NOT EXISTS` with an inner-only **subject**
+/// position is still rejected -- round 5 ships only the prefix-3
+/// (`s, p, g`) commitment whose free position is `o`. An inner-only
+/// `?s` would need a different prefix subset (e.g. `prefix2_pg` or
+/// `prefix1_p`) which haven't been built. See
+/// `spec/prefix-tree-commitment.md` Sec.7.
 #[test]
-fn not_exists_non_ground_inner_is_rejected() {
+fn not_exists_inner_only_subject_is_rejected() {
     let q = "PREFIX ex: <http://example.org/>\n\
-             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(NOT EXISTS { ?o ex:age ?age . }) }";
+             SELECT ?o WHERE { ?p ex:knows ?o . FILTER(NOT EXISTS { ?x ex:age ?o . }) }";
     match transform_query(q) {
-        Ok(_) => panic!("expected non-ground-inner NOT EXISTS to be rejected"),
+        Ok(_) => panic!("expected inner-only-subject NOT EXISTS to be rejected"),
         Err(err) => assert!(
-            err.contains("NOT EXISTS") && err.contains("ground-inner") && err.contains("?age"),
-            "expected error to mention NOT EXISTS, ground-inner, and ?age, got: {}",
+            err.contains("NOT EXISTS") && err.contains("?x") && err.contains("prefix"),
+            "expected error to mention NOT EXISTS, ?x, and the unshipped prefix variant, got: {}",
             err
         ),
     }
@@ -654,15 +682,18 @@ fn optional_easy_case_collapses_to_single_circuit() {
     );
 }
 
-/// Round-3 follow-up — tiered partial OPTIONAL collapse fall-through.
-/// `OPTIONAL { ?p ex:age ?o }` (where `?p` is outer-bound but `?o` is
-/// inner-only) does **not** satisfy the easy-case predicate; it must
-/// still flow through the existing `2^n` power-set path unchanged —
-/// `optional_circuits` non-empty, regular `optionalPatterns` populated.
+/// Round-3 follow-up — tiered partial OPTIONAL collapse fall-through
+/// for multi-triple inner OPTIONALs. Multi-triple inner patterns
+/// don't satisfy any easy-case predicate (round-3 ground-inner or
+/// round-5 single-inner-only-position prefix-tree); they must flow
+/// through the existing `2^n` power-set path unchanged.
 #[test]
-fn optional_inner_only_var_falls_through_to_power_set() {
+fn optional_multi_triple_falls_through_to_power_set() {
     let q = "PREFIX ex: <http://example.org/>\n\
-             SELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . ?p ex:status ex:Active . } \
+             }";
     let result = transform_query(q).expect("transform should succeed");
 
     // Power-set path preserved.
@@ -693,6 +724,81 @@ fn optional_inner_only_var_falls_through_to_power_set() {
             .sparql_nr
             .contains("verify_non_membership_no_inclusion_check"),
         "fall-through OPTIONAL must NOT emit the boolean non-membership check"
+    );
+}
+
+/// Round-5 prefix-3 OPTIONAL collapse acceptance test. Single-triple
+/// inner OPTIONAL with one inner-only `o` position lifts via the
+/// prefix-3 commitment instead of falling through to the power-set
+/// path. See `spec/prefix-tree-commitment.md` Sec.8.
+#[test]
+fn optional_inner_only_object_collapses_via_prefix3() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    // No power-set variants -- prefix-3 collapse fires.
+    assert!(
+        result.optional_circuits.is_empty(),
+        "prefix-3 OPTIONAL collapse must not produce power-set variants, got {}",
+        result.optional_circuits.len()
+    );
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(
+        easy.len(),
+        1,
+        "expected one prefix-3 easy-case OPTIONAL, got {:?}",
+        easy
+    );
+    assert_eq!(
+        easy[0].get("prefixKind").and_then(|v| v.as_str()),
+        Some("prefix3_sp_g"),
+        "expected prefixKind metadata tag, got {:?}",
+        easy[0]
+    );
+    // The unmatched arm uses the prefix-3 boolean variant -- not the
+    // round-3 leaf-hash variant.
+    assert!(
+        result
+            .sparql_nr
+            .contains("verify_non_membership_prefix3_no_inclusion_check"),
+        "expected prefix-3 boolean variant in the body, got:\n{}",
+        result.sparql_nr
+    );
+    // The `BgpPrefix3` slot array is sized to 2 (one bracket pair).
+    assert!(
+        result.sparql_nr.contains("type BgpPrefix3 = [PrefixTriple3; 2]"),
+        "expected BgpPrefix3 size 2, got:\n{}",
+        result.sparql_nr
+    );
+    // `BoundaryCasesPrefix3` is sized to 1 (the one OPTIONAL collapse
+    // dispatch -- no NOT EXISTS in this query).
+    assert!(
+        result
+            .sparql_nr
+            .contains("type BoundaryCasesPrefix3 = [Field; 1]"),
+        "expected BoundaryCasesPrefix3 size 1, got:\n{}",
+        result.sparql_nr
+    );
+    // `main.nr` carries the two-root signer ABI.
+    assert!(
+        result.main_nr.contains("roots: [Root; 2]"),
+        "expected two-root signer ABI in main.nr, got:\n{}",
+        result.main_nr
+    );
+    assert!(
+        result
+            .main_nr
+            .contains("verify_low_sentinel_inclusion(low_sentinel_3, roots[1].value)")
+            && result
+                .main_nr
+                .contains("verify_high_sentinel_inclusion(high_sentinel_3, roots[1].value)"),
+        "expected prefix-3 sentinel inclusion against roots[1], got:\n{}",
+        result.main_nr
     );
 }
 

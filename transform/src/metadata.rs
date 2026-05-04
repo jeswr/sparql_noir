@@ -192,15 +192,23 @@ pub(crate) fn build_base_metadata(
         .collect();
 
     // Easy-case OPTIONAL collapse metadata (round-3 follow-up — see
-    // `spec/exists.md` §4.1). One entry per collapsed OPTIONAL,
-    // exposing the matched-arm slot and the two bracket slots so the
-    // verifier (and the prover-side glue in `ts.js`) knows where to
-    // place witnesses for each arm.
+    // `spec/exists.md` §4.1; round-5 prefix-3 extension --
+    // `spec/prefix-tree-commitment.md` Sec.8). One entry per collapsed
+    // OPTIONAL, exposing the matched-arm slot and the two bracket
+    // slots so the verifier (and the prover-side glue in `ts.js`)
+    // knows where to place witnesses for each arm. `prefixKind` is
+    // null for round-3 collapses (brackets index `bgp`) and
+    // `"prefix3_sp_g"` for round-5 prefix-3 collapses (brackets index
+    // `bgp_prefix3`).
     let easy_optionals_json: Vec<serde_json::Value> = info
         .pattern
         .easy_optionals
         .iter()
         .map(|eo| {
+            let prefix_kind = eo
+                .prefix_kind
+                .map(|k| serde_json::Value::String(k.metadata_tag().to_string()))
+                .unwrap_or(serde_json::Value::Null);
             serde_json::json!({
                 "id": eo.id,
                 "matchedIdx": eo.matched_idx,
@@ -209,6 +217,35 @@ pub(crate) fn build_base_metadata(
                 "bracketRightIdx": eo.bracket_right_idx,
                 "bracket_left_idx": eo.bracket_left_idx,
                 "bracket_right_idx": eo.bracket_right_idx,
+                "prefixKind": prefix_kind.clone(),
+                "prefix_kind": prefix_kind,
+            })
+        })
+        .collect();
+
+    // Round-5 prefix-3 NOT EXISTS metadata. Same shape as the
+    // round-3 `notExists` entries but bracket indices reference the
+    // `bgp_prefix3` slot array (not `bgp`) and `prefixKind` records
+    // which prefix subset is in use. The TS prover uses
+    // `boundary_cases_prefix3[i]` to pick between the lower / middle /
+    // upper dispatch arms.
+    let prefix_not_exists_json: Vec<serde_json::Value> = info
+        .pattern
+        .prefix_not_exists
+        .iter()
+        .map(|pne| {
+            serde_json::json!({
+                "prefixKind": pne.prefix_kind.metadata_tag(),
+                "prefix_kind": pne.prefix_kind.metadata_tag(),
+                "bracketLeftIdx": pne.bracket_left_idx,
+                "bracketRightIdx": pne.bracket_right_idx,
+                "bracket_left_idx": pne.bracket_left_idx,
+                "bracket_right_idx": pne.bracket_right_idx,
+                "boundaryCaseDispatch": {
+                    "0": "lower",
+                    "1": "middle",
+                    "2": "upper",
+                },
             })
         })
         .collect();
@@ -233,6 +270,10 @@ pub(crate) fn build_base_metadata(
         "offset": info.offset,
         "notExists": not_exists_json,
         "not_exists": not_exists_json,
+        "prefixNotExists": prefix_not_exists_json,
+        "prefix_not_exists": prefix_not_exists_json,
+        "bgpPrefix3Length": info.pattern.bgp_prefix3_len,
+        "bgp_prefix3_length": info.pattern.bgp_prefix3_len,
         "easyOptionals": easy_optionals_json,
         "easy_optionals": easy_optionals_json,
     })

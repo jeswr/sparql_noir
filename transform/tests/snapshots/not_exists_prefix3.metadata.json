@@ -1,13 +1,7 @@
 {
-  "aggregates": [
-    {
-      "kind": "count_solutions",
-      "output": "n",
-      "source": null
-    }
-  ],
-  "bgpPrefix3Length": 0,
-  "bgp_prefix3_length": 0,
+  "aggregates": [],
+  "bgpPrefix3Length": 2,
+  "bgp_prefix3_length": 2,
   "easyOptionals": [],
   "easy_optionals": [],
   "hiddenInputs": [],
@@ -19,7 +13,7 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "o"
+        "value": "p"
       },
       "predicate": {
         "termType": "NamedNode",
@@ -38,7 +32,7 @@
       },
       "object": {
         "termType": "Variable",
-        "value": "o"
+        "value": "p"
       },
       "predicate": {
         "termType": "NamedNode",
@@ -59,14 +53,41 @@
   "optional_patterns": [],
   "orderBy": [],
   "order_by": [],
-  "prefixNotExists": [],
-  "prefix_not_exists": [],
+  "prefixNotExists": [
+    {
+      "boundaryCaseDispatch": {
+        "0": "lower",
+        "1": "middle",
+        "2": "upper"
+      },
+      "bracketLeftIdx": 0,
+      "bracketRightIdx": 1,
+      "bracket_left_idx": 0,
+      "bracket_right_idx": 1,
+      "prefixKind": "prefix3_sp_g",
+      "prefix_kind": "prefix3_sp_g"
+    }
+  ],
+  "prefix_not_exists": [
+    {
+      "boundaryCaseDispatch": {
+        "0": "lower",
+        "1": "middle",
+        "2": "upper"
+      },
+      "bracketLeftIdx": 0,
+      "bracketRightIdx": 1,
+      "bracket_left_idx": 0,
+      "bracket_right_idx": 1,
+      "prefixKind": "prefix3_sp_g",
+      "prefix_kind": "prefix3_sp_g"
+    }
+  ],
   "skip_signing": false,
   "total_patterns": 1,
   "unionBranches": [],
   "union_branches": [],
   "variables": [
-    "o",
     "s"
   ]
 }

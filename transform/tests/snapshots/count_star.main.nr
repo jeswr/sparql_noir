@@ -17,7 +17,7 @@ fn main(
     variables: pub Variables
 ) {
     // Verify signatures on all roots
-    for i in 0..roots.len() {
+    for i in 0..1 {
         verify_signature(public_key[0], roots[i]);
     }
 

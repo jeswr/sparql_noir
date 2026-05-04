@@ -353,6 +353,87 @@ pub fn verify_non_membership_prefix3_high_sentinel_no_inclusion(
     );
 }
 
+/// Boolean-returning variant of
+/// `verify_non_membership_prefix3_no_inclusion`. Returns `true` iff the
+/// ordering and adjacency constraints hold.
+///
+/// Mirrors `super::verify_non_membership_no_inclusion_check` against the
+/// prefix-3 tree. The OPTIONAL-collapse easy case lowers the two arms
+/// to a single `assert(matched | unmatched)` line, so the unmatched arm
+/// must be expressible inside an `|`-join.
+///
+/// Soundness identical to the asserting variant: every constituent
+/// check becomes a bit `&`-folded into `ok`, so the returned `true`
+/// is equivalent to the asserting variant having succeeded. The
+/// Boolean direction-bit invariants stay enforced.
+pub fn verify_non_membership_prefix3_no_inclusion_check(
+    left: PrefixTriple3,
+    right: PrefixTriple3,
+    absent_prefix_hash: Field,
+) -> bool {
+    let mut ok: bool = true;
+    ok &= left.path[0].lt(absent_prefix_hash);
+    ok &= absent_prefix_hash.lt(right.path[0]);
+
+    let mut left_idx: u64 = 0;
+    let mut right_idx: u64 = 0;
+    let mut bit: u64 = 1;
+    for j in 0..(consts::MERKLE_DEPTH - 1) {
+        let l = left.directions[j];
+        let r = right.directions[j];
+        ok &= (l == 0) | (l == 1);
+        ok &= (r == 0) | (r == 1);
+        if l == 1 {
+            left_idx += bit;
+        }
+        if r == 1 {
+            right_idx += bit;
+        }
+        bit *= 2;
+    }
+    ok & (right_idx == left_idx + 1)
+}
+
+/// Boolean-returning variant of
+/// `verify_non_membership_prefix3_low_sentinel_no_inclusion`. Used by
+/// the OPTIONAL-collapse boundary-case dispatch's lower-bound arm.
+pub fn verify_non_membership_prefix3_low_sentinel_no_inclusion_check(
+    low: SentinelLeaf,
+    right: PrefixTriple3,
+    absent_prefix_hash: Field,
+) -> bool {
+    let mut ok: bool = true;
+    ok &= low.path[0] == consts::LOW_SENTINEL_HASH;
+    ok &= consts::LOW_SENTINEL_HASH.lt(absent_prefix_hash);
+    ok &= absent_prefix_hash.lt(right.path[0]);
+
+    for j in 0..(consts::MERKLE_DEPTH - 1) {
+        let d = low.directions[j];
+        ok &= (d == 0) | (d == 1);
+        ok &= d == 0;
+    }
+    let right_idx = reconstruct_index(right.directions);
+    ok & (right_idx == 1)
+}
+
+/// Boolean-returning variant of
+/// `verify_non_membership_prefix3_high_sentinel_no_inclusion`. Used by
+/// the OPTIONAL-collapse boundary-case dispatch's upper-bound arm.
+pub fn verify_non_membership_prefix3_high_sentinel_no_inclusion_check(
+    left: PrefixTriple3,
+    high: SentinelLeaf,
+    absent_prefix_hash: Field,
+) -> bool {
+    let mut ok: bool = true;
+    ok &= high.path[0] == consts::HIGH_SENTINEL_HASH;
+    ok &= left.path[0].lt(absent_prefix_hash);
+    ok &= absent_prefix_hash.lt(consts::HIGH_SENTINEL_HASH);
+
+    let left_idx = reconstruct_index(left.directions);
+    let high_idx = reconstruct_index(high.directions);
+    ok & (high_idx == left_idx + 1)
+}
+
 // =====================================================================
 // Property tests
 // =====================================================================
@@ -659,6 +740,100 @@ fn test_prefix3_non_membership_rejects_non_adjacent_brackets() {
     assert(absent_prefix_hash.lt(right.path[0]), "fixture: absent < right");
 
     verify_non_membership_prefix3(left, right, absent_prefix_hash, info.root);
+}
+
+#[test]
+fn test_prefix3_non_membership_no_inclusion_check_returns_true_on_valid_witness() {
+    // The Boolean-returning variant must return `true` when the
+    // ordering / adjacency constraints hold. Companion to the asserting
+    // variant's interior test.
+    let prefixes = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+    let info = merkle_prefix3::<11, 3>(prefixes);
+
+    let mut idx1: u32 = 0;
+    let mut idx2: u32 = 0;
+    for i in 0..3 {
+        let mut idx: u64 = 0;
+        let mut bit: u64 = 1;
+        for j in 0..10 {
+            if info.direction[i][j] == 1 {
+                idx += bit;
+            }
+            bit *= 2;
+        }
+        if idx == 1 {
+            idx1 = i as u32;
+        } else if idx == 2 {
+            idx2 = i as u32;
+        }
+    }
+
+    let left = PrefixTriple3 {
+        terms: info.prefixes[idx1],
+        path: info.paths[idx1],
+        directions: info.direction[idx1],
+    };
+    let right = PrefixTriple3 {
+        terms: info.prefixes[idx2],
+        path: info.paths[idx2],
+        directions: info.direction[idx2],
+    };
+
+    let absent_prefix_hash: Field = left.path[0] + 1;
+    assert(absent_prefix_hash.lt(right.path[0]), "fixture: absent < right");
+
+    let ok = verify_non_membership_prefix3_no_inclusion_check(
+        left,
+        right,
+        absent_prefix_hash,
+    );
+    assert(ok, "boolean variant must return true on valid witness");
+}
+
+#[test]
+fn test_prefix3_non_membership_no_inclusion_check_returns_false_on_present_prefix() {
+    // The Boolean-returning variant must return `false` when the absent
+    // hash equals a real leaf (the strict `<` ordering check fails).
+    let prefixes = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+    let info = merkle_prefix3::<11, 3>(prefixes);
+
+    let mut idx1: u32 = 0;
+    let mut idx2: u32 = 0;
+    for i in 0..3 {
+        let mut idx: u64 = 0;
+        let mut bit: u64 = 1;
+        for j in 0..10 {
+            if info.direction[i][j] == 1 {
+                idx += bit;
+            }
+            bit *= 2;
+        }
+        if idx == 1 {
+            idx1 = i as u32;
+        } else if idx == 2 {
+            idx2 = i as u32;
+        }
+    }
+
+    let left = PrefixTriple3 {
+        terms: info.prefixes[idx1],
+        path: info.paths[idx1],
+        directions: info.direction[idx1],
+    };
+    let right = PrefixTriple3 {
+        terms: info.prefixes[idx2],
+        path: info.paths[idx2],
+        directions: info.direction[idx2],
+    };
+
+    // absent_prefix_hash = right.path[0] -- present in the tree, must
+    // be rejected by the boolean variant.
+    let ok = verify_non_membership_prefix3_no_inclusion_check(
+        left,
+        right,
+        right.path[0],
+    );
+    assert(!ok, "boolean variant must return false when prefix is present");
 }
 
 #[test]

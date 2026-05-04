@@ -8,7 +8,6 @@ use dep::types::PrefixTriple3;
 pub(crate) type BGP = [Triple; 2];
 pub(crate) struct Variables {
   pub(crate) s: Field,
-  pub(crate) o: Field,
 }
 
 pub(crate) type BgpPrefix3 = [PrefixTriple3; 2];

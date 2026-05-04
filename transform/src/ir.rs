@@ -110,6 +110,88 @@ impl BoundaryCase {
     }
 }
 
+/// Which prefix-tree commitment a `PrefixNonExistenceConstraint` brackets
+/// against. Round 4 ships only `Prefix3SpG` (drop the `o` position); the
+/// other 15 subsets follow the same template (see
+/// `spec/prefix-tree-commitment.md` Sec.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefixKind {
+    /// `(s, p, g)`-keyed prefix tree -- inner-only position is `o`.
+    /// Hashes via `utils::prefix3::hash3_sp_g`. Bracket leaves live in
+    /// `bgp_prefix3` (slot type `PrefixTriple3`); inclusion is checked
+    /// against `roots[1].value`.
+    Prefix3SpG,
+}
+
+impl PrefixKind {
+    pub fn metadata_tag(&self) -> &'static str {
+        match self {
+            PrefixKind::Prefix3SpG => "prefix3_sp_g",
+        }
+    }
+
+    /// Index into the inner-triple `[s, p, o, g]` term array that is
+    /// the **inner-only** position for this prefix kind. The other
+    /// three positions must be ground (constant or outer-bound) at
+    /// substitution time.
+    pub fn free_position(&self) -> usize {
+        match self {
+            PrefixKind::Prefix3SpG => 2, // `o` is free
+        }
+    }
+
+    /// Indices into the inner-triple `[s, p, o, g]` term array that
+    /// are bracketed by the prefix tree (the **fixed** positions). For
+    /// `Prefix3SpG` these are `s, p, g` -- in the canonical order the
+    /// tree's `hash3_sp_g` expects.
+    pub fn fixed_positions(&self) -> [usize; 3] {
+        match self {
+            PrefixKind::Prefix3SpG => [0, 1, 3],
+        }
+    }
+}
+
+/// One prefix-tree non-membership obligation -- analogue of
+/// [`NonExistenceConstraint`] keyed against the round-4 prefix tree
+/// instead of the leaf-hash sorted tree. The circuit asserts that no
+/// quad with the given prefix exists in the dataset, by bracketing
+/// `hash3_sp_g(fixed_terms)` between two adjacent prefix-3 leaves
+/// (interior case) or between a sentinel and the smallest / largest
+/// real prefix leaf (boundary cases).
+///
+/// The inner pattern's free position is the variable that the prefix
+/// tree's keying drops, e.g. for `Prefix3SpG` the `o` position is
+/// inner-only and `s`, `p`, `g` are ground after outer-μ substitution.
+///
+/// Witness shape: two appended **prefix-3 BGP slots** (`bgp_prefix3`),
+/// each carrying a `PrefixTriple3` with three terms + Merkle path
+/// against `roots[1]`. In `Lower` mode the left slot is a
+/// prover-supplied filler; in `Upper` the same applies to the right
+/// slot. The runtime dispatch on `boundary_cases_prefix3[constraint_idx]`
+/// chooses which `verify_non_membership_prefix3_*_no_inclusion`
+/// primitive fires.
+///
+/// See `spec/prefix-tree-commitment.md` Sec.8.
+#[derive(Clone, Debug)]
+pub struct PrefixNonExistenceConstraint {
+    /// Which prefix tree this constraint witnesses against. Round 4
+    /// only ships `Prefix3SpG`.
+    pub prefix_kind: PrefixKind,
+    /// Index into `bgp_prefix3` for the left bracket leaf. In `Lower`
+    /// mode this slot is a prover-supplied filler.
+    pub bracket_left_idx: usize,
+    /// Index into `bgp_prefix3` for the right bracket leaf. In `Upper`
+    /// mode this slot is a prover-supplied filler.
+    pub bracket_right_idx: usize,
+    /// Subject / predicate / object / graph terms of the inner triple
+    /// after outer-μ substitution. The position at
+    /// `prefix_kind.free_position()` is unused for hashing; the others
+    /// feed `hash3_sp_g(...)` in canonical order. Each term is
+    /// substituted at emit time -- outer-bound variables resolve via
+    /// `Term::Variable` lookup; constants are inlined.
+    pub absent_terms: [Term; 4],
+}
+
 /// One non-membership obligation, lowered from a `FILTER(NOT EXISTS { t })`
 /// block (or, equivalently, from `MINUS` after the algebra rewrite). The
 /// circuit asserts:
@@ -185,14 +267,31 @@ pub struct EasyOptional {
     /// BGP index of the inner-triple slot used in the matched arm.
     pub(crate) matched_idx: usize,
     /// BGP index of the left bracket leaf used in the unmatched arm.
+    /// For round-3 collapses (`prefix_kind == None`) this is an index
+    /// into `bgp` (the round-3 sorted tree). For prefix-tree collapses
+    /// (`prefix_kind == Some(...)`) this is an index into the
+    /// per-kind prefix slot array.
     pub(crate) bracket_left_idx: usize,
     /// BGP index of the right bracket leaf used in the unmatched arm.
+    /// Same indexing convention as `bracket_left_idx`.
     pub(crate) bracket_right_idx: usize,
     /// Subject / predicate / object / graph terms of the inner triple
     /// after outer-μ substitution. Variables in this array are always
     /// bound by the outer scope (the easy-case predicate guarantees
-    /// it).
+    /// it for the round-3 case; the prefix-tree case allows a single
+    /// inner-only position at `prefix_kind.free_position()`).
     pub(crate) inner_terms: [Term; 4],
+    /// `Some(kind)` -- the unmatched arm uses the prefix tree at the
+    /// given `kind`'s root, bracketing on `hash3_*` of the fixed
+    /// positions. `bracket_left_idx` / `bracket_right_idx` index into
+    /// the per-kind prefix slot array. The matched arm still pins each
+    /// of the four `bgp[matched_idx].terms[j]` slots to the inner term,
+    /// since only fully-determined matches are accepted.
+    ///
+    /// `None` -- round-3 leaf-hash bracketing; both bracket indices
+    /// reference `bgp`. The original easy case (every position
+    /// outer-bound or constant).
+    pub(crate) prefix_kind: Option<PrefixKind>,
 }
 
 #[derive(Clone, Debug)]
@@ -206,12 +305,28 @@ pub struct PatternInfo {
     /// Non-membership obligations from `FILTER(NOT EXISTS { t })` /
     /// `MINUS { … } { t }`. Empty when the query has no negation.
     pub(crate) not_exists: Vec<NonExistenceConstraint>,
+    /// Round-4 prefix-tree non-membership obligations -- `NOT EXISTS`
+    /// / `MINUS` over a single-triple inner pattern with one inner-only
+    /// position whose location matches a shipped prefix kind (round 4
+    /// ships `Prefix3SpG` only -- inner-only `o`). See
+    /// `spec/prefix-tree-commitment.md` Sec.8. The bracket indices on
+    /// each constraint reference the per-kind prefix slot array
+    /// (`bgp_prefix3`), not `bgp`.
+    pub(crate) prefix_not_exists: Vec<PrefixNonExistenceConstraint>,
+    /// Number of prefix-3 BGP slots emitted across all
+    /// `prefix_not_exists` and `easy_optionals` with
+    /// `prefix_kind == Some(PrefixKind::Prefix3SpG)`. The emit /
+    /// metadata layers use this to size the `bgp_prefix3` array. Kept
+    /// here (rather than recomputed downstream) so the lowering layer
+    /// is the single source of truth on slot allocation.
+    pub(crate) bgp_prefix3_len: usize,
     /// OPTIONALs that satisfy the round-3-follow-up easy-case
     /// predicate (single-triple inner with every position outer-bound
     /// or constant). Each one is collapsed to a single
     /// matched-or-unmatched disjunction in the same circuit instead
     /// of multiplying the variant power-set. See `spec/exists.md`
-    /// §4.1 / SPARQL_ROADMAP.md §6.4.
+    /// §4.1 / SPARQL_ROADMAP.md §6.4. Round 5 (this PR) extends the
+    /// case to single-inner-only-position via `prefix_kind`.
     pub(crate) easy_optionals: Vec<EasyOptional>,
 }
 
@@ -225,6 +340,8 @@ impl PatternInfo {
             union_branches: None,
             optional_blocks: Vec::new(),
             not_exists: Vec::new(),
+            prefix_not_exists: Vec::new(),
+            bgp_prefix3_len: 0,
             easy_optionals: Vec::new(),
         }
     }
