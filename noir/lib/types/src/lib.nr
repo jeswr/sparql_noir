@@ -6,6 +6,34 @@ pub struct Triple {
   pub directions: [u8; MERKLE_DEPTH - 1],
 }
 
+/// A prefix-3 leaf in the **prefix-3 sorted Merkle commitment**
+/// (`tree_3sp_g`), a *second* commitment shape that the signer builds
+/// alongside the leaf-hash sorted commitment for round-4 prefix
+/// non-membership proofs. Leaves are keyed by
+/// `utils::hash3_sp_g(s, p, g)` (drop the `o` position) so that
+/// `NOT EXISTS { ?p ex:age ?o }` (and other patterns where `o` is
+/// inner-only) can be witnessed via the same two-leaf bracketing
+/// argument that `verify_non_membership_*` uses on `tree_4`.
+///
+/// `terms` carries the three fixed positions in canonical
+/// `(s, p, g)` order. The leaf hash committed in the tree is
+/// `utils::hash3_sp_g(terms)`, which is just `hash4` with a fixed
+/// domain-separator constant (`consts::PREFIX3_SP_G_DOMAIN_SEPARATOR`)
+/// in the `o` slot -- same primitive, different domain, no new
+/// cryptographic assumption. See `spec/prefix-tree-commitment.md`
+/// Sec.2.2 for the rationale.
+///
+/// **Why a separate type instead of reusing `Triple`?** The type
+/// system enforces "this slot is a prefix-tree bracket, not a full-
+/// quad bracket" at the call site. Prefix-tree primitives accept
+/// `PrefixTriple3` and would refuse a four-term `Triple` (and vice
+/// versa).
+pub struct PrefixTriple3 {
+  pub terms: [Field; 3],
+  pub path: [Field; MERKLE_DEPTH],
+  pub directions: [u8; MERKLE_DEPTH - 1],
+}
+
 /// A synthetic sentinel leaf in the sorted Merkle commitment.
 ///
 /// The signer's `utils::merkle` injects two such leaves into every

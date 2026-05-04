@@ -1,0 +1,230 @@
+# Prefix-tree commitment (round 4)
+
+**Status:** scaffolding — design + prefix-3 primitive + property tests. Transform-side dispatch deferred. Round-4 unlock for multi-position non-membership.
+**Owner:** noir-circuits + sparql-semantics agents (round 4, branch `prefix-tree-commitment-round4`).
+**References:** `spec/exists.md` Sec.3.3 / Sec.6 (round-3 OPTIONAL collapse punt); `decisions/non-membership-sentinels-transform-wiring.md` (Approach A locked in for round 4); `paper/PLAN.md` Sec.4.3 (prefix-tree commitment claims); `feedback_modular_commitment_signature_design.md` (modular commitment-shape directive).
+
+## 1. Background
+
+The **leaf-hash sorted Merkle commitment** in `noir::utils::merkle` (`spec/exists.md` Sec.3.3) keys leaves on `consts::hash4(s, p, o, g)` and supports non-membership proofs against an *exact* would-be quad (`absent_hash` is the hash of a fully-ground 4-tuple). This is sufficient for **single-triple ground-inner** `NOT EXISTS` and `MINUS` (round 3 main event).
+
+It is **not** sufficient for:
+
+- **Multi-triple `NOT EXISTS { t_1 . t_2 . ... }`** with shared inner-only variables. The pattern of triples can be absent without any individual triple being absent.
+- **OPTIONAL collapse over patterns with free positions** — `OPTIONAL { ?p ex:age ?o }` introduces `?o` as inner-only; the unmatched arm requires "no `(?p, ex:age, ?, g)` exists in the dataset", a non-membership over a *prefix* of the quad space, not a fully-ground quad.
+- **`MINUS` over `UNION`** — same shape: the unmatched-by-every-branch condition is a multi-prefix non-membership.
+
+Round 4 unlocks these by committing a **second tree, keyed by a prefix of the quad's positions**. Soundness of "no `(s, p, ?, g)` exists" reduces to non-membership of the prefix `(s, p, g)` in the prefix-3 tree, i.e. the same two-leaf bracketing argument the round-3 sorted-leaf primitive already uses, but in the prefix-key space.
+
+## 2. Design — prefix-3 (proof of concept)
+
+Round 4 ships the **prefix-3** variant: prefix key = `hash3(s, p, g)`, free position = `o`. This is the smallest non-trivial case (single free position, single fixed-graph fixed-subject-predicate prefix) and is sufficient to unlock `OPTIONAL { ?p ex:age ?o }` collapse over a fixed graph with bound `?p`. The general prefix-N variant (for N free positions) follows the same pattern; see Sec.7 for the generalisation path.
+
+### 2.1 Tree shape
+
+Alongside the leaf-hash sorted tree (`tree_4` keyed on `hash4(s, p, o, g)`), the signer builds a **prefix-3 sorted tree** (`tree_3sp_g`, keyed on `hash3(s, p, g)` — i.e. drop position `o`). Both trees commit to the same dataset:
+
+| Tree | Leaf-hash | Sorted by | Purpose |
+|---|---|---|---|
+| `tree_4` | `hash4(s, p, o, g)` | leaf-hash ascending | per-quad inclusion / non-inclusion (round 3) |
+| `tree_3sp_g` | `hash3(s, p, g)` | leaf-hash ascending, deduplicated | per-`(s, p, g)`-prefix non-inclusion (round 4) |
+
+`tree_3sp_g`'s leaves are **deduplicated** at sign time: if multiple quads share the same `(s, p, g)` prefix (which happens whenever the dataset has more than one object value for the same subject-predicate-graph triple), only one leaf is emitted. Without deduplication, the sorted tree would have adjacent equal-hash leaves at every multi-`o` `(s, p, g)` prefix, and non-membership at a present prefix's neighbour would still pass the strict-`<` check — soundness intact, but witness shape ambiguous. Deduplication keeps the tree's `(left, right)` adjacency proof unambiguous.
+
+The signer commits to **both roots** in the same signature payload: `(root_4, root_3sp_g)` is the signed message. The verifier learns both roots; circuits check inclusion / non-inclusion against whichever root the SPARQL operator dispatches to.
+
+### 2.2 `hash3` definition
+
+We define `hash3(s, p, g) := consts::hash4([s, p, g, PREFIX3_SP_G_DOMAIN_SEPARATOR])` where `PREFIX3_SP_G_DOMAIN_SEPARATOR` is a fixed BN254 field constant chosen by the protocol (e.g. `0x70726566697833 = "prefix3"` ASCII-packed). This re-uses the existing `hash4` Pedersen primitive — no new hash gates, no new cryptographic assumption — and the domain-separator prevents cross-tree collision (a `hash3(s, p, g)` value in `tree_3sp_g` cannot be confused with a `hash4(s, p, o, g)` value in `tree_4`, even if some adversarial choice of `o == DOMAIN_SEPARATOR` were attempted, because the position layout differs).
+
+### 2.3 Sentinels
+
+`tree_3sp_g` carries the **same low / high sentinel pair** as the leaf-hash sorted tree, with hashes `consts::LOW_SENTINEL_HASH = 0` and `consts::HIGH_SENTINEL_HASH = p - 1`. Same order-statistic argument applies (boundary-falling absent prefixes need explicit bracketing); same `verify_low_sentinel_inclusion` / `verify_high_sentinel_inclusion` primitives apply (sentinel hashes are ABI-fixed, not derived from any triple).
+
+The **ABI for `tree_3sp_g` sentinels is shared** with `tree_4`'s — both trees use the same `consts::LOW_SENTINEL_HASH` / `consts::HIGH_SENTINEL_HASH` constants. This is safe because the trees have separate roots; the constants distinguish "boundary leaf in this tree" not "boundary leaf in any tree".
+
+### 2.4 Sentinel boundary cases
+
+Identical three-case structure to round 3:
+
+| Boundary case | Bracketing | Primitive |
+|---|---|---|
+| `Lower` (0) | low sentinel, smallest real prefix | `verify_non_membership_prefix3_low_sentinel_no_inclusion` |
+| `Middle` (1) | two adjacent real prefix leaves | `verify_non_membership_prefix3_no_inclusion` |
+| `Upper` (2) | largest real prefix, high sentinel | `verify_non_membership_prefix3_high_sentinel_no_inclusion` |
+
+Same runtime-dispatch convention as `decisions/non-membership-sentinels-transform-wiring.md` Approach A: a single circuit, gated on a public `boundary_case` field per constraint. The transform layer's dispatch wiring (Sec.6) is structurally identical to the round-3 wiring — just dispatching against `tree_3sp_g`'s root instead of `tree_4`'s.
+
+## 3. Witness shape
+
+For `NOT EXISTS { ?p ex:age ?o }` (graph fixed, `?p` bound by outer mapping, `?o` inner-only):
+
+1. The transform substitutes outer bindings: prefix `(?p_value, ex:age, default_graph)` is now ground in the three positions covered by `tree_3sp_g`.
+2. Prover computes `absent_prefix_hash := hash3(?p_value, ex:age, default_graph)`.
+3. Prover supplies one of:
+   - **Middle case:** two adjacent `tree_3sp_g` leaves `(left_prefix, right_prefix)` with inclusion paths to `root_3sp_g`, and the boundary-case tag `1`.
+   - **Lower case:** the low sentinel + smallest real prefix leaf; tag `0`.
+   - **Upper case:** the largest real prefix + the high sentinel; tag `2`.
+4. Circuit calls the corresponding `verify_non_membership_prefix3_*` primitive against `root_3sp_g`.
+5. **No additional inner-pattern triples in `bgp`** — the prefix-tree absence proof short-circuits the per-triple inclusion path that round 3's `NonExistenceConstraint` uses.
+
+Witness shape parallels round 3 exactly:
+
+| Round | Bracket leaves | Absent value | Root |
+|---|---|---|---|
+| 3 (leaf-hash) | `(left_quad, right_quad)` Triples | `hash4(s, p, o, g)` | `root_4` |
+| 4 (prefix-3) | `(left_prefix, right_prefix)` PrefixTriples | `hash3(s, p, g)` | `root_3sp_g` |
+
+The new `PrefixTriple` type (in `noir::types`) carries `terms: [Field; 3]`, `path`, `directions` — same shape as `Triple` but with three terms instead of four. We keep it as a separate type rather than reusing `Triple` so the type system enforces the prefix vs full-quad distinction at the call site.
+
+## 4. Soundness argument
+
+**Claim.** If the prover supplies a valid `verify_non_membership_prefix3_*` proof for `absent_prefix_hash := hash3(s*, p*, g*)` against `root_3sp_g`, then **no quad with prefix `(s*, p*, g*)` is in the committed dataset** — i.e. for every `o`, `(s*, p*, o, g*) ∉ D`.
+
+**Proof.**
+
+1. **Tree binding.** `tree_3sp_g` is a deterministic function of the dataset `D`: build the multiset `{ hash3(s, p, g) : (s, p, o, g) ∈ D }`, deduplicate, sort, sentinel-bracket, build the Merkle tree. The signer's signature commits to `root_3sp_g`. By Pedersen-hash collision-resistance, no efficient adversary can produce a different leaf set with the same root.
+2. **Bracketing implies non-membership in the prefix tree.** Following the round-3 sorted-leaf argument (`spec/exists.md` Sec.3.3): if `left.path[0] < absent_prefix_hash < right.path[0]` and `right_idx == left_idx + 1`, then `absent_prefix_hash` cannot equal any leaf in `tree_3sp_g`. (Same applies to the sentinel boundary cases, with the sentinel as one of the brackets.)
+3. **Non-membership in the prefix tree implies prefix non-membership in the dataset.** By construction, `tree_3sp_g`'s leaves are `{ hash3(s, p, g) : (s, p, o, g) ∈ D }` (after deduplication). If `hash3(s*, p*, g*)` is not a leaf, then by Pedersen collision-resistance no `(s, p, g)` triple in `D` hashes to `hash3(s*, p*, g*)`, which (under the same collision-resistance assumption applied to `hash3` = domain-separated `hash4`) means no `(s, p, g)` triple equals `(s*, p*, g*)`. So no quad `(s*, p*, o, g*)` for any `o` is in `D`.
+
+**Soundness reduces to** Pedersen-hash collision-resistance (already assumed for `tree_4`) + the round-3 sorted-leaf bracketing argument applied to a different keying. No new cryptographic assumption.
+
+**Subtlety — deduplication is part of the binding.** Step 3 relies on `tree_3sp_g`'s leaf set being exactly `{ hash3(s, p, g) : (s, p, o, g) ∈ D }`. If the signer omits a real prefix from `tree_3sp_g` (deduplicates incorrectly, or simply misses one), an honest verifier would accept a non-membership proof for a prefix that *is* in the dataset — soundness break. Mitigation: the signer's circuit (`bin/signature/`) includes an assertion that every quad in the dataset has its `hash3` prefix present in `tree_3sp_g`'s leaf set. This is an `O(|D|^2)` cross-check at sign time but is one-shot per dataset; tractable. Documented as a follow-up assertion.
+
+## 5. Disclosure
+
+The verifier learns:
+
+- **Both roots** `(root_4, root_3sp_g)` — same disclosure level as round 3's single root.
+- **Which prefix tree the prover witnessed absence in** — for prefix-3, this is "the `(s, p, g)`-prefix tree, i.e. `o` is the inner-only position". The verifier learns the **subset of quad positions** that the inner pattern's free positions cover. This is **already public**: the SPARQL query text (and metadata.json) names the variables, and the transform layer's emit step lists which positions are inner-only. So this is no additional disclosure.
+- **Each bracket leaf's `hash3(s, p, g)` value** — the two prefix hashes adjacent to the absent prefix. These are committed leaves (anyone who observed many proofs against the same dataset could correlate brackets across queries to learn the prefix multiset structure). Same disclosure shape as round 3's leaf-hash bracket leaves.
+
+**No additional information beyond the round-3 disclosure shape**, except the second root — which is itself a one-time per-dataset constant.
+
+## 6. Cost
+
+### 6.1 Sign time
+
+Per dataset of `N` quads:
+
+| Cost | Round 3 (leaf-hash only) | Round 4 (leaf-hash + prefix-3) |
+|---|---|---|
+| Tree builds | 1× | 2× |
+| Tree-level hash gates | `(N + 2)` Pedersen × `MERKLE_DEPTH` | `(N + 2 + N_3 + 2)` × `MERKLE_DEPTH` |
+| Leaf hashes | `N × hash4` | `N × hash4 + N_3 × hash4` (the `hash3 = hash4 ∘ pad` re-uses the same primitive) |
+| Sort | `O(N²)` insertion | `O(N²)` × 2 |
+| Cross-check (Sec.4) | none | `O(N²)` set-membership check |
+
+where `N_3 = |{ (s, p, g) : (s, p, o, g) ∈ D }|` (number of distinct prefixes; `N_3 ≤ N`).
+
+Worst case (every quad has a unique prefix): roughly **2× sign-time work and 2× tree-storage**. Best case (every quad shares a prefix with all others, e.g. a single subject's many object values): `N_3 = 1`, so the prefix tree is degenerate but still useful.
+
+### 6.2 Prove time
+
+Per `NOT EXISTS` constraint over a prefix:
+
+| Round 3 (single-triple ground) | Round 4 (prefix-3 absence) |
+|---|---|
+| 2 × Triple inclusion (`hash4 + hash2 × MERKLE_DEPTH`) | 2 × PrefixTriple inclusion (`hash3 + hash2 × MERKLE_DEPTH`) |
+| Strict `<` × 2 | Strict `<` × 2 |
+| Index reconstruction | Index reconstruction |
+
+**Same per-constraint cost** as round 3's `NotExists` lowering. The round-4 unlock is purely an **expressivity** lift, not a cost lift, for the constraint itself.
+
+### 6.3 Dataset size
+
+The signer's commitment now includes **two roots**, increasing the signed payload from 32 bytes to 64 bytes. Tree storage doubles in the worst case. For deployments where prefix-tree functionality isn't needed, the signer can omit `tree_3sp_g` and emit a sentinel `root_3sp_g = 0` — any prover attempting a prefix-tree non-membership proof will fail because the genuine tree-build hash won't equal `0`.
+
+## 7. Generalisation path: prefix-N variants
+
+The prefix-3 case (drop `o`) is one of `2^4 = 16` possible prefix subsets over a quad. The general "prefix-tree commitment" of `paper/PLAN.md` Sec.4.3 covers all 16:
+
+| Subset of fixed positions | Tree | Use case |
+|---|---|---|
+| `{s, p, o, g}` | `tree_4` | round 3 — exact-quad non-membership |
+| `{s, p, g}` | `tree_3sp_g` | **round 4 — `OPTIONAL { ?p ex:age ?o }`** |
+| `{s, p}` | `tree_2sp` | `NOT EXISTS { ?p ex:age ?o GRAPH ?g }` over any graph |
+| `{p, o}` | `tree_2po` | "no quad with this predicate-object pair anywhere" |
+| `{s}` | `tree_1s` | "subject doesn't appear in dataset" |
+| ... (12 more) | ... | various |
+
+Adding a new prefix variant is mechanical:
+
+1. New `hash_<subset>` helper, domain-separated against the others.
+2. New `merkle_<subset>` builder reusing the leaf-sort + sentinel-pad pattern.
+3. New `verify_non_membership_<subset>_*` primitive set (interior + low/high boundary).
+4. New `PrefixTriple<K>` type with `terms: [Field; K]`.
+5. Signer adds the new tree to the signed payload (root list grows).
+6. Transform layer adds dispatch into the new primitive set when the constraint shape calls for it.
+
+**Round 4 ships only the prefix-3 (`{s, p, g}`) variant.** It is the highest-impact subset (covers OPTIONAL collapse, MINUS-over-UNION, multi-triple `NOT EXISTS` with shared `?g`) and validates the design pattern. The other 15 variants land as needed in subsequent rounds, when concrete query classes call for them. Per the modular-commitment directive (`feedback_modular_commitment_signature_design.md`), each variant must justify itself by enabling a query class the others don't.
+
+## 8. Transform-side dispatch (deferred)
+
+Round 4 **does not yet wire** prefix-tree non-membership into `transform/src/lower.rs` / `emit.rs`. The dispatch shape is documented here for the follow-up round.
+
+### 8.1 Constraint type
+
+A new IR constraint `PrefixNonExistenceConstraint` parallels round 3's `NonExistenceConstraint`:
+
+```rust
+pub struct PrefixNonExistenceConstraint {
+    pub prefix_kind: PrefixKind,         // Prefix3SpG, Prefix2Sp, ... (round 4 ships only Prefix3SpG)
+    pub fixed_terms: Vec<TermSlot>,      // ground positions, in canonical order for `prefix_kind`
+    pub bracket_left_slot: usize,        // index into `bgp` for the left bracket PrefixTriple
+    pub bracket_right_slot: usize,       // index into `bgp` for the right bracket PrefixTriple
+    pub boundary_case_input: usize,      // index into the public `boundary_case[]` array
+}
+```
+
+`bgp` grows a parallel slot type for prefix-triples: `PrefixTriple3` slots get their own inclusion check in `main.nr` (against `root_3sp_g`, not `root_4`).
+
+### 8.2 Lowering
+
+`lower::lower_filter_not_exists` learns to recognise the **prefix-3 case**: the inner pattern is a single triple, exactly one position is inner-only, and that position is `o`. Lowers to a `PrefixNonExistenceConstraint` with `prefix_kind: Prefix3SpG`. Other shapes continue to either:
+
+- Lower to round 3's `NonExistenceConstraint` (single-triple ground-inner — unchanged).
+- Be rejected with a clearer error pointing to the not-yet-shipped prefix variants.
+
+### 8.3 Emit
+
+`emit.rs::emit_constraints` adds an arm for `PrefixNonExistenceConstraint` that produces:
+
+```rust
+if boundary_case[i] == 0 {
+    verify_non_membership_prefix3_low_sentinel_no_inclusion(low_sentinel_3, bgp_prefix3[k+1], absent_prefix_hash);
+} else if boundary_case[i] == 1 {
+    verify_non_membership_prefix3_no_inclusion(bgp_prefix3[k], bgp_prefix3[k+1], absent_prefix_hash);
+} else if boundary_case[i] == 2 {
+    verify_non_membership_prefix3_high_sentinel_no_inclusion(bgp_prefix3[k], high_sentinel_3, absent_prefix_hash);
+} else {
+    assert(false, "non-membership: boundary_case must be 0, 1, or 2");
+}
+```
+
+Identical shape to round 3's emitted dispatch — the only differences are the primitive names and the `bgp_prefix3` slot array.
+
+### 8.4 Signer + main.nr ABI
+
+Two ABI additions:
+
+- `roots[1]: Root` for `root_3sp_g` (alongside `roots[0]` for `root_4`). Public input.
+- `low_sentinel_3` / `high_sentinel_3` SentinelLeaf inputs alongside the round-3 sentinels.
+- `bgp_prefix3: [PrefixTriple3; N_PREFIX]` for prefix-bracket leaves.
+
+`main.nr` walks `bgp_prefix3` for inclusion against `roots[1].value` (mirroring the round-3 `bgp` walk against `roots[0].value`).
+
+## 9. Open questions for the follow-up round
+
+1. **Cross-tree consistency check at sign time** (Sec.4 subtlety). The `O(N²)` check is acceptable; an `O(N log N)` Merkle-multiset-equality argument would be cleaner. Defer until the prefix-tree variants multiply and the constant factor matters.
+2. **Optional prefix trees.** Should every signer build all 16 prefix trees, or only the ones the deployment expects to query? Probably the latter (most signers only need `tree_4` + a small subset). Requires per-signature metadata listing which trees are committed; clarify in the round-5 follow-up.
+3. **`hash3` domain separator value.** Sec.2.2 picks an ASCII-packed constant; alternatively, a low-arity hash like `Poseidon3` would avoid the padding. Re-examine when the prefix-tree variants are profiled.
+4. **Cross-prefix bracket dedup.** If a query has multiple prefix-3 `NOT EXISTS` constraints over the same dataset, the bracket leaves can collide; the transform layer should hash-cons the bracket slots to avoid duplicate inclusion checks. Optimisation, not correctness.
+
+## 10. References
+
+- W3C SPARQL 1.1 Sec.18.5 (algebra evaluation): https://www.w3.org/TR/sparql11-query/#sparqlAlgebraEval
+- `spec/exists.md` Sec.3.3 (round-3 sorted-leaf non-membership, the design template)
+- `decisions/non-membership-sentinels-transform-wiring.md` (Approach A — runtime dispatch on `boundary_case`)
+- `paper/PLAN.md` Sec.4.3 (prefix-tree commitment paper claims)
+- `feedback_modular_commitment_signature_design.md` (workspace memory — modular-commitment directive)
