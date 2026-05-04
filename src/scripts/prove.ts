@@ -44,9 +44,9 @@ import { defaultConfig } from '../config.js';
  * hash), surfacing as a proof-construction error. Callers can lift the
  * `STRING_LEN_MAX` ceiling via `setup.ts --string-len-max <n>`.
  */
-function termToWitness(term: Term, hash: string): { hash: string; bytes: number[]; length: number } {
+function termToWitness(term: Term, hash: string, stringLenMax: number): { hash: string; bytes: number[]; length: number } {
   const lexical = lexicalFormBytes(term);
-  const cap = defaultConfig.stringLenMax;
+  const cap = stringLenMax;
   const bytes = new Array<number>(cap).fill(0);
   const len = Math.min(lexical.length, cap);
   for (let i = 0; i < len; i++) {
@@ -58,6 +58,26 @@ function termToWitness(term: Term, hash: string): { hash: string; bytes: number[
     bytes,
     length: len,
   };
+}
+
+/**
+ * Resolve the bounded byte-array witness cap (`STRING_LEN_MAX`) to use
+ * for a given circuit run. Per-circuit metadata wins over the
+ * source-default; setup.ts can override the default via
+ * `--string-len-max <n>` and the new value is recorded in the
+ * circuit's metadata. Falling back to `defaultConfig.stringLenMax`
+ * keeps behaviour unchanged for circuits whose metadata predates the
+ * round-2 byte-array witness.
+ */
+function resolveStringLenMax(metadata: Record<string, unknown> | undefined | null): number {
+  if (metadata) {
+    const m = metadata as Record<string, unknown>;
+    const cand = (m.stringLenMax ?? m.string_len_max);
+    if (typeof cand === 'number' && Number.isFinite(cand) && Number.isInteger(cand) && cand > 0) {
+      return cand;
+    }
+  }
+  return defaultConfig.stringLenMax;
 }
 
 /**
@@ -1055,7 +1075,12 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
   // term's UTF-8 lexical form (round-2 contract -- see
   // `spec/encoding.md` sec.6.3). Round-2 string operators
   // (STRLEN / STRSTARTS / CONTAINS) bind the bytes at their use site
-  // via `utils::bind_term_bytes_*`.
+  // via `utils::bind_term_bytes_*`. The byte-array width MUST match
+  // the circuit's compiled `STRING_LEN_MAX` (per-circuit metadata),
+  // not the source-default -- otherwise circuits compiled with
+  // `setup.ts --string-len-max <n>` for n != 64 receive mis-sized
+  // witnesses and the proof generation fails.
+  const stringLenMax = resolveStringLenMax(metadata as unknown as Record<string, unknown> | undefined);
   function getTripleObject(id: number) {
     const rawTerms = signedData!.triples[id] ?? [];
     const sourceQuad = quadArr[id];
@@ -1065,7 +1090,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
     const termWitnesses = rawTerms.map((hash, i) => {
       const sourceTerm = sourceTerms[i];
       if (sourceTerm) {
-        return termToWitness(sourceTerm, hash);
+        return termToWitness(sourceTerm, hash, stringLenMax);
       }
       // Fallback: zero-padded placeholder (round-1 behaviour). This
       // path triggers when the signed dataset's `triples[id]` has
@@ -1073,7 +1098,7 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       // operation but stays defensive against partial fixtures.
       return {
         hash,
-        bytes: new Array(defaultConfig.stringLenMax).fill(0),
+        bytes: new Array(stringLenMax).fill(0),
         length: 0,
       };
     });
@@ -1530,7 +1555,10 @@ export async function generateProofsInMemory(options: ProveOptionsInMemory): Pro
   // Build triple object for circuit input. Each term-hash is wrapped
   // as a `TermWitness` whose `bytes` / `length` carry the source
   // term's UTF-8 lexical form (round-2 contract -- see
-  // `spec/encoding.md` sec.6.3).
+  // `spec/encoding.md` sec.6.3). Byte-array width follows per-circuit
+  // metadata (not the source-default) so circuits compiled with a
+  // non-default `STRING_LEN_MAX` get correctly-sized witnesses.
+  const stringLenMax = resolveStringLenMax(metadata as unknown as Record<string, unknown> | undefined);
   function getTripleObject(id: number) {
     const rawTerms = signedData.triples[id] ?? [];
     const sourceQuad = quadArr[id];
@@ -1540,11 +1568,11 @@ export async function generateProofsInMemory(options: ProveOptionsInMemory): Pro
     const termWitnesses = rawTerms.map((hash, i) => {
       const sourceTerm = sourceTerms[i];
       if (sourceTerm) {
-        return termToWitness(sourceTerm, hash);
+        return termToWitness(sourceTerm, hash, stringLenMax);
       }
       return {
         hash,
-        bytes: new Array(defaultConfig.stringLenMax).fill(0),
+        bytes: new Array(stringLenMax).fill(0),
         length: 0,
       };
     });
