@@ -14,6 +14,14 @@ on:
   # Allow manual trigger
   workflow_dispatch:
 
+# The "Comment benchmark results on PR" step uses GITHUB_TOKEN to POST
+# /repos/{owner}/{repo}/issues/{n}/comments — which needs explicit
+# pull-requests:write since the repo's default token is read-only.
+# `contents: read` is the minimum the rest of the workflow needs.
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   benchmark:
     # Skip the heavy Noir-installing benchmark on draft PRs (per
