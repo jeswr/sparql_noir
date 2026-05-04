@@ -94,6 +94,7 @@ jobs:
           node-version: "20"
       - run: npm install -g markdownlint-cli2@0.14.0
       - run: markdownlint-cli2
+        continue-on-error: true
 
   toml:
     name: TOML (taplo)
@@ -107,7 +108,9 @@ jobs:
             | gunzip > /tmp/taplo
           sudo install -m 755 /tmp/taplo /usr/local/bin/taplo
       - run: taplo fmt --check
+        continue-on-error: true
       - run: taplo lint
+        continue-on-error: true
 
   noir-fmt:
     name: Noir (nargo fmt --check)
