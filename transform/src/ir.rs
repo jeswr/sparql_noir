@@ -155,6 +155,46 @@ pub struct NonExistenceConstraint {
     pub(crate) absent_terms: [Term; 4],
 }
 
+/// Tiered partial OPTIONAL collapse — easy-case lowering (round 3
+/// follow-up; see `spec/exists.md` §4.1).
+///
+/// An OPTIONAL block whose inner pattern is a **single triple** with
+/// every position either constant or bound by the outer mapping μ
+/// becomes ground after substitution. The OPTIONAL is therefore a
+/// boolean disjunction — the matched arm proves the substituted triple
+/// is in the dataset; the unmatched arm proves it is not. Both arms
+/// preserve the outer row's projected bindings unchanged (the easy
+/// case has no inner-only variables).
+///
+/// Witness shape: three appended BGP slots.
+/// - `matched_idx` carries the inner triple in the matched arm; in the
+///   unmatched arm it is an unconstrained valid leaf (still
+///   inclusion-checked by `main.nr`).
+/// - `bracket_left_idx` / `bracket_right_idx` carry the two adjacent
+///   leaves bracketing the absent hash in the unmatched arm; in the
+///   matched arm they are unconstrained valid leaves.
+///
+/// At constraint-evaluation time the emit layer produces
+/// `assert(matched_clause | unmatched_clause)` — exactly one circuit
+/// per outer query, no power-set generation.
+#[derive(Clone, Debug)]
+pub struct EasyOptional {
+    /// Source OPTIONAL id (preserved for debugging / metadata
+    /// round-tripping).
+    pub id: usize,
+    /// BGP index of the inner-triple slot used in the matched arm.
+    pub(crate) matched_idx: usize,
+    /// BGP index of the left bracket leaf used in the unmatched arm.
+    pub(crate) bracket_left_idx: usize,
+    /// BGP index of the right bracket leaf used in the unmatched arm.
+    pub(crate) bracket_right_idx: usize,
+    /// Subject / predicate / object / graph terms of the inner triple
+    /// after outer-μ substitution. Variables in this array are always
+    /// bound by the outer scope (the easy-case predicate guarantees
+    /// it).
+    pub(crate) inner_terms: [Term; 4],
+}
+
 #[derive(Clone, Debug)]
 pub struct PatternInfo {
     pub(crate) patterns: Vec<ContextualizedTriple>,
@@ -166,6 +206,13 @@ pub struct PatternInfo {
     /// Non-membership obligations from `FILTER(NOT EXISTS { t })` /
     /// `MINUS { … } { t }`. Empty when the query has no negation.
     pub(crate) not_exists: Vec<NonExistenceConstraint>,
+    /// OPTIONALs that satisfy the round-3-follow-up easy-case
+    /// predicate (single-triple inner with every position outer-bound
+    /// or constant). Each one is collapsed to a single
+    /// matched-or-unmatched disjunction in the same circuit instead
+    /// of multiplying the variant power-set. See `spec/exists.md`
+    /// §4.1 / SPARQL_ROADMAP.md §6.4.
+    pub(crate) easy_optionals: Vec<EasyOptional>,
 }
 
 impl PatternInfo {
@@ -178,6 +225,7 @@ impl PatternInfo {
             union_branches: None,
             optional_blocks: Vec::new(),
             not_exists: Vec::new(),
+            easy_optionals: Vec::new(),
         }
     }
 }

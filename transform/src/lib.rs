@@ -29,7 +29,7 @@ mod parse;
 
 pub use crate::expr::{ieee754_equal, ieee754_less_than, FloatSpecial};
 pub use crate::ir::{
-    Aggregate, AggregateKind, Assertion, Binding, BoundaryCase, ContextualizedTriple,
+    Aggregate, AggregateKind, Assertion, Binding, BoundaryCase, ContextualizedTriple, EasyOptional,
     GraphContext, NonExistenceConstraint, OptionalBlock, OrderDirection, OrderKey, PatternInfo,
     QueryInfo, Term,
 };
@@ -136,21 +136,27 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
 
     let info = process_query_with_options(root, &options)?;
 
-    // Collect all optional blocks (flatten nested optionals for now)
+    // Collect all optional blocks (flatten nested optionals for now).
+    // Easy-case OPTIONALs don't show up here — they bypass the
+    // power-set machinery via `info.pattern.easy_optionals` (round-3
+    // follow-up; see `spec/exists.md` §4.1).
     let all_optionals = collect_all_optional_blocks(&info.pattern.optional_blocks);
     let num_optionals = all_optionals.len();
 
     // Defensive cap (round 2 — see SPARQL_ROADMAP.md §7 + §6.4). Each
-    // OPTIONAL doubles the variant count; collapse to a single circuit
-    // is round 3. Reject explicitly so users see a clear error rather
-    // than waiting on an exponential build.
+    // *non-easy* OPTIONAL doubles the variant count; round-3 follow-up
+    // (2026-05-03) collapses the easy case to a single circuit so it
+    // doesn't count against the cap. Reject explicitly so users see a
+    // clear error rather than waiting on an exponential build. Round 4
+    // (prefix-tree commitments) will collapse the multi-triple case
+    // too and retire this cap entirely.
     if num_optionals > options.optional_cap {
         return Err(format!(
-            "Query has {} OPTIONAL blocks, exceeding the configured cap of {}. \
-             Each OPTIONAL doubles the number of generated circuit variants \
-             (2^n); raise `TransformOptions::optional_cap` if you really need \
-             this, or refactor the query. Round 3 will collapse the power \
-             set into a single circuit.",
+            "Query has {} OPTIONAL blocks (excluding easy-case collapses), exceeding \
+             the configured cap of {}. Each non-easy OPTIONAL doubles the number of \
+             generated circuit variants (2^n); raise `TransformOptions::optional_cap` \
+             if you really need this, or refactor the query. Round 4 will collapse the \
+             multi-triple case too via prefix-tree commitments.",
             num_optionals, options.optional_cap
         ));
     }
