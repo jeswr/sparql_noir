@@ -3,9 +3,19 @@
 
 mod sparql;
 
-// Simplified Triple type - only terms, no Merkle proof data
+use dep::consts::STRING_LEN_MAX;
+
+// Simplified TermWitness/Triple types - only the data sparql.nr needs,
+// no Merkle proof data. Mirrors the bounded byte-array witness shape
+// from `noir/lib/types`; see `spec/encoding.md` sec.6.
+pub struct TermWitness {
+    pub hash: Field,
+    pub bytes: [u8; STRING_LEN_MAX],
+    pub length: u32,
+}
+
 pub struct Triple {
-    pub terms: [Field; 4],
+    pub terms: [TermWitness; 4],
 }
 
 use sparql::{BGP, checkBinding, Variables{{h0}}};

@@ -1,0 +1,35 @@
+# Generated artefacts and vendored code.
+node_modules/
+dist/
+build/
+coverage/
+.next/
+.turbo/
+
+# Lockfiles — let the tool that owns them format.
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+Cargo.lock
+poetry.lock
+uv.lock
+
+# Generated test fixtures (noir_IEEE754).
+test_packages/
+
+# Lean build cache.
+.lake/
+
+# Noir build artefacts.
+target/
+
+# Python build / cache.
+__pycache__/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Don't reformat third-party submodules.
+paper/sources/iswc2025-dc/
+paper/sources/oxford-berkeley-kit/

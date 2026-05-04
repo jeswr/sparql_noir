@@ -1,0 +1,168 @@
+# Canonical lint workflow for TypeScript-circuit sub-repos
+# (currently only `circuits/sparql_noir`).
+#
+# Source of truth: zkp-sparql-workspace/templates/sub-repo/ts-circuit/.github/workflows/lint.yml.tmpl
+# Rendered by:    zkp-sparql-workspace/scripts/sync-standards.sh
+#
+# Covers: TypeScript (eslint + prettier + tsc), Noir, Python, YAML,
+# shell, Markdown, TOML, JSON.
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    name: TypeScript (prettier + tsc + eslint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: prettier --check
+        # Pin Prettier so CI mirrors the pre-commit hook (`mirrors-prettier`
+        # `v4.0.0-alpha.8`). `npx prettier@…` resolves the pinned version
+        # without requiring it as a dep.
+        run: |
+          npx -y prettier@3.3.3 --check '**/*.{ts,tsx,js,jsx,mjs,cjs,json,md}' || \
+            echo "::warning::prettier formatting drift; run 'npx prettier --write'"
+        continue-on-error: true
+      - name: tsc --noEmit
+        # `prebuild:tsc` runs `bundle:noir-lib` which generates
+        # `src/noir-lib-bundle.ts`; without it tsc fails on a missing
+        # import. We invoke the prebuild explicitly before the typecheck.
+        run: |
+          npm run bundle:noir-lib
+          npx tsc --noEmit
+        continue-on-error: true
+      - name: eslint
+        run: |
+          if [ -f eslint.config.cjs ] || [ -f eslint.config.js ] || [ -f .eslintrc.json ]; then
+            npx eslint '**/*.{ts,tsx,js,mjs,cjs}' --max-warnings 0
+          else
+            echo "no eslint config; skipping"
+          fi
+        continue-on-error: true
+
+  python:
+    name: Python (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "ruff==0.7.4"
+      - run: ruff check .
+        continue-on-error: true
+      - run: ruff format --check .
+        continue-on-error: true
+
+  yaml:
+    name: YAML (yamllint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pin to mirror the pre-commit hook (`yamllint` v1.35.1).
+      - run: pip install "yamllint==1.35.1"
+      - run: yamllint .
+        continue-on-error: true
+
+  shell:
+    name: Shell (shellcheck + shfmt)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        # Pin shellcheck + shfmt to the same versions the pre-commit hook
+        # uses (`shellcheck-py` v0.10.0.1, `pre-commit-shfmt` v3.10.0-2)
+        # so local + CI lint never disagree.
+        env:
+          SHELLCHECK_VERSION: "v0.10.0"
+          SHFMT_VERSION: "v3.10.0"
+        run: |
+          curl -sSfL -o /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install -m 755 "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          curl -sSfL -o /tmp/shfmt \
+            "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          sudo install -m 755 /tmp/shfmt /usr/local/bin/shfmt
+      - name: shellcheck
+        run: |
+          mapfile -t FILES < <(git ls-files '*.sh' '*.bash' 2>/dev/null)
+          [ ${#FILES[@]} -eq 0 ] || shellcheck "${FILES[@]}"
+      - name: shfmt -d
+        run: |
+          mapfile -t FILES < <(git ls-files '*.sh' '*.bash' 2>/dev/null)
+          [ ${#FILES[@]} -eq 0 ] || shfmt -i 2 -ci -d "${FILES[@]}"
+
+  markdown:
+    name: Markdown (markdownlint-cli2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install -g markdownlint-cli2@0.14.0
+      - run: markdownlint-cli2
+        continue-on-error: true
+
+  toml:
+    name: TOML (taplo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install taplo
+        run: |
+          curl -sSfL https://github.com/tamasfe/taplo/releases/download/0.9.3/taplo-full-linux-x86_64.gz \
+            | gunzip > /tmp/taplo
+          sudo install -m 755 /tmp/taplo /usr/local/bin/taplo
+      - run: taplo fmt --check
+        continue-on-error: true
+      - run: taplo lint
+        continue-on-error: true
+
+  noir-fmt:
+    name: Noir (nargo fmt --check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Noir
+        uses: noir-lang/noirup@v0.1.4
+      - name: nargo fmt --check
+        # `nargo fmt --check` runs per-package. This repo has packages
+        # under `noir/bin/*` and `noir/lib/*`; iterate over each so a
+        # formatting drift in any package is surfaced.
+        run: |
+          fail=0
+          while IFS= read -r toml; do
+            dir=$(dirname "$toml")
+            echo "::group::$dir"
+            (cd "$dir" && nargo fmt --check) || fail=1
+            echo "::endgroup::"
+          done < <(git ls-files '*/Nargo.toml')
+          exit "$fail"
+        continue-on-error: true

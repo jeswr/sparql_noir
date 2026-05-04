@@ -1,9 +1,78 @@
 pub use signature;
 
 pub global MERKLE_DEPTH: u32 = 11;
+/// Maximum number of bytes the bounded byte-array term witness
+/// (`types::TermWitness`) can hold. Per-triple input size grows by
+/// `4 x STRING_LEN_MAX` bytes plus four `u32` length witnesses. See
+/// `spec/encoding.md` sec.6 for the soundness contract and gate-cost
+/// trade-off; configurable via `setup.ts --string-len-max <n>`
+/// (default 64).
+pub global STRING_LEN_MAX: u32 = {{stringLenMax}};
 // pub global hash2: fn([Field; 2]) -> Field = {{hash2}};
 // pub global hash4: fn([Field; 4]) -> Field = {{hash4}};
 // pub global verify_signature: fn([u8; 32], [u8; 32], [u8; 64], [u8; 32]) -> bool = {{signature}};
+
+// --- Sorted-Merkle non-membership sentinels (permanent ABI) ----------
+//
+// `merkle()` (in `noir/lib/utils`) inserts two synthetic leaves into
+// every signed dataset:
+//
+// - the **low sentinel** at sorted index 0 with leaf-hash
+//   `LOW_SENTINEL_HASH = 0`,
+// - the **high sentinel** at sorted index `N + 1` with leaf-hash
+//   `HIGH_SENTINEL_HASH = 0 - 1` (= `Field::MAX` = the BN254 prime
+//   minus one). Real `consts::hash4` outputs are Field elements and
+//   could in principle equal `p - 1` (or `0`); under Pedersen-hash
+//   preimage-resistance the probability of any specific output is
+//   `<= 1/p ~= 2^-254` -- negligible. See `Real triples whose hash4
+//   collides with a sentinel hash` paragraph below for the contract.
+//
+// These bracket the populated leaf range so non-membership proofs
+// witness **every** `absent_hash` -- including ones smaller than the
+// smallest real leaf or larger than the largest. Without them,
+// boundary-falling absent hashes are unwitnessable, so a valid
+// `NOT EXISTS` query gets rejected with probability `2/(n+1)`
+// (Copilot's finding on `sparql_noir#42`, 2026-05-03 -- order-statistic
+// argument: `E[X_(1)] = F/(n+1)`, `E[X_(n)] = nF/(n+1)`, hence
+// `P(absent not in [X_(1), X_(n)]) = 2/(n+1)`; ~18 % at n=10, ~2 % at
+// n=100). See `spec/exists.md` Sec.3.3.
+//
+// The sentinels' hash values are **fixed**, not derived from any
+// triple, so they bypass `hash4` entirely; they are committed by the
+// signer at sign time as raw leaf values at sorted positions 0 and
+// `N + 1` of the tree. Real triples whose `hash4` outputs `0` or
+// `p - 1` (a preimage event, not a collision) are excluded under
+// Pedersen-hash preimage-resistance (over the BN254 field, `p ~=
+// 2^254`, so the probability is `<= 2^-254` for either constant).
+// A real-world preimage finding would itself be a publishable
+// cryptographic event, in which case these constants would rotate.
+pub global LOW_SENTINEL_HASH: Field = 0;
+pub global HIGH_SENTINEL_HASH: Field = 0 - 1;
+
+// --- Prefix-tree commitment domain separators (round 4) -------------
+//
+// Round 4's prefix-tree commitments (`spec/prefix-tree-commitment.md`)
+// keep the same `consts::hash4` Pedersen primitive but specialise it
+// per prefix subset by padding the unused position(s) with a fixed
+// domain-separator constant. This avoids cross-tree collision (a
+// prefix-tree leaf cannot equal a leaf-hash sorted-tree leaf, even if
+// some adversarial choice of `o == DOMAIN_SEPARATOR` were attempted,
+// because the position layout differs and `hash4` is collision-
+// resistant) without introducing any new hash primitive.
+//
+// `PREFIX3_SP_G_DOMAIN_SEPARATOR` is the constant used in the `o`
+// slot when computing `hash3_sp_g(s, p, g) = hash4([s, p, g, sep])`
+// for the prefix-3 `(s, p, g)` tree. The value
+// `0x707265666978335f7370675f` ASCII-packs `"prefix3_spg_"`; any
+// non-zero, non-`HIGH_SENTINEL_HASH` value works -- the only
+// requirements are (a) it is fixed and public, (b) it is unlikely to
+// collide with any real `o` term under collision-resistant `hash4`
+// (overwhelmingly likely for a 96-bit ASCII string in BN254's
+// ~254-bit field).
+//
+// New domain separators are added here as new prefix-tree variants
+// land; one constant per `2^4 = 16` prefix subset.
+pub global PREFIX3_SP_G_DOMAIN_SEPARATOR: Field = 0x707265666978335f7370675f;
 
 pub fn hash2(input: [Field; 2]) -> Field {
   {{hash2}}(input)
@@ -17,8 +86,40 @@ pub fn hash_string<let N: u32>(input: [u8; N]) -> [u8; {{stringHashOutputSize}}]
   {{stringHash}}(input)
 }
 
+/// Variable-length string hash. Hashes exactly `input[0..length]` and
+/// MUST agree with `hash_string(slice)` for any honest prover -- i.e.
+/// `hash_string_var(buf, len) == hash_string(buf[0..len])`. This is the
+/// soundness contract that ties `encode_string_bounded` (the bounded
+/// byte-array witness path) to `encode_string` (the credential-layer
+/// canonical hash). See `spec/encoding.md` sec.6.3.
+///
+/// **Round-2 scope.** Only `sha256` is wired with a true variable-
+/// length implementation. The other supported string hashes
+/// (`blake2s`, `blake3`, `keccak256`, `sha384`, `sha512`) lack a
+/// variable-length API in their Noir implementations, so this function
+/// asserts under those configs -- the round-2 byte-binding path is
+/// sha256-only until a variable-length API lands for the remaining
+/// hashes (round-3 scope, see `spec/encoding.md` sec.6.5).
+pub fn hash_string_var<let N: u32>(input: [u8; N], length: u32) -> [u8; {{stringHashOutputSize}}] {
+  {{stringHashVar}}
+}
+
 pub fn encode_string<let N: u32>(string: str<N>) -> Field {
   Field::from_le_bytes(hash_string(string.as_bytes()))
+}
+
+/// Compute the lexical-form hash of a bounded byte-array witness so
+/// that the result agrees with `encode_string(s)` for the unique
+/// `s` whose UTF-8 encoding is `bytes[0..length]`. The bytes at
+/// indices `length..N` are unconstrained padding from the prover and
+/// are NOT hashed -- the variable-length hash primitive
+/// `hash_string_var` enforces that domain. See `spec/encoding.md`
+/// sec.6.3 for the soundness argument; in particular this function
+/// MUST round-trip with `encode_string` for any honest prover, or the
+/// round-2 string operators (STRLEN / STRSTARTS / CONTAINS) cannot
+/// produce valid proofs for honest witnesses.
+pub fn encode_string_bounded<let N: u32>(bytes: [u8; N], length: u32) -> Field {
+  Field::from_le_bytes(hash_string_var(bytes, length))
 }
 
 // Recursion
