@@ -148,25 +148,55 @@ pub struct TermWitness {
 
 ### 6.3 Soundness
 
-Round 1 wires the witness shape only — it does **not** add a global binding constraint between `bytes` / `length` and `hash` inside `verify_inclusion`. The reasoning:
+Round 1 wired the witness shape only — it did **not** add a global binding constraint between `bytes` / `length` and `hash` inside `verify_inclusion`. The reasoning:
 
 - Most term positions hold IRIs / blank nodes / numeric literals where the bytes view is irrelevant. Forcing `encode_string_bounded(bytes, length) == lexical_hash_of(hash)` for every term costs `STRING_LEN_MAX` bytes of input plus a `hash_string` call per term per triple — paid even by queries that touch zero string operators.
-- Instead, the binding is **caller-supplied**. Round-2 string-operator lowering will emit, immediately before any `bytes`-touching code, a constraint of the form
+- Instead, the binding is **caller-supplied**. Round 2 (this iteration) ships the binding helpers in `noir/lib/utils/src/lib.nr`:
 
   ```noir
-  // round-2 helper — sketch
+  // round-2 primitive — pure equality binding.
   pub fn bind_term_bytes(w: TermWitness, expected_lexical_hash: Field) {
       let computed = consts::encode_string_bounded(w.bytes, w.length);
       assert(computed == expected_lexical_hash);
-      assert(w.length as Field <= STRING_LEN_MAX as Field);
+      assert((w.length as Field).lt((STRING_LEN_MAX + 1) as Field));
   }
+
+  // round-2 IRI convenience — binds w.hash structurally as
+  // `hash2([0, encode_string_bounded(bytes, length)])`.
+  pub fn bind_term_bytes_iri(w: TermWitness) { … }
+
+  // round-2 plain xsd:string literal convenience — binds w.hash as
+  // `hash2([2, hash4([lexical, lexical, empty_lang, xsd_string_dt])])`.
+  pub fn bind_term_bytes_plain_string_literal(
+      w: TermWitness,
+      empty_lang_hash: Field,
+      xsd_string_dt_hash: Field,
+  ) { … }
   ```
 
-  where `expected_lexical_hash` is reconstructed from `w.hash` and the term's known structural metadata (e.g. for a literal, the `lexical_value` slot of the inner `hash4`). The prover only pays the byte-witness cost on the terms a query actually needs to read as bytes.
+  The prover only pays the byte-witness cost on the terms a query actually needs to read as bytes.
 
-- Until a string operator is invoked on a term, an adversarial prover may supply arbitrary `bytes` / `length` for that term — but the `hash` field still binds the term's identity into the signed Merkle root, so query results remain sound. The bytes witness is only load-bearing once the `bind_term_bytes` constraint is added.
+- Until a string operator is invoked on a term, an adversarial prover may supply arbitrary `bytes` / `length` for that term — but the `hash` field still binds the term's identity into the signed Merkle root, so query results remain sound. The bytes witness is only load-bearing once the `bind_term_bytes_*` constraint is added.
 
 This contract is documented at the top of `noir/lib/types/src/lib.nr`.
+
+#### Round-2 wired operators
+
+Round 2 ships the byte-level lowering for STRLEN, STRSTARTS, and CONTAINS (a representative subset of SPARQL 1.1 §17.4 string functions). Each operator emits the binding helper before reading bytes:
+
+| Operator | Constraint emitted | Witnesses pushed |
+|---|---|---|
+| `STRLEN(?x)` | `bind_term_bytes_plain_string_literal(bgp[i].terms[j], …)` | None — the result is `bgp[i].terms[j].length as Field`. |
+| `STRSTARTS(?x, "prefix")` | binding + `string_starts_with::<P>(witness, prefix_bytes, prefix_len)` | None — prefix is folded in at compile time. |
+| `CONTAINS(?x, "needle")` | binding + `string_contains::<N>(witness, needle_bytes, needle_len, hidden[k] as u32)` | `hidden[k]` = byte position where the needle first occurs. |
+
+**STRENDS** is mechanically similar to STRSTARTS but needs a position witness for the suffix start (`length - suffix_len`); deferred to round 3.
+
+**Scope.** Round 2 supports plain `xsd:string` literals only (no language tag, no special encoding). Language-tagged literals, typed numerics, and IRIs through `STR()` are round-3 follow-ups — they need additional structural witnesses for datatype / lang / special-encoding hashes. Non-conforming terms fail to prove because the `bind_term_bytes_plain_string_literal` reconstruction won't match `w.hash`.
+
+**Per `feedback_zkp_no_proof_of_revealed_properties`.** STRLEN's output (the integer length) is verifier-side compute on the disclosed bytes — the circuit proves the binding holds for *some* bytes, and the verifier reads `w.length` after that. STRSTARTS / CONTAINS are in-circuit Booleans because they gate row presence, not output.
+
+**Prover side.** `prove.ts` now populates each `TermWitness.bytes` from the source RDF term's UTF-8 lexical form (NamedNode -> IRI string; Literal -> value field; BlankNode -> label; DefaultGraph -> empty); `length` is `min(bytes.length, STRING_LEN_MAX)`. Lexical forms exceeding `STRING_LEN_MAX` are truncated, which causes the binding to fail at proof time — callers can lift the bound via `setup.ts --string-len-max <n>`.
 
 ### 6.4 Cost
 

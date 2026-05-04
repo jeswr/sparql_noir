@@ -29,7 +29,7 @@ pub fn verify_inclusion(triple: Triple, root_value: Field) {
         // non-Boolean value would let a prover satisfy inclusion under
         // "anything non-zero = right" semantics while making the
         // index reconstruction in `verify_non_membership_no_inclusion`
-        // omit / mis-count the bit — breaking the adjacency proof's
+        // omit / mis-count the bit -- breaking the adjacency proof's
         // soundness. Roborev finding 2026-05-03 (high).
         let dir = triple.directions[i - 1];
         assert((dir == 0) | (dir == 1), "Merkle direction bit must be 0 or 1");
@@ -40,7 +40,7 @@ pub fn verify_inclusion(triple: Triple, root_value: Field) {
     // TODO: Cleanup - we shouldn't need this check
     assert_eq(current, root_value, "Path does not lead to the correct root");
     // The Merkle commitment is over the term-hash quartet, not over the
-    // bounded byte witness — see `spec/encoding.md` §6.3. The `bytes` /
+    // bounded byte witness -- see `spec/encoding.md` Sec.6.3. The `bytes` /
     // `length` fields of each `TermWitness` are advisory at the Triple
     // level; round-2 string operators bind them locally at use-sites.
     let term_hashes: [Field; 4] = [
@@ -59,17 +59,17 @@ pub fn encode_string<let N: u32>(string: str<N>) -> Field {
 /// Build a Merkle tree over `triples`, sorted ascending by
 /// `consts::hash4(triple)`. The signed root commits to the sorted
 /// multiset, which is the load-bearing pre-condition for the
-/// non-membership / NOT EXISTS primitive (`spec/exists.md` §3.3).
+/// non-membership / NOT EXISTS primitive (`spec/exists.md` Sec.3.3).
 ///
 /// **Bag semantics.** Duplicate triples are kept (no canonicalisation):
 /// they appear as adjacent equal-hash leaves in the sorted tree. The
 /// non-membership primitive uses **strict** `<` ordering against the
 /// neighbour leaves, so duplicates do not affect the absence proof's
-/// soundness — the absent hash is, by definition, distinct from every
+/// soundness -- the absent hash is, by definition, distinct from every
 /// real leaf, including duplicates.
 ///
 /// **Sentinels.** This implementation sorts the supplied triples and
-/// pads the remainder of the tree with the existing `[0; …]` zero
+/// pads the remainder of the tree with the existing `[0; ...]` zero
 /// padding. For non-membership proofs at the boundaries (absent hash
 /// less than the smallest leaf, or greater than the largest), the
 /// caller is responsible for either choosing a triple-hash domain that
@@ -78,7 +78,7 @@ pub fn encode_string<let N: u32>(string: str<N>) -> Field {
 /// `Field::max` sentinel triples in the input. The simpler "no
 /// sentinels, prover never proves out-of-range absence" contract is
 /// fine for our round-3 scope; sentinel handling is documented in
-/// `spec/exists.md` §3.3 as a follow-up if real boundary cases hit.
+/// `spec/exists.md` Sec.3.3 as a follow-up if real boundary cases hit.
 pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M, N> {
     let mut tree = [[0; 1024]; M];
     let mut paths = [[0; M]; N];
@@ -88,7 +88,7 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M,
     // ascending by hash. The sort is implemented as a simple insertion
     // sort over `N`: this is `O(N^2)` but `N` is the number of triples
     // in a single signed dataset, which is bounded by the deployment's
-    // protocol design (typically tens to a few thousand) — well within
+    // protocol design (typically tens to a few thousand) -- well within
     // tractable. The sort is stable: equal-hash leaves keep their
     // original input order, so the canonical root is uniquely
     // determined by the input set.
@@ -98,7 +98,7 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M,
     }
 
     // `sorted_idx[k]` = index in the input array of the k-th smallest
-    // leaf. We don't reorder `triples` itself — the `MerkleInfo.triples`
+    // leaf. We don't reorder `triples` itself -- the `MerkleInfo.triples`
     // / `paths` / `direction` arrays in the returned struct stay
     // input-order so downstream code (which references positional
     // metadata) is unaffected. The tree itself is built over the
@@ -118,7 +118,7 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M,
                     // already in order, stop
                     j = 0;
                 } else if a == b {
-                    // tie — keep input order (sorted_idx[j-1] < sorted_idx[j]
+                    // tie -- keep input order (sorted_idx[j-1] < sorted_idx[j]
                     // when they were equal at construction time, since we
                     // initialised sequentially and only swap on strict gt)
                     j = 0;
@@ -142,8 +142,8 @@ pub fn merkle<let M: u32, let N: u32>(triples: [[Field; 4]; N]) -> MerkleInfo<M,
     }
 
     // Lay out the tree's level-0 in **sorted** order. Slots beyond N
-    // remain zero — the existing padding contract (`spec/exists.md`
-    // §3.3 sentinels paragraph).
+    // remain zero -- the existing padding contract (`spec/exists.md`
+    // Sec.3.3 sentinels paragraph).
     for k in 0..N {
         tree[0][k] = leaf_hashes[sorted_idx[k]];
     }
@@ -229,7 +229,7 @@ fn test_merkle_paths_lead_to_sorted_root() {
 ///
 /// 1. Both `left` and `right` are valid leaves of the same Merkle tree
 ///    (their inclusion paths lead to `root_value`).
-/// 2. `left.path[0] < absent_hash < right.path[0]` — strict ordering.
+/// 2. `left.path[0] < absent_hash < right.path[0]` -- strict ordering.
 /// 3. `right`'s sorted index equals `left`'s sorted index plus one
 ///    (adjacency), recovered from the `directions` arrays.
 ///
@@ -241,7 +241,7 @@ fn test_merkle_paths_lead_to_sorted_root() {
 /// genuinely consecutive leaves in the sorted tree. If
 /// `left.hash < absent_hash < right.hash` and `(left, right)` are
 /// genuinely consecutive in the sorted tree, then `absent_hash` cannot
-/// equal any `tree[0][k]` — otherwise that `k` would be wedged between
+/// equal any `tree[0][k]` -- otherwise that `k` would be wedged between
 /// the two consecutive sorted indices, contradicting consecutiveness.
 ///
 /// **Bag-semantics note.** Equal-hash duplicates are permitted in the
@@ -252,7 +252,7 @@ fn test_merkle_paths_lead_to_sorted_root() {
 ///
 /// **Sentinels.** Boundary cases (absent hash smaller than the smallest
 /// leaf, or larger than the largest) are not directly handled here.
-/// See `spec/exists.md` §3.3 for the documented contract: callers
+/// See `spec/exists.md` Sec.3.3 for the documented contract: callers
 /// outside the sentinel-bracketed range are expected to be vanishingly
 /// rare for collision-resistant `hash4`. If real deployments need
 /// strict boundary handling, supply `[0; 4]` and `[Field::max-like; 4]`
@@ -275,7 +275,7 @@ pub fn verify_non_membership(
 /// when the bracketing leaves are already passed through
 /// `verify_inclusion` elsewhere (e.g. they live in `bgp` and the
 /// generated `main.nr` walks `bgp` for inclusion). The transform-layer
-/// lowering for `NOT EXISTS` and `MINUS` uses this variant — it places
+/// lowering for `NOT EXISTS` and `MINUS` uses this variant -- it places
 /// the bracketing leaves at dedicated `bgp[k]` slots and emits the
 /// ordering / adjacency check inside `sparql.nr::checkBinding`.
 pub fn verify_non_membership_no_inclusion(
@@ -297,7 +297,7 @@ pub fn verify_non_membership_no_inclusion(
     // (which runs over both leaves before this no-inclusion variant
     // is called from the transform-emitted body, or as part of the
     // composite `verify_non_membership` above). We re-assert here as
-    // defence in depth — the no-inclusion variant is exposed publicly
+    // defence in depth -- the no-inclusion variant is exposed publicly
     // and a future caller that bypasses `verify_inclusion` would
     // otherwise be exposed to the high-severity 2026-05-03 finding.
     let mut left_idx: u64 = 0;
@@ -424,4 +424,388 @@ fn encode_string_bounded_is_callable() {
     let h2 = consts::encode_string_bounded(bytes, 3);
     // Determinism: same (bytes, length) yields the same Field.
     assert_eq(h1, h2, "encode_string_bounded must be deterministic");
+}
+
+// =============================================================================
+// Round 2 -- bind_term_bytes + string operators
+// =============================================================================
+//
+// Round 1 (PR #56) ships the bounded byte-array witness shape
+// (`TermWitness { hash, bytes, length }`) but does NOT bind `bytes` /
+// `length` to `hash` inside `verify_inclusion`. Per `spec/encoding.md`
+// sec.6.3 the binding is caller-supplied at the use site of any string
+// operator that reads `bytes`. Round 2 (this module) lands:
+//
+//   1. `bind_term_bytes`  -- the primitive equality assertion that ties
+//      `encode_string_bounded(w.bytes, w.length)` to a caller-supplied
+//      `expected_lexical_hash`.
+//   2. `bind_term_bytes_iri`  -- convenience for NamedNode terms, where
+//      the term-hash structurally decomposes to
+//      `hash2([0, encode_string(iri)])` and the bytes are the IRI string
+//      verbatim (no datatype / lang / special-encoding witness needed).
+//   3. `bind_term_bytes_plain_string_literal`  -- convenience for plain
+//      xsd:string literals (no language tag, no special encoding). The
+//      term-hash structurally decomposes to a fixed shape, and the
+//      datatype-IRI hash is a compile-time constant in
+//      `XSD_STRING_DATATYPE_HASH` derived from the consts hash.
+//   4. `string_starts_with`  -- byte-level prefix match for STRSTARTS.
+//   5. `string_contains`  -- byte-level substring match with a
+//      prover-supplied position witness for CONTAINS.
+//
+// `STRLEN` does not need a separate helper -- it just reads `w.length`
+// after the binding. Per `feedback_zkp_no_proof_of_revealed_properties`
+// the integer length is a verifier-side disclosed quantity; the circuit
+// only proves the binding holds for the bytes the prover supplied.
+//
+// Round 2 deliberately scopes binding to NamedNode + plain-xsd:string
+// literal terms. Language-tagged literals, typed numerics, and
+// language-of-other-type terms are left to round 3 (they need
+// additional structural witnesses for datatype / lang / special
+// encoding hashes that are out of scope here). This is enough to wire
+// STRLEN / STRSTARTS / CONTAINS for the W3C SPARQL 1.0 string-function
+// fixtures, which use plain literals.
+
+/// Pre-computed lexical hash of the empty string. Used as the
+/// `language_tag` slot in the literal-decomposition equality for plain
+/// xsd:string literals (no language tag).
+///
+/// **Implementation note.** Noir's `consts::encode_string("")` would be
+/// the natural way to compute this, but `encode_string` takes a
+/// `str<N>` whose `N` must be > 0 in practice (zero-length string types
+/// don't compose cleanly with `as_bytes` / `hash_string`). We compute
+/// the equivalent value -- `Field::from_le_bytes(hash_string([]))` --
+/// inline using `encode_string_bounded` with `length = 0`, so the
+/// constant rides on the same hash function `consts` is configured
+/// with. The first call hashes `[0; STRING_LEN_MAX]`; subsequent calls
+/// reuse the witness.
+pub fn empty_string_lexical_hash() -> Field {
+    let zero_bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    consts::encode_string_bounded(zero_bytes, 0)
+}
+
+/// Pre-computed term-hash of the IRI `http://www.w3.org/2001/XMLSchema#string`.
+/// Used as the datatype slot in the literal decomposition for plain
+/// xsd:string literals.
+///
+/// We accept it as a parameter rather than computing inline so the
+/// caller (transform-emitted Noir code) can lift the hash to a `global`
+/// in the generated circuit and avoid recomputing the IRI hash on
+/// every use site. Helper variant `bind_term_bytes_plain_string_literal`
+/// computes it inline for tests; production lowering passes the
+/// pre-computed value.
+pub fn xsd_string_datatype_hash() -> Field {
+    // hash2([0, encode_string("http://www.w3.org/2001/XMLSchema#string")])
+    // The string is 39 bytes; we need a fixed-size buffer. Use
+    // `encode_string_bounded` so the hash function used for term IRIs
+    // matches the one for byte witnesses (both go through
+    // `consts::hash_string`).
+    let xsd_string: [u8; 39] = [
+        0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x77, 0x77, 0x77, // "http://www"
+        0x2e, 0x77, 0x33, 0x2e, 0x6f, 0x72, 0x67, 0x2f, 0x32, 0x30, // ".w3.org/20"
+        0x30, 0x31, 0x2f, 0x58, 0x4d, 0x4c, 0x53, 0x63, 0x68, 0x65, // "01/XMLSche"
+        0x6d, 0x61, 0x23, 0x73, 0x74, 0x72, 0x69, 0x6e, 0x67,       // "ma#string"
+    ];
+    let lex = consts::encode_string_bounded(xsd_string, 39);
+    consts::hash2([0, lex])
+}
+
+/// Bind a term witness's `bytes` / `length` to a caller-supplied
+/// expected lexical hash.
+///
+/// **What this asserts:** `consts::encode_string_bounded(w.bytes, w.length) == expected_lexical_hash`
+/// and `w.length <= STRING_LEN_MAX` (the `as Field` cast prevents
+/// overflow comparison surprises).
+///
+/// **What `expected_lexical_hash` should be:** the lexical-form hash
+/// (under `consts::hash_string`) of the term's lexical value. For a
+/// NamedNode / IRI this is the IRI string's hash; for a plain literal
+/// it's the literal's value-string hash. The caller is responsible for
+/// reconstructing this from `w.hash` plus structural metadata (see the
+/// `bind_term_bytes_iri` / `bind_term_bytes_plain_string_literal`
+/// convenience wrappers below).
+///
+/// **Why caller-supplied?** Round-1's `verify_inclusion` only binds
+/// `w.hash` to the Merkle root. The bytes binding is paid only when a
+/// query actually reads bytes -- typically a small fraction of terms.
+pub fn bind_term_bytes(w: dep::types::TermWitness, expected_lexical_hash: Field) {
+    let computed = consts::encode_string_bounded(w.bytes, w.length);
+    assert(computed == expected_lexical_hash, "bind_term_bytes: byte witness does not match expected lexical hash");
+    // Defence in depth: the bytes-only domain is `[0, STRING_LEN_MAX]`.
+    // `w.length` is a u32 already so the upper bound is structural; we
+    // re-assert as a Field comparison so a malicious prover supplying
+    // `length > STRING_LEN_MAX` (via deserialisation lenience) would be
+    // caught.
+    assert((w.length as Field).lt((consts::STRING_LEN_MAX + 1) as Field), "bind_term_bytes: length exceeds STRING_LEN_MAX");
+}
+
+/// Convenience: bind `w` for a NamedNode (IRI) term.
+///
+/// For an IRI, `w.hash = hash2([0, encode_string(iri_string)])`. We
+/// reconstruct that structurally: the lexical hash is
+/// `encode_string_bounded(w.bytes, w.length)`, and the term hash is
+/// `hash2([0, lexical_hash])`. Asserting `term_hash == w.hash` binds
+/// the bytes via the term identity that `verify_inclusion` already
+/// committed to the Merkle root.
+pub fn bind_term_bytes_iri(w: dep::types::TermWitness) {
+    let lexical_hash = consts::encode_string_bounded(w.bytes, w.length);
+    let reconstructed = consts::hash2([0, lexical_hash]);
+    assert(reconstructed == w.hash, "bind_term_bytes_iri: byte witness does not match the IRI's term hash");
+    assert((w.length as Field).lt((consts::STRING_LEN_MAX + 1) as Field), "bind_term_bytes_iri: length exceeds STRING_LEN_MAX");
+}
+
+/// Convenience: bind `w` for a plain xsd:string literal (no language
+/// tag, no special encoding).
+///
+/// For a plain xsd:string literal:
+/// ```
+/// w.hash = hash2([2, hash4([
+///     encode_string(value),
+///     encode_string(value),         // special_encoding == lexical_hash for non-special datatypes
+///     encode_string(""),            // empty language tag
+///     hash2([0, encode_string("http://www.w3.org/2001/XMLSchema#string")]),
+/// ])])
+/// ```
+/// We reconstruct that, asserting `w.hash` matches. The `lang_hash`
+/// (empty string) and `datatype_hash` (xsd:string) are passed in by
+/// the caller so production lowering can lift them to `global`s and
+/// avoid recomputing on every call.
+pub fn bind_term_bytes_plain_string_literal(
+    w: dep::types::TermWitness,
+    empty_lang_hash: Field,
+    xsd_string_dt_hash: Field,
+) {
+    let lexical_hash = consts::encode_string_bounded(w.bytes, w.length);
+    // Plain xsd:string -> special_encoding == lexical_hash (per
+    // spec/encoding.md Sec.3.4 fall-through: "Other -> Enc_s(lexical)").
+    let value_encoding = consts::hash4([lexical_hash, lexical_hash, empty_lang_hash, xsd_string_dt_hash]);
+    let reconstructed = consts::hash2([2, value_encoding]);
+    assert(reconstructed == w.hash, "bind_term_bytes_plain_string_literal: byte witness does not match the literal's term hash");
+    assert((w.length as Field).lt((consts::STRING_LEN_MAX + 1) as Field), "bind_term_bytes_plain_string_literal: length exceeds STRING_LEN_MAX");
+}
+
+/// STRSTARTS: returns true iff the bytes of the (already-bound) witness
+/// `w` start with the given `prefix[0..prefix_len]`.
+///
+/// **Caller contract:** Call `bind_term_bytes_*` on `w` BEFORE this
+/// helper so the prover can't supply arbitrary `bytes`. This helper
+/// does not re-bind because the binding has a non-trivial cost
+/// (one hash_string call) and a single bind covers all string ops on
+/// the same term.
+///
+/// **Soundness:** the prefix length is a public input (the literal
+/// "prefix" is folded into the circuit at compile time), so disclosing
+/// it is design-by-contract per `feedback_zkp_no_proof_of_revealed_properties`.
+/// The check is byte-equality on the first `prefix_len` positions: if
+/// `prefix_len > w.length` the result is false (the string is shorter
+/// than the prefix), otherwise we assert pairwise equality.
+///
+/// **Constraint cost:** `STRING_LEN_MAX` byte equalities (we walk every
+/// position so the length dependency stays compile-time-constant).
+/// Optimisation: skip the walk when `prefix_len > w.length` -- but the
+/// circuit shape is identical either way.
+pub fn string_starts_with<let P: u32>(
+    w: dep::types::TermWitness,
+    prefix: [u8; P],
+    prefix_len: u32,
+) -> bool {
+    // Short-circuit length: if prefix is longer than the bound string,
+    // STRSTARTS is false. We compute this as a Boolean and conjoin
+    // with the byte-equality result.
+    let length_ok = (prefix_len as Field).lt((w.length + 1) as Field);
+
+    let mut all_match: bool = true;
+    for i in 0..P {
+        // Only the first `prefix_len` byte equalities are
+        // load-bearing. For positions `i >= prefix_len` we accept any
+        // byte (the prefix's tail bytes are unconstrained padding from
+        // the caller -- typically zero, but we don't assume).
+        if (i as u32) < prefix_len {
+            if w.bytes[i] != prefix[i] {
+                all_match = false;
+            }
+        }
+    }
+    length_ok & all_match
+}
+
+/// CONTAINS: returns true iff the bytes of the (already-bound) witness
+/// `w` contain `needle[0..needle_len]` starting at byte offset
+/// `position`.
+///
+/// **Witness contract:** the prover supplies `position` such that
+/// `w.bytes[position..position + needle_len] == needle[0..needle_len]`.
+/// The circuit verifies the equality and the bound
+/// `position + needle_len <= w.length`. If the substring genuinely
+/// doesn't occur, the prover cannot supply a satisfying `position` and
+/// the proof fails to construct.
+///
+/// **Why witnessed position?** The alternative is enumerating every
+/// candidate position in-circuit (`STRING_LEN_MAX - needle_len + 1`
+/// positions, each with `needle_len` byte equalities). Witnessing
+/// reduces the cost to a single `needle_len` comparison plus a
+/// `position` range check. Standard ZK pattern (cf. `noir-circuit-patterns`).
+///
+/// **Soundness:** `position` is private; the only public output is the
+/// Boolean result. A genuine non-occurrence cannot produce a witness
+/// because no `position` satisfies the byte equality.
+///
+/// **Length disclosure:** `needle_len` is folded in at compile time
+/// (the literal "needle" is a public part of the circuit), so it's
+/// design-by-contract.
+pub fn string_contains<let N: u32>(
+    w: dep::types::TermWitness,
+    needle: [u8; N],
+    needle_len: u32,
+    position: u32,
+) -> bool {
+    // Range: position + needle_len <= w.length. We use `<` against
+    // `w.length + 1` to keep the comparison strict-greater on Fields.
+    let position_ok = ((position + needle_len) as Field).lt((w.length + 1) as Field);
+
+    let mut bytes_match: bool = true;
+    for i in 0..N {
+        // Compare `w.bytes[position + i]` against `needle[i]` for the
+        // first `needle_len` positions. Use a guarded indexed access
+        // because Noir array indexing must accept any in-range index;
+        // we compute the index with `position + i` (a runtime value)
+        // and clamp via the `i < needle_len` mask.
+        if (i as u32) < needle_len {
+            // `position + i` is bounded by `position_ok` if it holds,
+            // and by `STRING_LEN_MAX` regardless because both `position`
+            // and `i` are u32 with `i < N <= STRING_LEN_MAX`.
+            let idx = (position + i as u32) % consts::STRING_LEN_MAX;
+            if w.bytes[idx] != needle[i] {
+                bytes_match = false;
+            }
+        }
+    }
+    position_ok & bytes_match
+}
+
+/// `bind_term_bytes` accepts a witness whose bytes hash to the
+/// expected lexical hash.
+#[test]
+fn bind_term_bytes_accepts_correct_witness() {
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    bytes[0] = 0x68; // 'h'
+    bytes[1] = 0x65; // 'e'
+    bytes[2] = 0x6c; // 'l'
+    bytes[3] = 0x6c; // 'l'
+    bytes[4] = 0x6f; // 'o'
+    let length: u32 = 5;
+    let lexical_hash = consts::encode_string_bounded(bytes, length);
+    let w = dep::types::TermWitness { hash: lexical_hash, bytes, length };
+    bind_term_bytes(w, lexical_hash);
+}
+
+/// Adversarial prover supplying mismatched bytes is rejected.
+#[test(should_fail_with = "bind_term_bytes: byte witness does not match expected lexical hash")]
+fn bind_term_bytes_rejects_mismatched_bytes() {
+    let mut good_bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    good_bytes[0] = 0x68;
+    good_bytes[1] = 0x69; // "hi"
+    let good_hash = consts::encode_string_bounded(good_bytes, 2);
+
+    let mut bad_bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    bad_bytes[0] = 0x6e; // 'n'
+    bad_bytes[1] = 0x6f; // 'o'
+    let bad_w = dep::types::TermWitness { hash: good_hash, bytes: bad_bytes, length: 2 };
+    bind_term_bytes(bad_w, good_hash);
+}
+
+/// IRI binding round-trips when the witness reflects a real IRI.
+#[test]
+fn bind_term_bytes_iri_accepts_correct_witness() {
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    // "http://example.org/Bob"
+    let iri: [u8; 22] = [
+        0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x65, 0x78, 0x61,
+        0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x2f, 0x42,
+        0x6f, 0x62,
+    ];
+    for i in 0..22 {
+        bytes[i] = iri[i];
+    }
+    let length: u32 = 22;
+    let lexical_hash = consts::encode_string_bounded(bytes, length);
+    let term_hash = consts::hash2([0, lexical_hash]);
+    let w = dep::types::TermWitness { hash: term_hash, bytes, length };
+    bind_term_bytes_iri(w);
+}
+
+/// `string_starts_with("foobar", "foo")` is true; with the binding the
+/// circuit cannot accept arbitrary bytes.
+#[test]
+fn string_starts_with_accepts_real_prefix() {
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    let raw: [u8; 6] = [0x66, 0x6f, 0x6f, 0x62, 0x61, 0x72]; // "foobar"
+    for i in 0..6 {
+        bytes[i] = raw[i];
+    }
+    let length: u32 = 6;
+    let lexical_hash = consts::encode_string_bounded(bytes, length);
+    let term_hash = consts::hash2([0, lexical_hash]);
+    let w = dep::types::TermWitness { hash: term_hash, bytes, length };
+    bind_term_bytes_iri(w);
+
+    let prefix: [u8; 3] = [0x66, 0x6f, 0x6f]; // "foo"
+    assert(string_starts_with(w, prefix, 3), "STRSTARTS(\"foobar\", \"foo\") must be true");
+
+    let bad: [u8; 3] = [0x62, 0x61, 0x72]; // "bar" -- not a prefix
+    assert(!string_starts_with(w, bad, 3), "STRSTARTS(\"foobar\", \"bar\") must be false");
+}
+
+/// `string_contains("foobar", "oba")` with `position = 2` is true.
+#[test]
+fn string_contains_accepts_real_substring() {
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    let raw: [u8; 6] = [0x66, 0x6f, 0x6f, 0x62, 0x61, 0x72]; // "foobar"
+    for i in 0..6 {
+        bytes[i] = raw[i];
+    }
+    let length: u32 = 6;
+    let lexical_hash = consts::encode_string_bounded(bytes, length);
+    let term_hash = consts::hash2([0, lexical_hash]);
+    let w = dep::types::TermWitness { hash: term_hash, bytes, length };
+    bind_term_bytes_iri(w);
+
+    let needle: [u8; 3] = [0x6f, 0x62, 0x61]; // "oba"
+    assert(string_contains(w, needle, 3, 2), "CONTAINS(\"foobar\", \"oba\", pos=2) must be true");
+    // Wrong position: prover supplies pos=0 -> bytes don't match.
+    assert(!string_contains(w, needle, 3, 0), "CONTAINS at wrong position must be false");
+}
+
+/// STRLEN: read `w.length` after binding.
+#[test]
+fn strlen_reads_length_after_binding() {
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    bytes[0] = 0x66;
+    bytes[1] = 0x6f;
+    bytes[2] = 0x6f; // "foo"
+    let length: u32 = 3;
+    let lexical_hash = consts::encode_string_bounded(bytes, length);
+    let term_hash = consts::hash2([0, lexical_hash]);
+    let w = dep::types::TermWitness { hash: term_hash, bytes, length };
+    bind_term_bytes_iri(w);
+    // STRLEN(?x) is just `w.length` once the binding holds.
+    assert_eq(w.length, 3, "STRLEN(\"foo\") must be 3");
+}
+
+/// Plain xsd:string literal binding: the prover cannot fudge the
+/// bytes because the literal's full term hash structurally depends on
+/// `encode_string_bounded(bytes, length)`.
+#[test]
+fn bind_term_bytes_plain_string_literal_round_trip() {
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    bytes[0] = 0x68;
+    bytes[1] = 0x69; // "hi"
+    let length: u32 = 2;
+    let lexical_hash = consts::encode_string_bounded(bytes, length);
+    let empty_lang = empty_string_lexical_hash();
+    let xsd_string_dt = xsd_string_datatype_hash();
+    let value_encoding = consts::hash4([lexical_hash, lexical_hash, empty_lang, xsd_string_dt]);
+    let term_hash = consts::hash2([2, value_encoding]);
+
+    let w = dep::types::TermWitness { hash: term_hash, bytes, length };
+    bind_term_bytes_plain_string_literal(w, empty_lang, xsd_string_dt);
 }

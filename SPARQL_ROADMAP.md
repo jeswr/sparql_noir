@@ -74,7 +74,8 @@ Sources cross-checked: `transform/src/lib.rs` (the only Rust transform body), `n
 | `isNumeric` | N | not implemented |
 | Numeric: `ABS`, `ROUND`, `CEIL`, `FLOOR` | Partial (integer-only happy-path) | `Function::Abs` etc. emit `xpath::abs_int` always; float/double broken — see XPATH_INTEGRATION_SUMMARY.md §1. |
 | Numeric: arithmetic in expressions (`+ - * /` between operands) | N | `noir/lib/arith` exists with `Float`/`ArithResult` machinery but is unused by the transform. |
-| String: `STRLEN`, `CONTAINS`, `STRSTARTS`, `STRENDS` | Stub | Functions emit hash-based placeholders; `noir_xpath::contains` etc. are re-exported in `noir/lib/xpath` but not wired through. |
+| String: `STRLEN`, `CONTAINS`, `STRSTARTS` | Y (round 2) | Wired via `utils::bind_term_bytes_plain_string_literal` + byte-walking helpers in `noir/lib/utils`. Plain `xsd:string` literals only; language-tagged / typed-literal binding deferred to round 3. See `spec/encoding.md` §6.3. |
+| String: `STRENDS` | Stub (round 3) | Mechanically similar to STRSTARTS but needs a position witness for the suffix start. Transform rejects with a clear pointer to the roadmap. |
 | String: `SUBSTR`, `UCASE`, `LCASE`, `STRBEFORE`, `STRAFTER`, `CONCAT`, `ENCODE_FOR_URI`, `REPLACE` | N | not implemented; require in-circuit byte-level string handling |
 | `REGEX` | N | not implemented |
 | Datetime: `YEAR`, `MONTH`, `DAY`, `HOURS`, `MINUTES`, `SECONDS`, `TIMEZONE` | Y | `expr_to_noir_code` lines 585–620; encoded values pass through `xpath::datetime_from_epoch_microseconds` |

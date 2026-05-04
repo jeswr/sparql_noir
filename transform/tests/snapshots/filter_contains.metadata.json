@@ -1,0 +1,81 @@
+{
+  "aggregates": [],
+  "hiddenInputs": [
+    {
+      "computedType": "contains_position",
+      "input": {
+        "type": "variable",
+        "value": "o"
+      },
+      "needle": "oba",
+      "type": "customComputed"
+    }
+  ],
+  "hidden_inputs": [
+    {
+      "computedType": "contains_position",
+      "input": {
+        "type": "variable",
+        "value": "o"
+      },
+      "needle": "oba",
+      "type": "customComputed"
+    }
+  ],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/label"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "o"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/label"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "limit": null,
+  "notExists": [],
+  "not_exists": [],
+  "num_optionals": 0,
+  "offset": null,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "orderBy": [],
+  "order_by": [],
+  "skip_signing": false,
+  "stringLenMax": 64,
+  "string_len_max": 64,
+  "total_patterns": 1,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s"
+  ]
+}

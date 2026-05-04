@@ -95,6 +95,10 @@ export interface BGPTriple {
  * legacy code only carries the hash; the byte witness is unconstrained
  * at the Triple level (see `spec/encoding.md` sec.6.3) so a zero
  * placeholder is sound until a string operator binds it locally.
+ *
+ * Round-2 callers that have access to the source RDF term should use
+ * `termToWitness` instead -- that populates `bytes` / `length` from
+ * the lexical form so string-operator bindings actually succeed.
  */
 export function termHashToWitness(hash: string, stringLenMax: number = STRING_LEN_MAX): TermWitness {
   return {
@@ -102,6 +106,38 @@ export function termHashToWitness(hash: string, stringLenMax: number = STRING_LE
     bytes: new Array(stringLenMax).fill(0),
     length: 0,
   };
+}
+
+/**
+ * Round-2 sibling of `termHashToWitness` that populates `bytes` /
+ * `length` from a source RDF term's lexical form (see
+ * `spec/encoding.md` sec.6.3). String-operator bindings
+ * (`utils::bind_term_bytes_*`) require the bytes to actually match
+ * the term's lexical preimage; this helper is the canonical way to
+ * produce witnesses that satisfy the round-2 contract.
+ */
+export function termToWitness(term: Term, hash: string, stringLenMax: number = STRING_LEN_MAX): TermWitness {
+  const lexical = termLexicalBytes(term);
+  const bytes = new Array<number>(stringLenMax).fill(0);
+  const len = Math.min(lexical.length, stringLenMax);
+  for (let i = 0; i < len; i++) {
+    const b = lexical[i];
+    if (b !== undefined) bytes[i] = b;
+  }
+  return { hash, bytes, length: len };
+}
+
+function termLexicalBytes(term: Term): Uint8Array {
+  switch (term.termType) {
+    case 'NamedNode':
+    case 'BlankNode':
+    case 'Literal':
+      return new TextEncoder().encode(term.value);
+    case 'DefaultGraph':
+      return new Uint8Array(0);
+    default:
+      return new Uint8Array(0);
+  }
 }
 
 export interface CheckBindingInputs {
