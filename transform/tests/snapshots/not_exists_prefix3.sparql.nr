@@ -16,7 +16,7 @@ pub(crate) fn checkBinding(bgp: BGP, variables: Variables, bgp_prefix3: BgpPrefi
   assert(variables.s == bgp[0].terms[0]);
   assert(consts::hash2([0, consts::encode_string("http://example.org/knows")]) == bgp[0].terms[1]);
   assert(true);
-  let absent_prefix_0 = utils::prefix3::hash3_sp_g(bgp[0].terms[2], consts::hash2([0, consts::encode_string("http://example.org/age")]), consts::hash2([0, consts::encode_string("")]));
+  let absent_prefix_0 = utils::prefix3::hash3_sp_g(bgp[0].terms[2], consts::hash2([0, consts::encode_string("http://example.org/age")]), consts::hash2([4, consts::encode_string("")]));
   if boundary_cases_prefix3[0] == 0 {
     utils::prefix3::verify_non_membership_prefix3_low_sentinel_no_inclusion(low_sentinel_3, bgp_prefix3[1], absent_prefix_0);
   } else if boundary_cases_prefix3[0] == 1 {

@@ -921,11 +921,18 @@ fn absent_terms_from_pattern(ct: &ContextualizedTriple) -> Result<[Term; 4], Str
         TermPattern::Literal(l) => Term::Static(GroundTerm::Literal(l.clone())),
     };
     let graph = match &ct.graph {
-        GraphContext::Default => Term::Static(GroundTerm::NamedNode(
-            // Default graph is encoded as the empty-string IRI per
-            // the existing `getTermEncodingString` convention.
-            NamedNode::new_unchecked(""),
-        )),
+        // Use the dedicated `Term::DefaultGraph` variant so the
+        // emit layer hashes with term-type tag `4`, matching the
+        // signer's `getTermEncodingString` for `quad.graph` (which
+        // is a DefaultGraph term in N3 / RDF.js). Previously this
+        // path used `Term::Static(GroundTerm::NamedNode(""))` which
+        // hashes with term-type tag `0`, creating a circuit /
+        // signer encoding mismatch (roborev finding, 2026-05-04):
+        // a default-graph quad present in the dataset could be
+        // proven absent because the circuit's absent-hash bound
+        // graph slot used tag 0 while the signer's leaf hash bound
+        // tag 4.
+        GraphContext::Default => Term::DefaultGraph,
         GraphContext::NamedNode(iri) => {
             Term::Static(GroundTerm::NamedNode(NamedNode::new_unchecked(iri.clone())))
         }
@@ -1026,6 +1033,167 @@ fn true_literal() -> Expression {
     let xsd_boolean =
         NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean");
     Expression::Literal(Literal::new_typed_literal("true", xsd_boolean))
+}
+
+/// True iff `expr` mentions the variable `var_name` anywhere in its
+/// expression tree (including inside `EXISTS` / `NOT EXISTS` blocks
+/// reachable through the SPARQL expression algebra).
+///
+/// Used by the prefix-3 OPTIONAL collapse soundness scope check to
+/// reject queries that reference the inner-only variable in an outer
+/// FILTER, BIND right-hand side, ORDER BY expression, or aggregate
+/// source. The matched arm of a prefix-3 collapse leaves the inner-
+/// only position unconstrained, so any reference to that variable
+/// outside the OPTIONAL would let a malicious prover bind the
+/// reference to an arbitrary signed leaf's term value (roborev
+/// finding 2026-05-04, third high). The previous predicate only
+/// inspected projected `circuit_vars`; this helper widens it to every
+/// expression-side reference site.
+pub(crate) fn expression_references_variable(expr: &Expression, var_name: &str) -> bool {
+    match expr {
+        Expression::Variable(v) | Expression::Bound(v) => v.as_str() == var_name,
+        Expression::Not(a) | Expression::UnaryPlus(a) | Expression::UnaryMinus(a) => {
+            expression_references_variable(a, var_name)
+        }
+        Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            expression_references_variable(a, var_name)
+                || expression_references_variable(b, var_name)
+        }
+        Expression::If(a, b, c) => {
+            expression_references_variable(a, var_name)
+                || expression_references_variable(b, var_name)
+                || expression_references_variable(c, var_name)
+        }
+        Expression::Coalesce(args) | Expression::FunctionCall(_, args) => {
+            args.iter().any(|e| expression_references_variable(e, var_name))
+        }
+        Expression::In(a, args) => {
+            expression_references_variable(a, var_name)
+                || args.iter().any(|e| expression_references_variable(e, var_name))
+        }
+        // EXISTS / NOT EXISTS — the variable could appear inside the
+        // inner GraphPattern. Scan the in-scope variable set; this is
+        // an over-approximation (it returns `true` when the variable
+        // is shadowed inside the inner pattern as well) but the
+        // collapse-rejection use-case is conservative by design.
+        Expression::Exists(inner) => collect_in_scope_variables(inner).contains(var_name),
+        // Leaf literals / named nodes / blank-node references / silent
+        // function calls don't carry variable references.
+        _ => false,
+    }
+}
+
+/// True iff `term` is a `Term::Variable(var_name)`. Used by the
+/// prefix-3 OPTIONAL collapse soundness scope check to detect outer
+/// BIND / ORDER BY references through the IR's `Term` representation
+/// (BIND lowers to a `Binding { variable, term: Term::Variable(...) }`).
+pub(crate) fn term_references_variable(term: &Term, var_name: &str) -> bool {
+    matches!(term, Term::Variable(v) if v == var_name)
+}
+
+/// True iff `pattern` references the variable `var_name` anywhere in
+/// its IR -- bindings (right-hand side `Term::Variable`), assertions,
+/// filters, OPTIONAL inner patterns, UNION branches, or NOT EXISTS /
+/// MINUS / easy-OPTIONAL `inner_terms` / `absent_terms` arrays. Used
+/// by the prefix-3 OPTIONAL collapse soundness scope check.
+///
+/// The check **excludes** the easy-OPTIONAL whose `inner_only_var` is
+/// being checked (caller passes `skip_easy_optional_id`), so the
+/// inner_terms entries that legitimately reference the inner-only var
+/// inside its own OPTIONAL aren't counted as escape-points.
+pub(crate) fn pattern_references_variable(
+    pattern: &PatternInfo,
+    var_name: &str,
+    skip_easy_optional_id: usize,
+) -> bool {
+    // Bindings whose RHS term references the variable (BIND `?out := ?inner_only`).
+    for b in &pattern.bindings {
+        if term_references_variable(&b.term, var_name) {
+            return true;
+        }
+    }
+    // Assertions whose either side references the variable.
+    for a in &pattern.assertions {
+        if term_references_variable(&a.0, var_name) || term_references_variable(&a.1, var_name) {
+            return true;
+        }
+    }
+    // Outer filters mentioning the variable.
+    for f in &pattern.filters {
+        if expression_references_variable(f, var_name) {
+            return true;
+        }
+    }
+    // UNION branches.
+    if let Some(branches) = &pattern.union_branches {
+        for branch in branches {
+            if pattern_references_variable(branch, var_name, skip_easy_optional_id) {
+                return true;
+            }
+        }
+    }
+    // Other (non-collapsed) OPTIONAL blocks. We only walk power-set
+    // OPTIONALs here -- the `easy_optionals` collapse list is
+    // inspected separately below so we can skip the OPTIONAL whose
+    // inner-only var we're checking.
+    for opt in &pattern.optional_blocks {
+        for b in &opt.bindings {
+            if b.variable == var_name || term_references_variable(&b.term, var_name) {
+                return true;
+            }
+        }
+        for a in &opt.assertions {
+            if term_references_variable(&a.0, var_name)
+                || term_references_variable(&a.1, var_name)
+            {
+                return true;
+            }
+        }
+        for f in &opt.filters {
+            if expression_references_variable(f, var_name) {
+                return true;
+            }
+        }
+    }
+    // NOT EXISTS / MINUS absent-term arrays.
+    for ne in &pattern.not_exists {
+        for t in &ne.absent_terms {
+            if term_references_variable(t, var_name) {
+                return true;
+            }
+        }
+    }
+    for pne in &pattern.prefix_not_exists {
+        for t in &pne.absent_terms {
+            if term_references_variable(t, var_name) {
+                return true;
+            }
+        }
+    }
+    // Other easy-OPTIONALs' `inner_terms` (skip the one we're
+    // checking, identified by `skip_easy_optional_id`).
+    for eo in &pattern.easy_optionals {
+        if eo.id == skip_easy_optional_id {
+            continue;
+        }
+        for t in &eo.inner_terms {
+            if term_references_variable(t, var_name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Flatten an inner `GraphPattern` (the `P` in `EXISTS { P }`) into the
@@ -2168,11 +2336,20 @@ fn process_graph_pattern_inner(
                 // Only rewrite the graph slot if the inner pattern
                 // saw the default graph (no inner GRAPH wrapper); a
                 // pre-existing inner GRAPH already substituted a
-                // concrete term.
+                // concrete term. After the roborev encoding-mismatch
+                // fix (2026-05-04) the default-graph marker is
+                // `Term::DefaultGraph`; the legacy
+                // `Static(NamedNode(""))` shape is also matched
+                // defensively in case any caller still produces it.
                 let is_default = matches!(
                     &eo.inner_terms[3],
-                    Term::Static(GroundTerm::NamedNode(nn)) if nn.as_str().is_empty()
-                );
+                    Term::DefaultGraph
+                        | Term::Static(GroundTerm::NamedNode(_))
+                ) && match &eo.inner_terms[3] {
+                    Term::DefaultGraph => true,
+                    Term::Static(GroundTerm::NamedNode(nn)) => nn.as_str().is_empty(),
+                    _ => false,
+                };
                 if is_default {
                     eo.inner_terms[3] = effective_graph_term.clone();
                 }
@@ -2588,16 +2765,20 @@ pub(crate) fn process_query_with_options_and_form(
                 circuit_vars.push(key.variable.clone());
             }
 
-            // Round-5 soundness check (roborev #545 high). A
-            // prefix-3 OPTIONAL collapse leaves
+            // Round-5 soundness check (roborev #545 high, widened
+            // 2026-05-04 per the third HIGH on PR #61). A prefix-3
+            // OPTIONAL collapse leaves
             // `bgp[matched_idx].terms[free_position]` unconstrained
-            // in the matched arm -- if the inner-only variable bound
-            // to that position is in the projected `circuit_vars`,
-            // a malicious prover could pick any signed leaf's
-            // value and the verifier would accept the projected
-            // binding without it being live in the dataset. Reject
-            // with a clear error rather than silently emit an
-            // unsound proof.
+            // in the matched arm -- so any reference to the inner-
+            // only variable outside the OPTIONAL would let a
+            // malicious prover bind that reference to an arbitrary
+            // signed leaf's term value. The previous check inspected
+            // only the projected `circuit_vars`, which misses outer
+            // FILTER expressions, BIND right-hand sides, ORDER BY
+            // expressions, aggregate sources, and references in
+            // sibling easy-OPTIONALs / NOT EXISTS / UNION branches.
+            // Reject the collapse if the inner-only var is referenced
+            // anywhere outside its own OPTIONAL.
             let projected: std::collections::HashSet<&str> =
                 circuit_vars.iter().map(String::as_str).collect();
             for eo in &pattern.easy_optionals {
@@ -2605,13 +2786,21 @@ pub(crate) fn process_query_with_options_and_form(
                     continue;
                 }
                 if let Some(name) = &eo.inner_only_var {
-                    if projected.contains(name.as_str()) {
+                    let escapes = projected.contains(name.as_str())
+                        || pattern_references_variable(&pattern, name.as_str(), eo.id)
+                        || aggregates.iter().any(|a| {
+                            a.source.as_deref() == Some(name.as_str())
+                                || a.output.as_str() == name.as_str()
+                        })
+                        || post.order_by.iter().any(|k| k.variable == *name);
+                    if escapes {
                         return Err(format!(
-                            "OPTIONAL with inner-only variable `?{}` projected from a prefix-tree \
-                             collapse is not yet supported -- the matched arm leaves the inner-only \
-                             position unconstrained, which would let a malicious prover bind \
-                             `variables.{}` to any leaf's value at that position. Drop the variable \
-                             from the projection or rewrite the OPTIONAL to bind it via an \
+                            "OPTIONAL with inner-only variable `?{}` referenced outside the OPTIONAL \
+                             from a prefix-tree collapse is not yet supported -- the matched arm leaves \
+                             the inner-only position unconstrained, which would let a malicious prover \
+                             bind `variables.{}` (or any expression that references it) to any leaf's \
+                             value at that position. Drop the variable from the projection / FILTER / \
+                             BIND / ORDER BY / aggregate, or rewrite the OPTIONAL to bind it via an \
                              outer-pattern triple. See spec/prefix-tree-commitment.md Sec.8 / \
                              roborev #545.",
                             name, name

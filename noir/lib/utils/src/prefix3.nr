@@ -60,15 +60,30 @@ pub struct MerklePrefix3Info<let M: u32, let N: u32> {
 
 /// Domain-separated `hash3` for the `(s, p, g)` prefix tree.
 ///
-/// `hash3_sp_g(s, p, g) := hash4([s, p, g, PREFIX3_SP_G_DOMAIN_SEPARATOR])`.
+/// `hash3_sp_g(s, p, g) := hash2([PREFIX3_SP_G_DOMAIN_SEPARATOR, hash4([s, p, g, 0])])`.
 ///
-/// The domain separator (`consts::PREFIX3_SP_G_DOMAIN_SEPARATOR`)
-/// keeps the prefix-3 tree's leaf-hash space disjoint from the
-/// leaf-hash sorted tree's, so cross-tree confusion attacks are
-/// excluded by Pedersen-hash collision-resistance. No new hash
-/// primitive is introduced -- `hash4` is reused.
+/// **Structural domain disjointness (roborev fix, 2026-05-04).** The
+/// previous construction (`hash4([s, p, g, sep])`) relied on
+/// `hash4` collision-resistance to keep the prefix-3 leaf-hash space
+/// disjoint from the leaf-hash sorted tree's: a hypothetical real quad
+/// with `o == g_real` and graph slot equal to `sep` would hash the
+/// same input array as the prefix-3 leaf, and rejecting that case
+/// rested on the preimage argument that no real graph term encoding
+/// (`hash2([term_type, ...])`) lands on the small ASCII-packed
+/// constant `sep`. That argument is sound but not structural.
+///
+/// The new construction wraps the inner `hash4(...)` with `hash2` and
+/// the domain-separator tag. Prefix-3 leaves now live in the `hash2`
+/// image; leaf-hash sorted-tree leaves live in the `hash4` image.
+/// Cross-tree leaf collision requires breaking the cross-construction
+/// security between `hash2` and `hash4`, not just preimage-finding on
+/// the graph slot. No real quad's `hash4(terms)` can be mistaken for a
+/// prefix-3 leaf without a `hash4 = hash2(...)` collision.
 pub fn hash3_sp_g(s: Field, p: Field, g: Field) -> Field {
-    consts::hash4([s, p, g, consts::PREFIX3_SP_G_DOMAIN_SEPARATOR])
+    consts::hash2([
+        consts::PREFIX3_SP_G_DOMAIN_SEPARATOR,
+        consts::hash4([s, p, g, 0]),
+    ])
 }
 
 /// Convenience wrapper accepting the prefix as a 3-element array.
@@ -838,13 +853,25 @@ fn test_prefix3_non_membership_no_inclusion_check_returns_false_on_present_prefi
 
 #[test]
 fn test_prefix3_domain_separator_disjoint_from_leaf_hash_tree() {
-    // Smoke check that `hash3_sp_g(s, p, g)` is *not* equal to
-    // `hash4(s, p, g, 0)` -- if the domain separator were 0 the prefix
-    // tree would collide with `hash4` over `(s, p, g, 0)` quads. This
-    // doesn't prove cross-tree disjointness in general (which depends
-    // on Pedersen-hash collision-resistance) but ensures our chosen
-    // separator is non-zero and produces visibly different output.
+    // Smoke check that `hash3_sp_g(s, p, g)` is *not* equal to any
+    // `hash4` evaluation over the same prefix terms -- the structural
+    // disjointness fix wraps the inner `hash4(...)` with `hash2` so
+    // prefix-3 leaves live in the `hash2` image, not the `hash4`
+    // image. We compare against several concrete `hash4` shapes that a
+    // hypothetical real quad could produce.
     let h_prefix = hash3_sp_g(1, 2, 3);
     let h_quad_zero = consts::hash4([1, 2, 3, 0]);
-    assert(h_prefix != h_quad_zero, "prefix3 hash collides with hash4 zero-padded -- domain separator misconfigured");
+    assert(h_prefix != h_quad_zero, "prefix3 hash matches hash4(s, p, g, 0) -- wrap broken");
+    let h_quad_with_sep_in_g = consts::hash4([1, 2, 3, consts::PREFIX3_SP_G_DOMAIN_SEPARATOR]);
+    assert(
+        h_prefix != h_quad_with_sep_in_g,
+        "prefix3 hash matches the legacy hash4(s, p, g, sep) shape -- wrap broken",
+    );
+    // Also check the o = g shape that the old construction relied on
+    // collision-resistance to exclude. Even if a real quad existed
+    // with o = g_term and g = sep (which would have collided in the
+    // legacy single-hash construction), the new wrap keeps the
+    // prefix-3 hash disjoint structurally.
+    let h_quad_o_eq_g = consts::hash4([1, 2, 3, 3]);
+    assert(h_prefix != h_quad_o_eq_g, "prefix3 hash collides with hash4(s, p, g, g) -- wrap broken");
 }

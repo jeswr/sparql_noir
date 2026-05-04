@@ -74,8 +74,7 @@
         {
           "kind": "static",
           "term": {
-            "termType": "NamedNode",
-            "value": ""
+            "termType": "DefaultGraph"
           }
         }
       ],
@@ -98,8 +97,7 @@
         {
           "kind": "static",
           "term": {
-            "termType": "NamedNode",
-            "value": ""
+            "termType": "DefaultGraph"
           }
         }
       ],
@@ -149,8 +147,7 @@
         {
           "kind": "static",
           "term": {
-            "termType": "NamedNode",
-            "value": ""
+            "termType": "DefaultGraph"
           }
         }
       ],
@@ -173,8 +170,7 @@
         {
           "kind": "static",
           "term": {
-            "termType": "NamedNode",
-            "value": ""
+            "termType": "DefaultGraph"
           }
         }
       ],

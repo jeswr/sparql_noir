@@ -760,6 +760,145 @@ fn optional_inner_only_object_projected_is_rejected() {
     }
 }
 
+/// Widened soundness scope check (roborev finding 2026-05-04, third
+/// HIGH on PR #61). The previous predicate looked only at projected
+/// `circuit_vars`; an outer FILTER over the inner-only variable
+/// escapes that net but still lets a malicious prover bind the
+/// reference unconstrained. The widened check rejects the collapse
+/// when the inner-only var appears in the outer pattern's filters.
+#[test]
+fn optional_inner_only_object_filter_referenced_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+               FILTER(?o > 18) \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected outer-FILTER on inner-only ?o to be rejected"),
+        Err(err) => assert!(
+            err.contains("?o") && err.contains("unconstrained"),
+            "expected error mentioning ?o + unconstrained, got: {}",
+            err
+        ),
+    }
+}
+
+/// As above, but the outer reference is via a `BIND(?o AS ?out)`
+/// alias. The inner-only var still escapes the OPTIONAL, so the
+/// widened scope check must reject.
+#[test]
+fn optional_inner_only_object_bind_alias_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?out WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+               BIND(?o AS ?out) \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected outer-BIND on inner-only ?o to be rejected"),
+        Err(err) => assert!(
+            err.contains("?o") && err.contains("unconstrained"),
+            "expected error mentioning ?o + unconstrained, got: {}",
+            err
+        ),
+    }
+}
+
+/// As above, but the outer reference is in an `ORDER BY ?o` key.
+/// The ORDER BY validation runs before the soundness scope check
+/// and rejects the inner-only variable as "not bound by the query
+/// body" -- functionally still rejecting the query, which is the
+/// correct outcome (the query is unsound either way). We assert the
+/// rejection regardless of which error wins the race so a future
+/// rearrangement of the validation order doesn't silently start
+/// accepting the unsound query.
+#[test]
+fn optional_inner_only_object_order_by_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+             } ORDER BY ?o";
+    match transform_query(q) {
+        Ok(_) => panic!("expected ORDER-BY on inner-only ?o to be rejected"),
+        Err(err) => {
+            let mentions_o = err.contains("?o");
+            let unsound = err.contains("unconstrained")
+                || err.contains("not bound by the query body");
+            assert!(
+                mentions_o && unsound,
+                "expected error mentioning ?o and either unconstrained or not-bound, got: {}",
+                err
+            );
+        }
+    }
+}
+
+/// Round-5 default-graph encoding mismatch (roborev finding
+/// 2026-05-04, first HIGH on PR #61). When the default graph is the
+/// graph context for an OPTIONAL absent prefix or a NOT EXISTS absent
+/// quad, the circuit must hash the graph slot with term-type tag `4`
+/// (matching the signer's `getTermEncodingString` for
+/// `quad.graph: DefaultGraph` in `src/encode.ts:11`). Previously the
+/// transform serialised the slot as `hash2([0, encode_string("")])`
+/// (term-type tag `0` = NamedNode), creating a soundness mismatch:
+/// a default-graph quad present in the dataset could be proven
+/// absent because the circuit's absent-hash bound a different graph
+/// field than the signer's leaf hash.
+///
+/// This test pins the emitted absent-graph encoding in `sparql.nr`
+/// so a regression that swaps the term-type tag is caught at the
+/// snapshot level.
+#[test]
+fn default_graph_absent_uses_term_type_tag_4() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?p WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+    // The default-graph term in the absent-prefix expression must be
+    // hash2([4, ...]) -- term-type tag 4 = DefaultGraph -- to match
+    // the signer's leaf-hash encoding.
+    assert!(
+        result.sparql_nr.contains("consts::hash2([4, consts::encode_string(\"\")])"),
+        "expected default-graph slot to use term-type tag 4 (DefaultGraph), got:\n{}",
+        result.sparql_nr
+    );
+    // Negative check: the legacy mismatch (term-type 0 + empty-string
+    // value) must not appear for the graph slot of the absent term.
+    // The substring would be the same shape as a NamedNode("")
+    // encoding -- a proxy match for the bug we're fixing.
+    assert!(
+        !result.sparql_nr.contains("consts::hash2([0, consts::encode_string(\"\")])"),
+        "default-graph slot must not use term-type tag 0 (NamedNode-with-empty-IRI), got:\n{}",
+        result.sparql_nr
+    );
+
+    // The metadata should also surface `DefaultGraph` (not
+    // `NamedNode` with empty value) so the TS prover can route it
+    // through `DF.defaultGraph()` in `encodeAbsentTerm`.
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    let inner_terms = easy[0]
+        .get("innerTerms")
+        .and_then(|v| v.as_array())
+        .expect("innerTerms array");
+    let graph_term = inner_terms[3]
+        .get("term")
+        .expect("inner_terms[3].term must be present for DefaultGraph slot");
+    assert_eq!(
+        graph_term.get("termType").and_then(|v| v.as_str()),
+        Some("DefaultGraph"),
+        "expected innerTerms[3].term.termType = DefaultGraph, got {:?}",
+        graph_term
+    );
+}
+
 /// Round-5 prefix-3 OPTIONAL collapse acceptance test. Single-triple
 /// inner OPTIONAL with one inner-only `o` position lifts via the
 /// prefix-3 commitment instead of falling through to the power-set

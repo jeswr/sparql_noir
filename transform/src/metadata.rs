@@ -36,6 +36,15 @@ pub(crate) fn term_to_json(term: &Term) -> serde_json::Value {
             "kind": "static",
             "term": ground_term_to_json(gt),
         }),
+        // Default-graph term — surfaces as a `static` entry with
+        // `termType: "DefaultGraph"` so the TS prover's
+        // `encodeAbsentTerm` can route it through
+        // `getTermEncodingString`'s DefaultGraph case (term-type
+        // tag `4`). See roborev encoding-mismatch fix (2026-05-04).
+        Term::DefaultGraph => serde_json::json!({
+            "kind": "static",
+            "term": { "termType": "DefaultGraph" },
+        }),
     }
 }
 

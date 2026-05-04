@@ -346,6 +346,16 @@ pub(crate) fn serialize_term(term: &Term, query: &QueryInfo, bindings: &BTreeMap
             format!("bgp[{}].terms[{}]", triple_idx, term_idx)
         }
         Term::Static(gt) => serialize_ground_term(gt),
+        // Default graph term — must hash with term-type tag `4` to
+        // match the signer's `getTermEncodingString` for
+        // `quad.graph: DefaultGraph` (`src/encode.ts:11`). Encoding it
+        // as a `NamedNode("")` would land at term-type tag `0` and
+        // create the soundness mismatch flagged by roborev:
+        // a default-graph quad present in the dataset could be
+        // proven absent because the circuit's absent-hash uses tag 0
+        // while the signer's leaf hash uses tag 4. The empty-string
+        // payload mirrors RDF.js's `DefaultGraph.value === ""`.
+        Term::DefaultGraph => format!("consts::hash2([4, {}])", encode_string_expr("")),
     }
 }
 
@@ -1449,37 +1459,39 @@ fn datetime_comparison(
     Ok(cmp)
 }
 
-fn push_hidden(hidden: &mut Vec<serde_json::Value>, kind: &str, term: &Term) -> usize {
-    let idx = hidden.len();
-    let term_json = match term {
+fn term_to_hidden_json(term: &Term) -> serde_json::Value {
+    match term {
         Term::Variable(name) => serde_json::json!({"type": "variable", "value": name}),
         Term::Input(i, j) => serde_json::json!({"type": "input", "value": [i, j]}),
         Term::Static(gt) => serde_json::json!({"type": "static", "value": ground_term_to_json(gt)}),
-    };
+        // Default-graph term shouldn't normally appear in hidden
+        // filter / comparison inputs (graph slots aren't compared
+        // arithmetically). Surface it explicitly so a future code
+        // path that does route a graph term through here doesn't
+        // silently drop the term-type tag.
+        Term::DefaultGraph => serde_json::json!({
+            "type": "static",
+            "value": { "termType": "DefaultGraph" },
+        }),
+    }
+}
+
+fn push_hidden(hidden: &mut Vec<serde_json::Value>, kind: &str, term: &Term) -> usize {
+    let idx = hidden.len();
     hidden.push(serde_json::json!({
         "type": "customComputed",
         "computedType": kind,
-        "input": term_json
+        "input": term_to_hidden_json(term)
     }));
     idx
 }
 
 fn push_hidden_comparison(hidden: &mut Vec<serde_json::Value>, kind: &str, left: &Term, right: &Term) -> usize {
     let idx = hidden.len();
-    let left_json = match left {
-        Term::Variable(name) => serde_json::json!({"type": "variable", "value": name}),
-        Term::Input(i, j) => serde_json::json!({"type": "input", "value": [i, j]}),
-        Term::Static(gt) => serde_json::json!({"type": "static", "value": ground_term_to_json(gt)}),
-    };
-    let right_json = match right {
-        Term::Variable(name) => serde_json::json!({"type": "variable", "value": name}),
-        Term::Input(i, j) => serde_json::json!({"type": "input", "value": [i, j]}),
-        Term::Static(gt) => serde_json::json!({"type": "static", "value": ground_term_to_json(gt)}),
-    };
     hidden.push(serde_json::json!({
         "type": "customComputed",
         "computedType": kind,
-        "inputs": [left_json, right_json]
+        "inputs": [term_to_hidden_json(left), term_to_hidden_json(right)]
     }));
     idx
 }

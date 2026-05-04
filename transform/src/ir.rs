@@ -13,6 +13,13 @@ pub enum Term {
     Variable(String),
     Input(usize, usize),
     Static(GroundTerm),
+    /// The default graph term -- encoded as
+    /// `hash2([4, encode_string(""))]` (term-type tag `4` per the
+    /// signer's `getTermEncodingString` mapping in `src/encode.ts`).
+    /// Distinct from `Static(GroundTerm::NamedNode(""))`, which would
+    /// hash with term-type tag `0` and create the
+    /// signer/transform mismatch flagged by roborev (2026-05-04).
+    DefaultGraph,
 }
 
 #[derive(Clone, Debug)]
