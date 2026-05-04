@@ -401,6 +401,18 @@ pub(crate) fn fill_main_nr_template(
     has_not_exists: bool,
     num_not_exists: usize,
 ) -> String {
+    // Consistency check: `has_not_exists` is the boolean view of
+    // `num_not_exists > 0`. A mismatch means a caller has thrown the
+    // two sources out of sync upstream — fail loudly rather than emit
+    // a circuit whose `BoundaryCases` array length disagrees with the
+    // dispatch chain.
+    debug_assert_eq!(
+        has_not_exists,
+        num_not_exists > 0,
+        "fill_main_nr_template: has_not_exists ({}) disagrees with num_not_exists ({})",
+        has_not_exists,
+        num_not_exists,
+    );
     let template = if skip_signing {
         MAIN_TEMPLATE_SIMPLE
     } else {
@@ -448,7 +460,11 @@ pub(crate) fn fill_main_nr_template(
                 "{{n4}}",
                 ", low_sentinel, high_sentinel, boundary_cases",
             );
-        let _ = num_not_exists; // included in metadata; circuit picks length from BoundaryCases type
+        // num_not_exists is consumed by the debug_assert above; the
+        // circuit's BoundaryCases-array length comes from the
+        // generated `noir/sparql/src/lib.nr` `pub type BoundaryCases =
+        // [u8; N]` declaration, which the metadata writer keeps in
+        // sync with this count.
     } else {
         main_nr = main_nr
             .replace("{{n0}}", "")

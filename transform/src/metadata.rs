@@ -162,9 +162,11 @@ pub(crate) fn build_base_metadata(
 
     // Per-constraint metadata for NOT EXISTS / MINUS lowering. The TS
     // prover uses `bracketLeftIdx` / `bracketRightIdx` to locate the
-    // bracket BGP slots and `boundaryCases` (top-level) to enumerate
-    // the dispatch options the circuit accepts. The actual boundary
-    // tag is a *prove-time* fact -- the prover computes
+    // bracket BGP slots and reads `boundaryCaseDispatch` (one map per
+    // NOT EXISTS constraint) to translate the public
+    // `boundary_cases[i]` integer back to the chosen primitive name
+    // (`lower` / `middle` / `upper`). The actual boundary tag is a
+    // *prove-time* fact -- the prover computes
     // `cmp(absent_hash, sorted_real_leaf_hashes)` and picks the
     // matching tag. See `spec/exists.md` Sec.3.3.
     let not_exists_json: Vec<serde_json::Value> = info
