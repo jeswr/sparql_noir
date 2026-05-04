@@ -1,0 +1,117 @@
+{
+  "aggregates": [],
+  "bgpPrefix3Length": 0,
+  "bgp_prefix3_length": 0,
+  "easyOptionals": [],
+  "easy_optionals": [],
+  "hiddenInputs": [
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "d"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "2020"
+        }
+      },
+      "type": "customComputed"
+    }
+  ],
+  "hidden_inputs": [
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "variable",
+        "value": "d"
+      },
+      "type": "customComputed"
+    },
+    {
+      "computedType": "expr_value",
+      "input": {
+        "type": "static",
+        "value": {
+          "datatype": {
+            "termType": "NamedNode",
+            "value": "http://www.w3.org/2001/XMLSchema#integer"
+          },
+          "language": null,
+          "termType": "Literal",
+          "value": "2020"
+        }
+      },
+      "type": "customComputed"
+    }
+  ],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "d"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/date"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "d"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/date"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "limit": null,
+  "notExists": [],
+  "not_exists": [],
+  "num_optionals": 0,
+  "offset": null,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "orderBy": [],
+  "order_by": [],
+  "prefixNotExists": [],
+  "prefix_not_exists": [],
+  "skip_signing": false,
+  "stringLenMax": 64,
+  "string_len_max": 64,
+  "total_patterns": 1,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s"
+  ]
+}

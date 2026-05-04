@@ -32,8 +32,13 @@ export function runJson(fn: string) {
   let res = run(fn)
     // Put strings around keys of objects if they are not already in quotes
     .replace(/[a-zA-Z0-9_]+(?=:)/g, match => `"${match}"`)
-    // Remove the struct names to make it valid JSON
-    .replace(/[a-zA-Z]+ (?={)/g, '');
+    // Remove the struct names to make it valid JSON. The `0-9_` class
+    // matches struct identifiers like `MerklePrefix3Info` (digits in
+    // the middle are valid Rust ident characters); without it, the
+    // round-6 prefix-3 sign call would emit `MerklePrefix3Info { ... }`
+    // which leaves the `3Info` tail in front of `{` and breaks the
+    // parser.
+    .replace(/[a-zA-Z][a-zA-Z0-9_]* (?={)/g, '');
   return JSON.parse(res);
 }
 

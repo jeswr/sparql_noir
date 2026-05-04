@@ -8,16 +8,16 @@ use dep::types::Root;
 use dep::utils::{verify_inclusion, verify_signature};
 use dep::consts::signature::PubKey;
 
-use sparql::{BGP, checkBinding, Variables{{h0}}};
+{{n2}}{{p2}}use sparql::{BGP, checkBinding, Variables{{h0}}{{n0}}{{p0}}};
 
 fn main(
     public_key: [PubKey; 1],
-    roots: [Root; 1],
+    roots: [{{r0}}],
     bgp: BGP,
-    variables: pub Variables{{h1}}
+    variables: pub Variables{{h1}}{{n1}}{{p1}}
 ) {
     // Verify signatures on all roots
-    for i in 0..roots.len() {
+    for i in {{r1}} {
         verify_signature(public_key[0], roots[i]);
     }
 
@@ -27,7 +27,7 @@ fn main(
         verify_inclusion(triple, roots[0].value);
     }
 
-    // Check that the bgp patterns satisfy the sparql query and produce the
+{{n3}}{{p3}}    // Check that the bgp patterns satisfy the sparql query and produce the
     // public variables
-    checkBinding(bgp, variables{{h2}})
+    checkBinding(bgp, variables{{h2}}{{n4}}{{p4}})
 }
