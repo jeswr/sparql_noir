@@ -25,6 +25,12 @@ jobs:
       run: npm install
 
     - name: Build TypeScript
+      # `prebuild:tsc` (in package.json) runs `bundle:noir-lib` first so
+      # `src/index.ts`'s import of `./noir-lib-bundle.js` resolves on every
+      # entry point (CI, release workflow, local clean checkouts). Keeping
+      # the bundle step in the shared script — not the workflow — is the
+      # fix for the root cause flagged in
+      # https://github.com/jeswr/sparql_noir/pull/48#discussion-r3178788424.
       run: npm run build:tsc
 
     - name: Test benchmark tool help
