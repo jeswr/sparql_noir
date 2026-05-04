@@ -24,13 +24,13 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    - name: Bundle Noir library sources
-      # `src/index.ts` imports from `./noir-lib-bundle.js`, which is generated
-      # by this script from `noir/lib/`. Without this, `npm run build:tsc`
-      # fails with TS2307: cannot find module './noir-lib-bundle.js'.
-      run: npm run bundle:noir-lib
-
     - name: Build TypeScript
+      # `prebuild:tsc` (in package.json) runs `bundle:noir-lib` first so
+      # `src/index.ts`'s import of `./noir-lib-bundle.js` resolves on every
+      # entry point (CI, release workflow, local clean checkouts). Keeping
+      # the bundle step in the shared script — not the workflow — is the
+      # fix for the root cause flagged in
+      # https://github.com/jeswr/sparql_noir/pull/48#discussion-r3178788424.
       run: npm run build:tsc
 
     - name: Test benchmark tool help
