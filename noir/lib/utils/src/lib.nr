@@ -426,6 +426,89 @@ fn encode_string_bounded_is_callable() {
     assert_eq(h1, h2, "encode_string_bounded must be deterministic");
 }
 
+/// **Soundness contract.** `encode_string_bounded(buf, len)` must agree
+/// with `encode_string(s)` for the unique `s` whose UTF-8 encoding is
+/// `buf[0..len]`. If this round-trip ever fails, every honest witness
+/// for a round-2 string op (STRLEN / STRSTARTS / CONTAINS) will be
+/// rejected by `bind_term_bytes_*` -- the binding compares bounded
+/// against the credential layer's `encode_string` hash. Roborev review
+/// 2026-05-04 (high) for the original mismatch.
+#[test]
+fn encode_string_bounded_round_trips_with_encode_string_short() {
+    let mut buf: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    buf[0] = 0x61; // 'a'
+    buf[1] = 0x62; // 'b'
+    buf[2] = 0x63; // 'c'
+    let bounded = consts::encode_string_bounded(buf, 3);
+    let canonical = consts::encode_string("abc");
+    assert_eq(
+        bounded,
+        canonical,
+        "encode_string_bounded must round-trip with encode_string for short inputs",
+    );
+}
+
+/// Empty-string round-trip. The original (broken) implementation
+/// hashed `[0; STRING_LEN_MAX]` for `length = 0`, producing the wrong
+/// hash and breaking `empty_string_lexical_hash()`. The fix uses the
+/// variable-length hash primitive so length-0 hashes the empty
+/// byte sequence -- matching `hash_string([])` (i.e. `sha256_var` of
+/// 0 bytes).
+#[test]
+fn encode_string_bounded_round_trips_with_encode_string_empty() {
+    let buf: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    let bounded = consts::encode_string_bounded(buf, 0);
+    // SHA-256 of the empty byte sequence as a Field. We compute it via
+    // `hash_string_var` directly (which matches `sha256_var(_, 0)`)
+    // rather than `encode_string("")` because `str<0>` doesn't compose
+    // cleanly. The intent: bounded over length-0 must NOT depend on
+    // the padding bytes.
+    let canonical = Field::from_le_bytes(consts::hash_string_var(buf, 0));
+    assert_eq(
+        bounded,
+        canonical,
+        "encode_string_bounded with length=0 must hash the empty byte sequence",
+    );
+
+    // Same length-0 with non-zero padding: the bounded hash MUST be
+    // identical -- padding is unconstrained per the round-2 contract.
+    let mut padded: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    padded[0] = 0xFF;
+    padded[5] = 0x42;
+    let bounded_padded = consts::encode_string_bounded(padded, 0);
+    assert_eq(
+        bounded_padded,
+        canonical,
+        "encode_string_bounded with length=0 must ignore padding bytes",
+    );
+}
+
+/// Mid-length round-trip. Catches any off-by-one in the variable-length
+/// hash domain -- e.g. hashing `bytes[0..length+1]` instead of `[0..length]`.
+#[test]
+fn encode_string_bounded_round_trips_with_encode_string_iri() {
+    // "http://example.org/Bob" -- 22 bytes.
+    let iri: [u8; 22] = [
+        0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x65, 0x78, 0x61,
+        0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x2f, 0x42,
+        0x6f, 0x62,
+    ];
+    let mut buf: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    for i in 0..22 {
+        buf[i] = iri[i];
+    }
+    // Add adversarial padding to verify it is not hashed.
+    buf[22] = 0xFF;
+    buf[40] = 0xAA;
+    let bounded = consts::encode_string_bounded(buf, 22);
+    let canonical = consts::encode_string("http://example.org/Bob");
+    assert_eq(
+        bounded,
+        canonical,
+        "encode_string_bounded must agree with encode_string for IRI-length inputs",
+    );
+}
+
 // =============================================================================
 // Round 2 -- bind_term_bytes + string operators
 // =============================================================================
@@ -474,10 +557,10 @@ fn encode_string_bounded_is_callable() {
 /// `str<N>` whose `N` must be > 0 in practice (zero-length string types
 /// don't compose cleanly with `as_bytes` / `hash_string`). We compute
 /// the equivalent value -- `Field::from_le_bytes(hash_string([]))` --
-/// inline using `encode_string_bounded` with `length = 0`, so the
-/// constant rides on the same hash function `consts` is configured
-/// with. The first call hashes `[0; STRING_LEN_MAX]`; subsequent calls
-/// reuse the witness.
+/// inline using `encode_string_bounded` with `length = 0`. After the
+/// PR-60 round-2 fix, `encode_string_bounded(buf, 0)` correctly
+/// hashes the **empty** byte sequence (via `hash_string_var`) -- the
+/// padding bytes in `zero_bytes` are not part of the hash domain.
 pub fn empty_string_lexical_hash() -> Field {
     let zero_bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
     consts::encode_string_bounded(zero_bytes, 0)
@@ -733,6 +816,39 @@ fn bind_term_bytes_iri_accepts_correct_witness() {
     bind_term_bytes_iri(w);
 }
 
+/// IRI binding under the **canonical** term-hash construction. Matches
+/// the credential-layer encoding (`hash2([0, encode_string(iri)])`),
+/// which is what the Merkle leaf hash actually commits to. Until the
+/// `encode_string` / `encode_string_bounded` round-trip held, this
+/// test would have failed for honest witnesses -- the regression that
+/// roborev caught.
+#[test]
+fn bind_term_bytes_iri_matches_canonical_encode_string() {
+    // Canonical: term-hash computed via `encode_string(<str>)`.
+    let canonical_term_hash = consts::hash2(
+        [0, consts::encode_string("http://example.org/Bob")],
+    );
+
+    // Witness: bytes carry the IRI's UTF-8, padded to STRING_LEN_MAX.
+    let iri: [u8; 22] = [
+        0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x65, 0x78, 0x61,
+        0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x6f, 0x72, 0x67, 0x2f, 0x42,
+        0x6f, 0x62,
+    ];
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    for i in 0..22 {
+        bytes[i] = iri[i];
+    }
+    let w = dep::types::TermWitness {
+        hash: canonical_term_hash,
+        bytes,
+        length: 22,
+    };
+
+    // The binding MUST accept this honest witness.
+    bind_term_bytes_iri(w);
+}
+
 /// `string_starts_with("foobar", "foo")` is true; with the binding the
 /// circuit cannot accept arbitrary bytes.
 #[test]
@@ -808,4 +924,155 @@ fn bind_term_bytes_plain_string_literal_round_trip() {
 
     let w = dep::types::TermWitness { hash: term_hash, bytes, length };
     bind_term_bytes_plain_string_literal(w, empty_lang, xsd_string_dt);
+}
+
+/// Plain xsd:string literal binding under the **canonical** term-hash
+/// construction. Matches what the credential layer signs: every
+/// `encode_string(...)` call inside the term-hash is the canonical
+/// (variable-length) hash of the lexical bytes. This is the test that
+/// failed silently before the round-2 fix -- the Merkle leaf used
+/// `encode_string(value)` on a `str<N>` whose `N` was the actual
+/// length, while the witness re-derived the lexical hash via
+/// `encode_string_bounded` over a zero-padded buffer; the two hashes
+/// did not agree. Roborev review 2026-05-04 (high).
+#[test]
+fn bind_term_bytes_plain_string_literal_matches_canonical_encode_string() {
+    // Canonical term-hash for the plain literal "hi"^^xsd:string.
+    let canonical_value_hash = consts::encode_string("hi");
+    let canonical_lang_hash = consts::encode_string_bounded(
+        [0; consts::STRING_LEN_MAX],
+        0,
+    ); // empty lang tag
+    let canonical_dt_hash = consts::hash2(
+        [0, consts::encode_string("http://www.w3.org/2001/XMLSchema#string")],
+    );
+    let canonical_value_encoding = consts::hash4([
+        canonical_value_hash,
+        canonical_value_hash, // special_encoding == lexical_hash for plain xsd:string
+        canonical_lang_hash,
+        canonical_dt_hash,
+    ]);
+    let canonical_term_hash = consts::hash2([2, canonical_value_encoding]);
+
+    // Witness: bytes carry "hi", padded.
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    bytes[0] = 0x68; // 'h'
+    bytes[1] = 0x69; // 'i'
+    let w = dep::types::TermWitness {
+        hash: canonical_term_hash,
+        bytes,
+        length: 2,
+    };
+    bind_term_bytes_plain_string_literal(w, canonical_lang_hash, canonical_dt_hash);
+}
+
+/// Honest STRLEN witness for a plain xsd:string literal. Goes through
+/// the canonical term-hash so this matches what the prover would see
+/// at proving time.
+#[test]
+fn strlen_canonical_witness_round_trip() {
+    let canonical_value_hash = consts::encode_string("foo");
+    let canonical_lang_hash = consts::encode_string_bounded(
+        [0; consts::STRING_LEN_MAX],
+        0,
+    );
+    let canonical_dt_hash = consts::hash2(
+        [0, consts::encode_string("http://www.w3.org/2001/XMLSchema#string")],
+    );
+    let canonical_value_encoding = consts::hash4([
+        canonical_value_hash,
+        canonical_value_hash,
+        canonical_lang_hash,
+        canonical_dt_hash,
+    ]);
+    let canonical_term_hash = consts::hash2([2, canonical_value_encoding]);
+
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    bytes[0] = 0x66; // 'f'
+    bytes[1] = 0x6f; // 'o'
+    bytes[2] = 0x6f; // 'o'
+    let w = dep::types::TermWitness {
+        hash: canonical_term_hash,
+        bytes,
+        length: 3,
+    };
+    bind_term_bytes_plain_string_literal(w, canonical_lang_hash, canonical_dt_hash);
+    assert_eq(w.length, 3, "STRLEN(\"foo\") under canonical witness must be 3");
+}
+
+/// Honest STRSTARTS witness. Term-hash matches what
+/// `encode_string("hello")` would produce on the credential side.
+#[test]
+fn strstarts_canonical_witness_round_trip() {
+    let canonical_value_hash = consts::encode_string("hello");
+    let canonical_lang_hash = consts::encode_string_bounded(
+        [0; consts::STRING_LEN_MAX],
+        0,
+    );
+    let canonical_dt_hash = consts::hash2(
+        [0, consts::encode_string("http://www.w3.org/2001/XMLSchema#string")],
+    );
+    let canonical_value_encoding = consts::hash4([
+        canonical_value_hash,
+        canonical_value_hash,
+        canonical_lang_hash,
+        canonical_dt_hash,
+    ]);
+    let canonical_term_hash = consts::hash2([2, canonical_value_encoding]);
+
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    bytes[0] = 0x68; // 'h'
+    bytes[1] = 0x65; // 'e'
+    bytes[2] = 0x6c; // 'l'
+    bytes[3] = 0x6c; // 'l'
+    bytes[4] = 0x6f; // 'o'
+    let w = dep::types::TermWitness {
+        hash: canonical_term_hash,
+        bytes,
+        length: 5,
+    };
+    bind_term_bytes_plain_string_literal(w, canonical_lang_hash, canonical_dt_hash);
+    let prefix: [u8; 3] = [0x68, 0x65, 0x6c]; // "hel"
+    assert(
+        string_starts_with(w, prefix, 3),
+        "STRSTARTS(\"hello\", \"hel\") under canonical witness must be true",
+    );
+}
+
+/// Honest CONTAINS witness. Term-hash matches what `encode_string`
+/// produces credential-side.
+#[test]
+fn contains_canonical_witness_round_trip() {
+    let canonical_value_hash = consts::encode_string("foobar");
+    let canonical_lang_hash = consts::encode_string_bounded(
+        [0; consts::STRING_LEN_MAX],
+        0,
+    );
+    let canonical_dt_hash = consts::hash2(
+        [0, consts::encode_string("http://www.w3.org/2001/XMLSchema#string")],
+    );
+    let canonical_value_encoding = consts::hash4([
+        canonical_value_hash,
+        canonical_value_hash,
+        canonical_lang_hash,
+        canonical_dt_hash,
+    ]);
+    let canonical_term_hash = consts::hash2([2, canonical_value_encoding]);
+
+    let mut bytes: [u8; consts::STRING_LEN_MAX] = [0; consts::STRING_LEN_MAX];
+    let raw: [u8; 6] = [0x66, 0x6f, 0x6f, 0x62, 0x61, 0x72]; // "foobar"
+    for i in 0..6 {
+        bytes[i] = raw[i];
+    }
+    let w = dep::types::TermWitness {
+        hash: canonical_term_hash,
+        bytes,
+        length: 6,
+    };
+    bind_term_bytes_plain_string_literal(w, canonical_lang_hash, canonical_dt_hash);
+    let needle: [u8; 3] = [0x6f, 0x62, 0x61]; // "oba"
+    assert(
+        string_contains(w, needle, 3, 2),
+        "CONTAINS(\"foobar\", \"oba\", pos=2) under canonical witness must be true",
+    );
 }
