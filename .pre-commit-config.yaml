@@ -3,7 +3,8 @@
 # Source of truth: zkp-sparql-workspace/templates/lint/.pre-commit-config.yaml
 # Copy into a sub-repo's root (or extend) and run `pre-commit install`
 # to enable on `git commit`. Slow checks (mypy, eslint, pyshacl) live
-# in CI per `feedback_offload_to_ci.md`.
+# in CI; the workspace tracks this convention in its top-level
+# memory / docs.
 #
 # Pinned versions: bump these together; CI workflows mirror them.
 #
@@ -83,11 +84,27 @@ repos:
       - id: taplo-lint
 
   # ----- Noir (project-local hook; skipped on machines without nargo) -----
+  # `nargo fmt --check` runs per-package (each `Nargo.toml`); this repo
+  # has packages at `noir/bin/*` and `noir/lib/*`, so we iterate.
   - repo: local
     hooks:
       - id: nargo-fmt
         name: nargo fmt --check
-        entry: bash -c 'command -v nargo >/dev/null 2>&1 && nargo fmt --check || echo "nargo not installed; skipping"'
+        entry: |
+          bash -c '
+            if ! command -v nargo >/dev/null 2>&1; then
+              echo "nargo not installed; skipping"
+              exit 0
+            fi
+            fail=0
+            while IFS= read -r toml; do
+              dir=$(dirname "$toml")
+              if ! (cd "$dir" && nargo fmt --check); then
+                fail=1
+              fi
+            done < <(git ls-files "*/Nargo.toml")
+            exit "$fail"
+          '
         language: system
         files: '\.nr$'
         pass_filenames: false
