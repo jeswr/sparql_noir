@@ -1,0 +1,10 @@
+# shellcheck options.
+# Reference: https://www.shellcheck.net/wiki/Ignore
+
+# Allow `source ./other.sh`-style includes without resolving them.
+external-sources=true
+
+# SC2002: "useless cat" — we keep `cat file | …` pipelines for readability.
+# SC2155: "declare and assign separately" — common in our scripts and noisy
+# at the file scale; the warning is style-only, not correctness.
+disable=SC2002,SC2155

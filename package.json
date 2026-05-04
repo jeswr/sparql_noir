@@ -53,6 +53,7 @@
     "test:circuits:run": "npx tsx test/run-circuit-tests.ts",
     "test:circuits:compile": "npx tsx test/run-circuit-tests.ts --compile-only",
     "test:parsing": "npx tsx test/test-sparql-parsing.ts",
+    "test:aggregates": "npx tsx test/test-aggregates.ts",
     "example:sign": "node dist/scripts/sign.js -i inputs/data/ -o temp/",
     "example:verify": "node dist/scripts/verify.js -i temp/data.json --signature-only",
     "example": "npm run example:sign && npm run example:verify",
@@ -65,7 +66,10 @@
     "benchmark:list": "npx tsx src/scripts/benchmarks/noir-benchmark.ts list-circuits",
     "benchmark:help": "npx tsx src/scripts/benchmarks/noir-benchmark.ts --help",
     "test:sparql10": "node ts.js",
-    "semantic-release": "semantic-release"
+    "test:conformance": "tsx test/conformance/run-w3c-sparql10.ts",
+    "semantic-release": "semantic-release",
+    "prebuild:tsc": "npm run bundle:noir-lib",
+    "pretest": "npm run bundle:noir-lib"
   },
   "keywords": [
     "sparql",
@@ -97,6 +101,7 @@
     "@zk-kit/eddsa-poseidon": "^1.1.0",
     "chalk": "^5.6.2",
     "commander": "^14.0.2",
+    "decimal.js": "^10.4.3",
     "n3": "^1.26.0",
     "rdf-dereference-store": "^1.4.0",
     "rdf-string-ttl": "^2.0.1",
