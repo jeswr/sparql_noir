@@ -17,7 +17,8 @@ import { Store, DataFactory as DF } from 'n3';
 import { stringQuadToQuad as rdfStringToQuad, termToString } from 'rdf-string-ttl';
 import type { Term, Quad, Literal } from '@rdfjs/types';
 import type { SignedData } from './sign.js';
-import { encodeString, encodeDatatypeIri, encodeNamedNode } from '../encode.js';
+import { encodeString, encodeDatatypeIri, encodeNamedNode, getTermEncodingString, runJson } from '../encode.js';
+import { buildPrefix3Inputs, type AbsentTermDescriptor, type PrefixNotExistsMeta } from './prove-prefix3.js';
 
 // --- Custom stringQuadToQuad that properly handles escape sequences ---
 
@@ -170,6 +171,13 @@ interface CircuitMetadata {
   hiddenInputs?: HiddenInput[];
   hidden_inputs?: HiddenInput[];
   variables: string[];
+  // Round-6 prefix-3 fields (`spec/prefix-tree-commitment.md` Sec.8.6).
+  prefixNotExists?: PrefixNotExistsMeta[];
+  prefix_not_exists?: PrefixNotExistsMeta[];
+  bgpPrefix3Length?: number;
+  bgp_prefix3_length?: number;
+  notExists?: unknown[];
+  not_exists?: unknown[];
 }
 
 interface HiddenInput {
@@ -177,6 +185,147 @@ interface HiddenInput {
   value?: [number, number] | TermJson;
   input?: { type: string; value: unknown };
   computedType?: string;
+}
+
+/**
+ * Convert an `@rdfjs/types::Term` into a plain object compatible with
+ * the {@link buildPrefix3Inputs} substitution path. The prefix-3
+ * helper doesn't depend on `@rdfjs/types`, so the binding values are
+ * passed as `{ termType, value, language?, datatype? }` objects.
+ */
+function termToPlainBinding(term: Term): { termType: string; value: string; language?: string; datatype?: { value: string } } {
+  if (term.termType === 'Literal') {
+    const lit = term as Literal;
+    const out: { termType: string; value: string; language?: string; datatype?: { value: string } } = {
+      termType: 'Literal',
+      value: lit.value,
+    };
+    if (lit.language) out.language = lit.language;
+    if (lit.datatype) out.datatype = { value: lit.datatype.value };
+    return out;
+  }
+  return { termType: term.termType, value: (term as { value: string }).value };
+}
+
+/**
+ * Encode an `absent_terms[j]` descriptor (from
+ * `metadata.prefixNotExists[i].absentTerms`) into the Field-string the
+ * Noir circuit's `hash3_sp_g(s, p, g)` call expects.
+ *
+ * - `static`: encode the ground term via the same `getTermEncodingString`
+ *   pipeline that the signer uses for tree leaves.
+ * - `variable`: look up the live binding's resolved RDF term and encode
+ *   it as above. Throws if the variable isn't in the binding (the
+ *   transform layer guarantees outer-bound variables substitute, but
+ *   defence-in-depth here surfaces a clearer error than a Noir trap).
+ * - `input`: the prefix-3 free-position case never lands here in
+ *   round-6 (the `Term::Input` lowering only fires for the matched
+ *   arm of an OPTIONAL collapse, not for `PrefixNonExistenceConstraint`),
+ *   but the helper handles it for symmetry: read the encoded term out
+ *   of `bgp[patternIdx].terms[position]`, which is already a Field
+ *   string.
+ */
+function encodeAbsentTerm(
+  descriptor: AbsentTermDescriptor,
+  binding: ReadonlyMap<string, { termType: string; value: string; language?: string; datatype?: { value: string } }>,
+  bgpTriples: ReadonlyArray<{ terms: string[] }>,
+): string {
+  if (descriptor.kind === 'static') {
+    const t = descriptor.term;
+    const rdfTerm = (() => {
+      switch (t.termType) {
+        case 'NamedNode':
+          return DF.namedNode(t.value!);
+        case 'Literal': {
+          const v = t.value!;
+          if (t.datatype && t.datatype.value && t.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string') {
+            return DF.literal(v, DF.namedNode(t.datatype.value));
+          }
+          if (t.language) {
+            return DF.literal(v, t.language);
+          }
+          return DF.literal(v);
+        }
+        case 'BlankNode':
+          return DF.blankNode(t.value!);
+        case 'DefaultGraph':
+          return DF.defaultGraph();
+        default:
+          throw new Error(`unsupported static term: ${t.termType}`);
+      }
+    })();
+    return getTermEncodingString(rdfTerm);
+  }
+  if (descriptor.kind === 'variable') {
+    const live = binding.get(descriptor.name);
+    if (!live) {
+      throw new Error(
+        `prefix-3 absent term references unbound variable ?${descriptor.name}; ` +
+        `the transform layer should have rejected this query`,
+      );
+    }
+    const rdfTerm = (() => {
+      switch (live.termType) {
+        case 'NamedNode':
+          return DF.namedNode(live.value);
+        case 'Literal': {
+          if (live.datatype && live.datatype.value && live.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string') {
+            return DF.literal(live.value, DF.namedNode(live.datatype.value));
+          }
+          if (live.language) {
+            return DF.literal(live.value, live.language);
+          }
+          return DF.literal(live.value);
+        }
+        case 'BlankNode':
+          return DF.blankNode(live.value);
+        case 'DefaultGraph':
+          return DF.defaultGraph();
+        default:
+          throw new Error(`unsupported binding term: ${live.termType}`);
+      }
+    })();
+    return getTermEncodingString(rdfTerm);
+  }
+  // descriptor.kind === 'input'
+  const triple = bgpTriples[descriptor.patternIdx];
+  if (!triple) {
+    throw new Error(`prefix-3 absent term references missing bgp[${descriptor.patternIdx}]`);
+  }
+  const term = triple.terms[descriptor.position];
+  if (term === undefined) {
+    throw new Error(
+      `prefix-3 absent term references bgp[${descriptor.patternIdx}].terms[${descriptor.position}] ` +
+      `but the triple has only ${triple.terms.length} terms`,
+    );
+  }
+  return term;
+}
+
+/**
+ * Build the round-3 sentinel inputs for the generated `main.nr`. The
+ * signer publishes `lowSentinelPath` / `highSentinelPath` etc. as
+ * top-level `signedData` fields (see `src/scripts/sign.ts`); this
+ * helper just wraps them in the `SentinelLeaf` slot shape.
+ *
+ * Returns `null` if any of the sentinel paths are missing -- in that
+ * case the caller skips wiring the sentinels (round-3 sentinel-aware
+ * circuits without a sentinel signer will fail at `nargo execute`,
+ * which is the correct behaviour: an old `signedData.json` doesn't
+ * carry sentinel paths and can't drive a round-3 NOT EXISTS proof).
+ */
+function buildRound3SentinelInputs(signedData: SignedData): { low_sentinel: { path: string[]; directions: boolean[] }; high_sentinel: { path: string[]; directions: boolean[] } } | null {
+  const lp = signedData.lowSentinelPath;
+  const ld = signedData.lowSentinelDirections;
+  const hp = signedData.highSentinelPath;
+  const hd = signedData.highSentinelDirections;
+  if (!lp || !ld || !hp || !hd) {
+    return null;
+  }
+  return {
+    low_sentinel: { path: lp, directions: ld },
+    high_sentinel: { path: hp, directions: hd },
+  };
 }
 
 // Helper function to parse datetime values in various formats
@@ -1180,8 +1329,34 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       continue;
     }
 
+    // Round-6 prefix-3 inputs (`spec/prefix-tree-commitment.md`
+    // Sec.8.6). Compute absent prefix hashes against the live
+    // binding, locate bracketing leaves, and pick the boundary
+    // case. `null` means the circuit doesn't reference the
+    // prefix-3 commitment, so we omit the inputs entirely.
+    const bgpTriples = tripleIndices.map(i => ({ terms: signedData!.triples[i] as string[] }));
+    const plainBinding = new Map<string, { termType: string; value: string; language?: string; datatype?: { value: string } }>();
+    for (const [k, v] of binding) plainBinding.set(k, termToPlainBinding(v));
+    let prefix3Inputs: ReturnType<typeof buildPrefix3Inputs> = null;
+    try {
+      prefix3Inputs = buildPrefix3Inputs(signedData!, metadata as unknown as Record<string, unknown>, plainBinding, bgpTriples, encodeAbsentTerm);
+    } catch (err) {
+      // Skip this binding if absent-prefix hash collides with a real
+      // dataset prefix (the constraint is unsatisfiable for this μ).
+      const msg = String((err as Error).message || err);
+      if (msg.includes('found absent prefix already in the dataset')) {
+        continue;
+      }
+      throw err;
+    }
+
+    // Round-3 sentinel inputs -- always wired when the signer
+    // published them, since the cost is negligible and any NOT
+    // EXISTS / OPTIONAL collapse circuit needs them.
+    const round3Sentinels = buildRound3SentinelInputs(signedData!);
+
     // Build circuit input
-    const baseInput = skipSigning ? {
+    const baseInput: Record<string, unknown> = skipSigning ? {
       // Simplified circuit: only BGP and variables
       bgp: tripleIndices.map(i => getTripleObject(i)),
       variables,
@@ -1197,10 +1372,33 @@ export async function generateProofs(options: ProveOptions): Promise<ProveResult
       variables,
     };
 
+    // Round-6 two-root signer ABI: when the circuit declares
+    // `roots: [Root; 2]` (any prefix-3 dispatch present), append
+    // `(rootPrefix3, signaturePrefix3)`.
+    if (!skipSigning && prefix3Inputs && signedData!.rootPrefix3 && signedData!.rootPrefix3 !== '0x0') {
+      (baseInput.roots as unknown[]).push({
+        value: signedData!.rootPrefix3,
+        signature: signedData!.signaturePrefix3,
+        keyIndex: 0,
+      });
+    }
+
     // Add hidden inputs if present
-    const circuitInput = hiddenValues.length > 0 
+    let circuitInput: Record<string, unknown> = hiddenValues.length > 0
       ? { ...baseInput, hidden: hiddenValues }
       : baseInput;
+    if (!skipSigning && round3Sentinels && metadata && (metadata.notExists || metadata.not_exists || prefix3Inputs)) {
+      circuitInput = { ...circuitInput, low_sentinel: round3Sentinels.low_sentinel, high_sentinel: round3Sentinels.high_sentinel };
+    }
+    if (!skipSigning && prefix3Inputs) {
+      circuitInput = {
+        ...circuitInput,
+        bgp_prefix3: prefix3Inputs.bgp_prefix3,
+        low_sentinel_3: prefix3Inputs.low_sentinel_3,
+        high_sentinel_3: prefix3Inputs.high_sentinel_3,
+        boundary_cases_prefix3: prefix3Inputs.boundary_cases_prefix3,
+      };
+    }
 
     bindingInputs.push({ bindingIdx, circuitInput });
   }
@@ -1571,7 +1769,27 @@ export async function generateProofsInMemory(options: ProveOptionsInMemory): Pro
     const hiddenValues = computeHiddenInputs(hiddenInputs, binding);
     if (hiddenValues === null) continue;
 
-    const baseInput = skipSigning ? {
+    // Round-6 prefix-3 inputs (`spec/prefix-tree-commitment.md`
+    // Sec.8.6). Same logic as the file-based path -- substitute,
+    // hash, bracket. Skip the binding if the absent prefix is
+    // present in the dataset.
+    const bgpTriples = tripleIndices.map(i => ({ terms: signedData.triples[i] as string[] }));
+    const plainBinding = new Map<string, { termType: string; value: string; language?: string; datatype?: { value: string } }>();
+    for (const [k, v] of binding) plainBinding.set(k, termToPlainBinding(v));
+    let prefix3Inputs: ReturnType<typeof buildPrefix3Inputs> = null;
+    try {
+      prefix3Inputs = buildPrefix3Inputs(signedData, circuitMetadata as unknown as Record<string, unknown>, plainBinding, bgpTriples, encodeAbsentTerm);
+    } catch (err) {
+      const msg = String((err as Error).message || err);
+      if (msg.includes('found absent prefix already in the dataset')) {
+        continue;
+      }
+      throw err;
+    }
+
+    const round3Sentinels = buildRound3SentinelInputs(signedData);
+
+    const baseInput: Record<string, unknown> = skipSigning ? {
       bgp: tripleIndices.map(i => getTripleObject(i)),
       variables,
     } : {
@@ -1585,9 +1803,29 @@ export async function generateProofsInMemory(options: ProveOptionsInMemory): Pro
       variables,
     };
 
-    const circuitInput = hiddenValues.length > 0
+    if (!skipSigning && prefix3Inputs && signedData.rootPrefix3 && signedData.rootPrefix3 !== '0x0') {
+      (baseInput.roots as unknown[]).push({
+        value: signedData.rootPrefix3,
+        signature: signedData.signaturePrefix3,
+        keyIndex: 0,
+      });
+    }
+
+    let circuitInput: Record<string, unknown> = hiddenValues.length > 0
       ? { ...baseInput, hidden: hiddenValues }
       : baseInput;
+    if (!skipSigning && round3Sentinels && circuitMetadata && (circuitMetadata.notExists || circuitMetadata.not_exists || prefix3Inputs)) {
+      circuitInput = { ...circuitInput, low_sentinel: round3Sentinels.low_sentinel, high_sentinel: round3Sentinels.high_sentinel };
+    }
+    if (!skipSigning && prefix3Inputs) {
+      circuitInput = {
+        ...circuitInput,
+        bgp_prefix3: prefix3Inputs.bgp_prefix3,
+        low_sentinel_3: prefix3Inputs.low_sentinel_3,
+        high_sentinel_3: prefix3Inputs.high_sentinel_3,
+        boundary_cases_prefix3: prefix3Inputs.boundary_cases_prefix3,
+      };
+    }
 
     bindingInputs.push({ bindingIdx, circuitInput });
   }

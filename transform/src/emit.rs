@@ -19,19 +19,43 @@ use crate::{Assertion, OptionalBlock, PatternInfo, QueryInfo, Term, TransformOpt
 const MAIN_TEMPLATE: &str = include_str!("../template/main-verify.template.nr");
 const MAIN_TEMPLATE_SIMPLE: &str = include_str!("../template/main-simple.template.nr");
 
+/// What the per-circuit emitter returns. Carries the `sparql.nr`
+/// content alongside flags / sizes the `lib.rs` orchestration layer
+/// needs to fill the `main.nr` template (sentinel scaffolding, prefix-3
+/// public inputs, etc.).
+pub(crate) struct EmitResult {
+    pub sparql_nr: String,
+    pub hidden: Vec<serde_json::Value>,
+    pub has_hidden: bool,
+    pub needs_xpath: bool,
+    pub has_not_exists: bool,
+    /// Round-5 prefix-3 commitment is in use (any prefix-3 NOT EXISTS
+    /// or any prefix-3 OPTIONAL collapse).
+    pub has_prefix3: bool,
+    /// Total number of `bgp_prefix3` slots required.
+    pub bgp_prefix3_len: usize,
+    /// Total number of prefix-3 boundary-case dispatch tags
+    /// (`BoundaryCasesPrefix3` length).
+    pub num_prefix3_dispatches: usize,
+}
+
 /// True if any part of the pattern tree carries a non-membership
-/// obligation — `NonExistenceConstraint` (NOT EXISTS / MINUS) or
-/// `EasyOptional` (collapsed-OPTIONAL unmatched arm). Both depend on
-/// the sorted-Merkle commitment that skip-signing mode bypasses, so
-/// either disqualifies a query from running in skip-signing mode.
+/// obligation — `NonExistenceConstraint` (NOT EXISTS / MINUS),
+/// `PrefixNonExistenceConstraint` (round-5 prefix-tree NOT EXISTS), or
+/// `EasyOptional` (collapsed-OPTIONAL unmatched arm). All three depend
+/// on a sorted-Merkle commitment that skip-signing mode bypasses, so
+/// any of them disqualifies a query from running in skip-signing mode.
 ///
 /// The lowering currently rejects NOT EXISTS inside UNION branches and
 /// OPTIONAL right-sides (per round-3 scope), so in practice only the
-/// top-level `pat.not_exists` / `pat.easy_optionals` matter; the
-/// recursive walk is a defence-in-depth check should those rejections
-/// ever loosen without an emit-side update.
+/// top-level constraints matter; the recursive walk is a defence-in-
+/// depth check should those rejections ever loosen without an
+/// emit-side update.
 fn pattern_has_not_exists(pat: &PatternInfo) -> bool {
-    if !pat.not_exists.is_empty() || !pat.easy_optionals.is_empty() {
+    if !pat.not_exists.is_empty()
+        || !pat.prefix_not_exists.is_empty()
+        || !pat.easy_optionals.is_empty()
+    {
         return true;
     }
     if let Some(branches) = &pat.union_branches {
@@ -42,6 +66,45 @@ fn pattern_has_not_exists(pat: &PatternInfo) -> bool {
         }
     }
     false
+}
+
+/// True iff the query exercises the round-4/5 prefix-3 commitment --
+/// any prefix-3 NOT EXISTS or any prefix-3 OPTIONAL collapse. Pulls in
+/// the `roots[1]` / `low_sentinel_3` / `high_sentinel_3` / `bgp_prefix3`
+/// scaffolding in `main.nr` and the `BoundaryCasesPrefix3` public input.
+fn pattern_uses_prefix3(pat: &PatternInfo) -> bool {
+    if !pat.prefix_not_exists.is_empty() {
+        return true;
+    }
+    for eo in &pat.easy_optionals {
+        if matches!(eo.prefix_kind, Some(crate::ir::PrefixKind::Prefix3SpG)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Total number of prefix-3 BGP slots required by `pat` -- two per
+/// prefix-3 NOT EXISTS constraint and two per prefix-3 OPTIONAL
+/// collapse. Drives the size of the `bgp_prefix3` array in `main.nr`
+/// and the `BoundaryCasesPrefix3` length.
+fn prefix3_slot_count(pat: &PatternInfo) -> usize {
+    pat.bgp_prefix3_len
+}
+
+/// Number of independent prefix-3 boundary-case dispatches the
+/// generated circuit emits -- one per `PrefixNonExistenceConstraint`.
+/// Prefix-3 OPTIONAL collapses use a per-EO three-arm dispatch in the
+/// boolean disjunction and have their own `boundary_cases_prefix3`
+/// slot allocated separately (see emit logic below).
+fn prefix3_constraint_count(pat: &PatternInfo) -> usize {
+    let mut n = pat.prefix_not_exists.len();
+    for eo in &pat.easy_optionals {
+        if matches!(eo.prefix_kind, Some(crate::ir::PrefixKind::Prefix3SpG)) {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Recursively collect all optional blocks from a pattern, flattening nested optionals.
@@ -71,7 +134,7 @@ pub(crate) fn generate_circuit_for_optional_combination(
     all_optionals: &[OptionalBlock],
     matched_indices: &[usize],
     options: &TransformOptions,
-) -> Result<(String, Vec<serde_json::Value>, bool, bool, bool), String> {
+) -> Result<EmitResult, String> {
     let mut combined = PatternInfo {
         patterns: base_info.pattern.patterns.clone(),
         bindings: base_info.pattern.bindings.clone(),
@@ -80,6 +143,8 @@ pub(crate) fn generate_circuit_for_optional_combination(
         union_branches: base_info.pattern.union_branches.clone(),
         optional_blocks: Vec::new(),
         not_exists: base_info.pattern.not_exists.clone(),
+        prefix_not_exists: base_info.pattern.prefix_not_exists.clone(),
+        bgp_prefix3_len: base_info.pattern.bgp_prefix3_len,
         easy_optionals: base_info.pattern.easy_optionals.clone(),
     };
 
@@ -138,13 +203,13 @@ pub(crate) fn generate_circuit_for_optional_combination(
 }
 
 /// Generate sparql.nr content from a `QueryInfo`.
-/// Returns (sparql_nr content, hidden inputs, has_hidden, needs_xpath,
-/// has_not_exists). `has_not_exists` lets the caller pull in the sentinel
-/// inclusion calls + boundary-cases public input in `main.nr`.
+/// Returns an `EmitResult` carrying the rendered file plus the flags
+/// the orchestrator needs to fill the `main.nr` template (sentinel
+/// scaffolding, prefix-3 public inputs, etc.).
 pub(crate) fn generate_sparql_nr_from_query_info(
     info: &QueryInfo,
     options: &TransformOptions,
-) -> Result<(String, Vec<serde_json::Value>, bool, bool, bool), String> {
+) -> Result<EmitResult, String> {
     if options.skip_signing && pattern_has_not_exists(&info.pattern) {
         return Err(
             "NOT EXISTS / MINUS / collapsed-OPTIONAL queries cannot run in skip-signing mode \
@@ -299,21 +364,70 @@ pub(crate) fn generate_sparql_nr_from_query_info(
     let num_not_exists = info.pattern.not_exists.len();
     let has_not_exists = num_not_exists > 0;
 
+    // Round-5 prefix-3 NOT EXISTS dispatches
+    // (`spec/prefix-tree-commitment.md` Sec.8). Same three-arm
+    // boundary-case dispatch as round-3, but indexed against
+    // `bgp_prefix3` and `roots[1]` instead of `bgp` and `roots[0]`.
+    // The `boundary_cases_prefix3[i]` public input picks the arm.
+    let mut prefix_not_exists_calls: Vec<String> = Vec::new();
+    for (i, pne) in info.pattern.prefix_not_exists.iter().enumerate() {
+        let crate::ir::PrefixKind::Prefix3SpG = pne.prefix_kind;
+        let positions = pne.prefix_kind.fixed_positions();
+        let absent = format!(
+            "utils::prefix3::hash3_sp_g({}, {}, {})",
+            serialize_term(&pne.absent_terms[positions[0]], info, &binding_map),
+            serialize_term(&pne.absent_terms[positions[1]], info, &binding_map),
+            serialize_term(&pne.absent_terms[positions[2]], info, &binding_map),
+        );
+        let dispatch = format!(
+            "let absent_prefix_{idx} = {absent};\n\
+             \x20 if boundary_cases_prefix3[{idx}] == 0 {{\n\
+             \x20   utils::prefix3::verify_non_membership_prefix3_low_sentinel_no_inclusion(low_sentinel_3, bgp_prefix3[{right}], absent_prefix_{idx});\n\
+             \x20 }} else if boundary_cases_prefix3[{idx}] == 1 {{\n\
+             \x20   utils::prefix3::verify_non_membership_prefix3_no_inclusion(bgp_prefix3[{left}], bgp_prefix3[{right}], absent_prefix_{idx});\n\
+             \x20 }} else if boundary_cases_prefix3[{idx}] == 2 {{\n\
+             \x20   utils::prefix3::verify_non_membership_prefix3_high_sentinel_no_inclusion(bgp_prefix3[{left}], high_sentinel_3, absent_prefix_{idx});\n\
+             \x20 }} else {{\n\
+             \x20   assert(false, \"non-membership prefix3: boundary_cases_prefix3[{idx}] must be 0 (Lower), 1 (Middle), or 2 (Upper)\");\n\
+             \x20 }}",
+            idx = i,
+            absent = absent,
+            left = pne.bracket_left_idx,
+            right = pne.bracket_right_idx,
+        );
+        prefix_not_exists_calls.push(dispatch);
+    }
+
+    let num_prefix3_not_exists = info.pattern.prefix_not_exists.len();
+
     // Easy-case OPTIONAL disjunctions (round 3 follow-up — see
-    // `spec/exists.md` §4.1). Each `EasyOptional` emits one
-    // `assert(matched | unmatched)` line: the matched arm asserts that
-    // the substituted ground inner triple lives at `bgp[matched_idx]`;
-    // the unmatched arm calls the boolean variant of
-    // `verify_non_membership` over the bracket leaves. Both arms keep
-    // the projected solution set unchanged because the easy case has
-    // no inner-only variables.
+    // `spec/exists.md` §4.1; round-5 prefix-3 extension --
+    // `spec/prefix-tree-commitment.md` Sec.8). Each `EasyOptional`
+    // emits one `assert(matched | unmatched)` line: the matched arm
+    // asserts that the substituted ground inner triple lives at
+    // `bgp[matched_idx]` (skipping the inner-only position for
+    // prefix-tree collapses); the unmatched arm calls the boolean
+    // variant of `verify_non_membership` over the bracket leaves
+    // (round-3 against `bgp`/`roots[0]`, prefix-3 against
+    // `bgp_prefix3`/`roots[1]`). Both arms keep the projected
+    // solution set unchanged because the inner-only variable, when
+    // present, is never projected.
     let mut easy_optional_lines: Vec<String> = Vec::new();
+    // Track how many prefix-3 EasyOptional dispatches we've emitted so
+    // far -- they share `boundary_cases_prefix3[]` with
+    // `prefix_not_exists`, allocated AFTER all NOT EXISTS dispatches.
+    let mut prefix3_eo_idx = num_prefix3_not_exists;
     for eo in &info.pattern.easy_optionals {
         // Matched arm: per-position equalities pinning each of the
         // four `bgp[matched_idx].terms[j]` slots to the substituted
-        // inner term. Reuses `serialize_term` exactly as the
-        // `NonExistenceConstraint` lowering does.
+        // inner term. For prefix-3 collapses, the inner-only position
+        // is unconstrained -- the matched arm doesn't pin it.
+        let free_position = eo
+            .prefix_kind
+            .map(|k| k.free_position())
+            .unwrap_or(usize::MAX);
         let matched_clauses: Vec<String> = (0..4)
+            .filter(|j| *j != free_position)
             .map(|j| {
                 format!(
                     "({} == bgp[{}].terms[{}])",
@@ -325,23 +439,61 @@ pub(crate) fn generate_sparql_nr_from_query_info(
             .collect();
         let matched_arm = matched_clauses.join(" & ");
 
-        // Unmatched arm: the boolean variant of
-        // `verify_non_membership_no_inclusion`. Computes the absent
-        // hash inline from the same `inner_terms`.
-        let absent = format!(
-            "consts::hash4([{}, {}, {}, {}])",
-            serialize_term(&eo.inner_terms[0], info, &binding_map),
-            serialize_term(&eo.inner_terms[1], info, &binding_map),
-            serialize_term(&eo.inner_terms[2], info, &binding_map),
-            serialize_term(&eo.inner_terms[3], info, &binding_map),
-        );
-        let unmatched_arm = format!(
-            "utils::verify_non_membership_no_inclusion_check(bgp[{}], bgp[{}], {})",
-            eo.bracket_left_idx, eo.bracket_right_idx, absent
-        );
+        // Unmatched arm: dispatch on `prefix_kind`.
+        let unmatched_arm = match eo.prefix_kind {
+            None => {
+                let absent = format!(
+                    "consts::hash4([{}, {}, {}, {}])",
+                    serialize_term(&eo.inner_terms[0], info, &binding_map),
+                    serialize_term(&eo.inner_terms[1], info, &binding_map),
+                    serialize_term(&eo.inner_terms[2], info, &binding_map),
+                    serialize_term(&eo.inner_terms[3], info, &binding_map),
+                );
+                format!(
+                    "utils::verify_non_membership_no_inclusion_check(bgp[{}], bgp[{}], {})",
+                    eo.bracket_left_idx, eo.bracket_right_idx, absent
+                )
+            }
+            Some(crate::ir::PrefixKind::Prefix3SpG) => {
+                let positions = crate::ir::PrefixKind::Prefix3SpG.fixed_positions();
+                let absent = format!(
+                    "utils::prefix3::hash3_sp_g({}, {}, {})",
+                    serialize_term(&eo.inner_terms[positions[0]], info, &binding_map),
+                    serialize_term(&eo.inner_terms[positions[1]], info, &binding_map),
+                    serialize_term(&eo.inner_terms[positions[2]], info, &binding_map),
+                );
+                // Three boundary-case arms folded into a single
+                // boolean expression: the prover supplies
+                // `boundary_cases_prefix3[i]` (i = next slot after
+                // all NOT EXISTS dispatches) and the matching arm
+                // returns `true` iff the bracketing holds. The
+                // out-of-range tag returns `false` so the
+                // disjunction with the matched arm enforces validity.
+                let arm = format!(
+                    "((boundary_cases_prefix3[{idx}] == 0) & utils::prefix3::verify_non_membership_prefix3_low_sentinel_no_inclusion_check(low_sentinel_3, bgp_prefix3[{right}], {absent})) \
+                     | ((boundary_cases_prefix3[{idx}] == 1) & utils::prefix3::verify_non_membership_prefix3_no_inclusion_check(bgp_prefix3[{left}], bgp_prefix3[{right}], {absent})) \
+                     | ((boundary_cases_prefix3[{idx}] == 2) & utils::prefix3::verify_non_membership_prefix3_high_sentinel_no_inclusion_check(bgp_prefix3[{left}], high_sentinel_3, {absent}))",
+                    idx = prefix3_eo_idx,
+                    left = eo.bracket_left_idx,
+                    right = eo.bracket_right_idx,
+                    absent = absent,
+                );
+                prefix3_eo_idx += 1;
+                arm
+            }
+        };
 
-        easy_optional_lines.push(format!("({}) | {}", matched_arm, unmatched_arm));
+        easy_optional_lines.push(format!("({}) | ({})", matched_arm, unmatched_arm));
     }
+
+    let total_prefix3_constraints = prefix3_eo_idx;
+    let has_prefix3 = pattern_uses_prefix3(&info.pattern);
+    let bgp_prefix3_len = prefix3_slot_count(&info.pattern);
+    debug_assert_eq!(
+        total_prefix3_constraints,
+        prefix3_constraint_count(&info.pattern),
+        "emit / IR disagree on prefix-3 dispatch count"
+    );
 
     let mut sparql_nr = String::new();
     sparql_nr.push_str("// Generated by sparql_noir transform\n");
@@ -351,8 +503,11 @@ pub(crate) fn generate_sparql_nr_from_query_info(
     } else {
         sparql_nr.push_str("use dep::utils;\n");
         sparql_nr.push_str("use dep::types::Triple;\n");
-        if has_not_exists {
+        if has_not_exists || has_prefix3 {
             sparql_nr.push_str("use dep::types::SentinelLeaf;\n");
+        }
+        if has_prefix3 {
+            sparql_nr.push_str("use dep::types::PrefixTriple3;\n");
         }
     }
 
@@ -406,6 +561,22 @@ pub(crate) fn generate_sparql_nr_from_query_info(
             num_not_exists
         ));
     }
+    if has_prefix3 {
+        // Round-5 prefix-3 type aliases. `BgpPrefix3` is the parallel
+        // slot array for prefix-tree bracket leaves (two per
+        // PrefixNonExistenceConstraint, two per prefix-3 EasyOptional).
+        // `BoundaryCasesPrefix3` is the per-dispatch tag array, one
+        // entry per prefix-3 NOT EXISTS dispatch followed by one per
+        // prefix-3 OPTIONAL collapse.
+        sparql_nr.push_str(&format!(
+            "pub(crate) type BgpPrefix3 = [PrefixTriple3; {}];\n",
+            bgp_prefix3_len
+        ));
+        sparql_nr.push_str(&format!(
+            "pub(crate) type BoundaryCasesPrefix3 = [Field; {}];\n",
+            total_prefix3_constraints
+        ));
+    }
 
     let mut params = String::from("bgp: BGP, variables: Variables");
     if has_hidden {
@@ -413,6 +584,9 @@ pub(crate) fn generate_sparql_nr_from_query_info(
     }
     if has_not_exists {
         params.push_str(", low_sentinel: SentinelLeaf, high_sentinel: SentinelLeaf, boundary_cases: BoundaryCases");
+    }
+    if has_prefix3 {
+        params.push_str(", bgp_prefix3: BgpPrefix3, low_sentinel_3: SentinelLeaf, high_sentinel_3: SentinelLeaf, boundary_cases_prefix3: BoundaryCasesPrefix3");
     }
     sparql_nr.push_str(&format!(
         "pub(crate) fn checkBinding({}) {{\n",
@@ -445,25 +619,42 @@ pub(crate) fn generate_sparql_nr_from_query_info(
     for call in &not_exists_calls {
         sparql_nr.push_str(&format!("  {};\n", call));
     }
+    for call in &prefix_not_exists_calls {
+        sparql_nr.push_str(&format!("  {};\n", call));
+    }
     for line in &easy_optional_lines {
         sparql_nr.push_str(&format!("  assert({});\n", line));
     }
     sparql_nr.push_str("}\n");
 
-    Ok((sparql_nr, hidden, has_hidden, needs_xpath, has_not_exists))
+    Ok(EmitResult {
+        sparql_nr,
+        hidden,
+        has_hidden,
+        needs_xpath,
+        has_not_exists,
+        has_prefix3,
+        bgp_prefix3_len,
+        num_prefix3_dispatches: total_prefix3_constraints,
+    })
 }
 
-/// Substitute the `{{h0}}` / `{{h1}}` / `{{h2}}` (Hidden inputs) and
-/// `{{n0}}` / `{{n1}}` / `{{n2}}` / `{{n3}}` (NOT EXISTS / sentinel
-/// scaffolding) placeholders in the embedded `main.nr` template. The
-/// signed and skip-signing variants share placeholder syntax, so this
-/// works for both -- though `{{n*}}` placeholders only appear in the
-/// signed template (skip-signing rejects NOT EXISTS upstream).
+/// Substitute the `{{h0}}` / `{{h1}}` / `{{h2}}` (Hidden inputs),
+/// `{{n0}}` / `{{n1}}` / `{{n2}}` / `{{n3}}` / `{{n4}}` (NOT EXISTS /
+/// round-3 sentinel scaffolding), and `{{p0}}` / `{{p1}}` / `{{p2}}` /
+/// `{{p3}}` / `{{p4}}` (round-5 prefix-3 scaffolding) placeholders in
+/// the embedded `main.nr` template. The signed and skip-signing
+/// variants share placeholder syntax; `{{n*}}` / `{{p*}}` placeholders
+/// only appear in the signed template (skip-signing rejects
+/// non-membership upstream).
 pub(crate) fn fill_main_nr_template(
     skip_signing: bool,
     has_hidden: bool,
     has_not_exists: bool,
     num_not_exists: usize,
+    has_prefix3: bool,
+    bgp_prefix3_len: usize,
+    num_prefix3_dispatches: usize,
 ) -> String {
     // Consistency check: `has_not_exists` is the boolean view of
     // `num_not_exists > 0`. A mismatch means a caller has thrown the
@@ -476,6 +667,14 @@ pub(crate) fn fill_main_nr_template(
         "fill_main_nr_template: has_not_exists ({}) disagrees with num_not_exists ({})",
         has_not_exists,
         num_not_exists,
+    );
+    debug_assert_eq!(
+        has_prefix3,
+        bgp_prefix3_len > 0 || num_prefix3_dispatches > 0,
+        "fill_main_nr_template: has_prefix3 ({}) disagrees with bgp_prefix3_len ({}) / num_prefix3_dispatches ({})",
+        has_prefix3,
+        bgp_prefix3_len,
+        num_prefix3_dispatches,
     );
     let template = if skip_signing {
         MAIN_TEMPLATE_SIMPLE
@@ -524,11 +723,6 @@ pub(crate) fn fill_main_nr_template(
                 "{{n4}}",
                 ", low_sentinel, high_sentinel, boundary_cases",
             );
-        // num_not_exists is consumed by the debug_assert above; the
-        // circuit's BoundaryCases-array length comes from the
-        // generated `noir/sparql/src/lib.nr` `pub type BoundaryCases =
-        // [u8; N]` declaration, which the metadata writer keeps in
-        // sync with this count.
     } else {
         main_nr = main_nr
             .replace("{{n0}}", "")
@@ -536,6 +730,62 @@ pub(crate) fn fill_main_nr_template(
             .replace("{{n2}}", "")
             .replace("{{n3}}", "")
             .replace("{{n4}}", "");
+    }
+    if has_prefix3 {
+        // Round-5 prefix-3 commitment scaffolding -- two-root signer
+        // ABI. `roots[1]` is the prefix-3 sorted Merkle root,
+        // committed alongside `roots[0]` (leaf-hash sorted) by the
+        // signer. The prover supplies `low_sentinel_3` /
+        // `high_sentinel_3` / `bgp_prefix3` and the per-dispatch
+        // `boundary_cases_prefix3` tag. See
+        // `spec/prefix-tree-commitment.md` Sec.8.
+        //
+        // The `SentinelLeaf` type and sentinel inclusion functions are
+        // imported by `{{n2}}` when round-3 NOT EXISTS is also present;
+        // otherwise we add a `prefix3-only` import block here so the
+        // generated `main.nr` compiles even when only the round-5
+        // dispatch fires.
+        let prefix3_only_imports = if has_not_exists {
+            // Already imported by the round-3 sentinel block.
+            "use dep::utils::prefix3::verify_inclusion_prefix3;\n"
+        } else {
+            "use dep::types::SentinelLeaf;\n\
+             use dep::utils::{verify_low_sentinel_inclusion, verify_high_sentinel_inclusion};\n\
+             use dep::utils::prefix3::verify_inclusion_prefix3;\n\n"
+        };
+        main_nr = main_nr
+            .replace("{{p0}}", ", BgpPrefix3, BoundaryCasesPrefix3")
+            .replace(
+                "{{p1}}",
+                ",\n    bgp_prefix3: BgpPrefix3,\n    low_sentinel_3: SentinelLeaf,\n    high_sentinel_3: SentinelLeaf,\n    boundary_cases_prefix3: pub BoundaryCasesPrefix3",
+            )
+            .replace("{{p2}}", prefix3_only_imports)
+            .replace(
+                "{{p3}}",
+                "    // Prefix-3 sorted-tree sentinel inclusion + bracket\n\
+                     \x20   // inclusion checks against `roots[1]`. See\n\
+                     \x20   // `spec/prefix-tree-commitment.md` Sec.8.\n\
+                     \x20   verify_low_sentinel_inclusion(low_sentinel_3, roots[1].value);\n\
+                     \x20   verify_high_sentinel_inclusion(high_sentinel_3, roots[1].value);\n\
+                     \x20   for ptriple in bgp_prefix3 {\n\
+                     \x20       verify_inclusion_prefix3(ptriple, roots[1].value);\n\
+                     \x20   }\n\n",
+            )
+            .replace(
+                "{{p4}}",
+                ", bgp_prefix3, low_sentinel_3, high_sentinel_3, boundary_cases_prefix3",
+            )
+            .replace("{{r0}}", "Root; 2")
+            .replace("{{r1}}", "0..2");
+    } else {
+        main_nr = main_nr
+            .replace("{{p0}}", "")
+            .replace("{{p1}}", "")
+            .replace("{{p2}}", "")
+            .replace("{{p3}}", "")
+            .replace("{{p4}}", "")
+            .replace("{{r0}}", "Root; 1")
+            .replace("{{r1}}", "0..1");
     }
     main_nr
 }

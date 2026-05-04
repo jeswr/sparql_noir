@@ -258,10 +258,27 @@ fn shift_pattern_inputs(info: &mut PatternInfo, offset: usize) {
             }
         }
     }
+    // Prefix-tree non-existence brackets index into a parallel slot
+    // array (`bgp_prefix3`), not `bgp`, so the BGP-input offset
+    // doesn't shift those indices. The `absent_terms` array however
+    // can carry `Term::Input(i, j)` references back into `bgp` (e.g.
+    // outer-bound variable resolution); shift those.
+    for pne in &mut info.prefix_not_exists {
+        for term in &mut pne.absent_terms {
+            if let Term::Input(i, j) = term {
+                *term = Term::Input(*i + offset, *j);
+            }
+        }
+    }
     for eo in &mut info.easy_optionals {
         eo.matched_idx += offset;
-        eo.bracket_left_idx += offset;
-        eo.bracket_right_idx += offset;
+        // Bracket indices live in `bgp` for round-3 collapses (None)
+        // and in the per-kind prefix slot array for prefix-tree
+        // collapses. Only the round-3 case shifts on a BGP offset.
+        if eo.prefix_kind.is_none() {
+            eo.bracket_left_idx += offset;
+            eo.bracket_right_idx += offset;
+        }
         for term in &mut eo.inner_terms {
             if let Term::Input(i, j) = term {
                 *term = Term::Input(*i + offset, *j);
@@ -311,8 +328,11 @@ fn join_pattern_infos(
             merged.optional_blocks.extend(right.optional_blocks);
             merged.not_exists.extend(left.not_exists);
             merged.not_exists.extend(right.not_exists);
-            merged.easy_optionals.extend(left.easy_optionals);
-            merged.easy_optionals.extend(right.easy_optionals);
+            // prefix-3 slot allocation: append left's slots first
+            // (shift offset = 0), then right's (shift offset =
+            // left.bgp_prefix3_len).
+            merge_shift_prefix3(&mut merged, left.prefix_not_exists, left.easy_optionals, left.bgp_prefix3_len);
+            merge_shift_prefix3(&mut merged, right.prefix_not_exists, right.easy_optionals, right.bgp_prefix3_len);
             Ok(merged)
         }
         (true, false) => {
@@ -376,17 +396,51 @@ fn join_pattern_infos(
                 union_branches: Some(combined),
                 optional_blocks: Vec::new(),
                 not_exists: Vec::new(),
+                prefix_not_exists: Vec::new(),
+                bgp_prefix3_len: 0,
                 easy_optionals: Vec::new(),
             };
             merged.optional_blocks.extend(left.optional_blocks);
             merged.optional_blocks.extend(right.optional_blocks);
             merged.not_exists.extend(left.not_exists);
             merged.not_exists.extend(right.not_exists);
-            merged.easy_optionals.extend(left.easy_optionals);
-            merged.easy_optionals.extend(right.easy_optionals);
+            merge_shift_prefix3(&mut merged, left.prefix_not_exists, left.easy_optionals, left.bgp_prefix3_len);
+            merge_shift_prefix3(&mut merged, right.prefix_not_exists, right.easy_optionals, right.bgp_prefix3_len);
             Ok(merged)
         }
     }
+}
+
+/// Append a "right" `PatternInfo`'s prefix-3 obligations to a `merged`
+/// `PatternInfo`, shifting all prefix-3 bracket indices by the offset
+/// `merged.bgp_prefix3_len` (the slot count contributed by the "left"
+/// side). The caller is expected to set `merged.bgp_prefix3_len` to
+/// `left.bgp_prefix3_len + right.bgp_prefix3_len` after both calls.
+///
+/// Invariant: `bgp_prefix3_len` is the total number of allocated
+/// prefix-3 slots in a `PatternInfo` -- two per `PrefixNonExistenceConstraint`
+/// and two per prefix-3 `EasyOptional`. Allocation is bumped at the
+/// site of construction (lowering layer); merging only shifts.
+fn merge_shift_prefix3(
+    merged: &mut PatternInfo,
+    incoming_pne: Vec<crate::ir::PrefixNonExistenceConstraint>,
+    incoming_eo: Vec<crate::ir::EasyOptional>,
+    incoming_len: usize,
+) {
+    let offset = merged.bgp_prefix3_len;
+    for mut pne in incoming_pne {
+        pne.bracket_left_idx += offset;
+        pne.bracket_right_idx += offset;
+        merged.prefix_not_exists.push(pne);
+    }
+    for mut eo in incoming_eo {
+        if eo.prefix_kind.is_some() {
+            eo.bracket_left_idx += offset;
+            eo.bracket_right_idx += offset;
+        }
+        merged.easy_optionals.push(eo);
+    }
+    merged.bgp_prefix3_len += incoming_len;
 }
 
 /// Whether the `with_branches` patterns or the `plain` patterns
@@ -453,6 +507,8 @@ fn distribute_into_branches(
         union_branches: Some(combined),
         optional_blocks: Vec::new(),
         not_exists: Vec::new(),
+        prefix_not_exists: Vec::new(),
+        bgp_prefix3_len: 0,
         easy_optionals: Vec::new(),
     };
     // Optionals and non-existence obligations are top-level concerns —
@@ -461,8 +517,18 @@ fn distribute_into_branches(
     merged.optional_blocks.extend(plain.optional_blocks);
     merged.not_exists.extend(with_branches.not_exists);
     merged.not_exists.extend(plain.not_exists);
-    merged.easy_optionals.extend(with_branches.easy_optionals);
-    merged.easy_optionals.extend(plain.easy_optionals);
+    merge_shift_prefix3(
+        &mut merged,
+        with_branches.prefix_not_exists,
+        with_branches.easy_optionals,
+        with_branches.bgp_prefix3_len,
+    );
+    merge_shift_prefix3(
+        &mut merged,
+        plain.prefix_not_exists,
+        plain.easy_optionals,
+        plain.bgp_prefix3_len,
+    );
     merged
 }
 
@@ -697,6 +763,39 @@ fn lower_exists_in_expression(
     }
 }
 
+/// Detect which prefix-tree commitment can witness a NOT EXISTS over a
+/// single-triple inner pattern with one inner-only variable. Round 5
+/// ships only the `Prefix3SpG` variant -- inner-only `o` -- so this
+/// returns `Some(Prefix3SpG)` iff exactly that position is unbound.
+///
+/// Returns `None` for any other inner-only shape; callers reject those
+/// with a pointer to the outstanding prefix variants.
+fn detect_prefix_kind(
+    inner_pattern: &ContextualizedTriple,
+    outer_bound: &std::collections::BTreeSet<String>,
+) -> Option<crate::ir::PrefixKind> {
+    let s_free = matches!(
+        &inner_pattern.pattern.subject,
+        TermPattern::Variable(v) if !outer_bound.contains(v.as_str())
+    );
+    let p_free = matches!(
+        &inner_pattern.pattern.predicate,
+        NamedNodePattern::Variable(v) if !outer_bound.contains(v.as_str())
+    );
+    let o_free = matches!(
+        &inner_pattern.pattern.object,
+        TermPattern::Variable(v) if !outer_bound.contains(v.as_str())
+    );
+    let g_free = matches!(
+        &inner_pattern.graph,
+        GraphContext::Variable(name) if !outer_bound.contains(name)
+    );
+    match (s_free, p_free, o_free, g_free) {
+        (false, false, true, false) => Some(crate::ir::PrefixKind::Prefix3SpG),
+        _ => None,
+    }
+}
+
 /// Lower `FILTER(NOT EXISTS { P })` into a `NonExistenceConstraint`.
 ///
 /// Restricted to **single-triple ground-inner** patterns: `P` must be a
@@ -748,25 +847,6 @@ fn lower_not_exists_into(
         ));
     }
 
-    // Inner triple's variables must all be bound in the outer scope —
-    // enforced by checking `inner_info.bindings` (which `process_patterns`
-    // populates with one entry per fresh-to-this-pattern variable). Any
-    // entry there is an inner-only variable: reject.
-    let outer_bound: std::collections::BTreeSet<String> = info
-        .bindings
-        .iter()
-        .map(|b| b.variable.clone())
-        .collect();
-    for binding in &inner_info.bindings {
-        if !outer_bound.contains(&binding.variable) {
-            return Err(format!(
-                "NOT EXISTS supports ground-inner patterns only (variable `?{}` in the inner \
-                 pattern is not bound by the outer mapping). Non-ground-inner NOT EXISTS \
-                 requires a per-substitution branching design. See spec/exists.md §7.",
-                binding.variable
-            ));
-        }
-    }
     if !inner_info.filters.is_empty() {
         return Err(
             "NOT EXISTS with inner FILTER expressions is not yet implemented. \
@@ -775,15 +855,52 @@ fn lower_not_exists_into(
         );
     }
 
-    // Build absent_terms[0..4] from the inner triple's spargebra
-    // patterns: variables become `Term::Variable(name)` (resolved via
-    // the outer scope at emit time), constants become `Term::Static`,
-    // graph context follows `info`'s lowering convention. We don't read
-    // from `inner_info.assertions` because the inner triple was processed
-    // with its own offset; instead we extract directly from the
-    // spargebra `TriplePattern` to get a clean `[Term; 4]`.
+    let outer_bound: std::collections::BTreeSet<String> = info
+        .bindings
+        .iter()
+        .map(|b| b.variable.clone())
+        .collect();
     let inner_pattern = &inner_info.patterns[0];
     let absent_terms = absent_terms_from_pattern(inner_pattern)?;
+
+    // Round-5 prefix-tree dispatch (`spec/prefix-tree-commitment.md`
+    // Sec.8). When exactly one inner-only position is present and it
+    // matches a shipped prefix kind, lower to a
+    // `PrefixNonExistenceConstraint` against the prefix-tree
+    // commitment instead of rejecting.
+    if let Some(prefix_kind) = detect_prefix_kind(inner_pattern, &outer_bound) {
+        let prefix_n = info.bgp_prefix3_len;
+        info.prefix_not_exists.push(crate::ir::PrefixNonExistenceConstraint {
+            prefix_kind,
+            bracket_left_idx: prefix_n,
+            bracket_right_idx: prefix_n + 1,
+            absent_terms,
+        });
+        info.bgp_prefix3_len += 2;
+        // Suppress the unused `fresh` warning -- prefix-3 brackets
+        // don't synthesise placeholder patterns in `bgp` (they live
+        // in `bgp_prefix3`, a separate slot array). The `fresh`
+        // counter still threads through the outer call chain.
+        let _ = fresh;
+        return Ok(());
+    }
+
+    // Inner triple's variables must all be bound in the outer scope —
+    // enforced by checking `inner_info.bindings` (which `process_patterns`
+    // populates with one entry per fresh-to-this-pattern variable). Any
+    // entry there is an inner-only variable: reject (now only when
+    // the inner-only shape doesn't match a shipped prefix variant).
+    for binding in &inner_info.bindings {
+        if !outer_bound.contains(&binding.variable) {
+            return Err(format!(
+                "NOT EXISTS over an inner pattern with inner-only variable `?{}` is not yet \
+                 implemented for this position shape. Round 5 ships only the prefix-3 (s, p, g) \
+                 commitment -- inner-only `?o`. The other 15 prefix variants follow the same \
+                 template; see spec/prefix-tree-commitment.md Sec.7.",
+                binding.variable
+            ));
+        }
+    }
 
     // Append the bracket leaves: they live in the outer BGP at indices
     // `outer_n` and `outer_n + 1`, picking up the standard per-triple
@@ -827,11 +944,18 @@ fn absent_terms_from_pattern(ct: &ContextualizedTriple) -> Result<[Term; 4], Str
         TermPattern::Literal(l) => Term::Static(GroundTerm::Literal(l.clone())),
     };
     let graph = match &ct.graph {
-        GraphContext::Default => Term::Static(GroundTerm::NamedNode(
-            // Default graph is encoded as the empty-string IRI per
-            // the existing `getTermEncodingString` convention.
-            NamedNode::new_unchecked(""),
-        )),
+        // Use the dedicated `Term::DefaultGraph` variant so the
+        // emit layer hashes with term-type tag `4`, matching the
+        // signer's `getTermEncodingString` for `quad.graph` (which
+        // is a DefaultGraph term in N3 / RDF.js). Previously this
+        // path used `Term::Static(GroundTerm::NamedNode(""))` which
+        // hashes with term-type tag `0`, creating a circuit /
+        // signer encoding mismatch (roborev finding, 2026-05-04):
+        // a default-graph quad present in the dataset could be
+        // proven absent because the circuit's absent-hash bound
+        // graph slot used tag 0 while the signer's leaf hash bound
+        // tag 4.
+        GraphContext::Default => Term::DefaultGraph,
         GraphContext::NamedNode(iri) => {
             Term::Static(GroundTerm::NamedNode(NamedNode::new_unchecked(iri.clone())))
         }
@@ -932,6 +1056,180 @@ fn true_literal() -> Expression {
     let xsd_boolean =
         NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean");
     Expression::Literal(Literal::new_typed_literal("true", xsd_boolean))
+}
+
+/// True iff `expr` mentions the variable `var_name` anywhere in its
+/// expression tree (including inside `EXISTS` / `NOT EXISTS` blocks
+/// reachable through the SPARQL expression algebra).
+///
+/// Used by the prefix-3 OPTIONAL collapse soundness scope check to
+/// reject queries that reference the inner-only variable in an outer
+/// FILTER, BIND right-hand side, ORDER BY expression, or aggregate
+/// source. The matched arm of a prefix-3 collapse leaves the inner-
+/// only position unconstrained, so any reference to that variable
+/// outside the OPTIONAL would let a malicious prover bind the
+/// reference to an arbitrary signed leaf's term value (roborev
+/// finding 2026-05-04, third high). The previous predicate only
+/// inspected projected `circuit_vars`; this helper widens it to every
+/// expression-side reference site.
+pub(crate) fn expression_references_variable(expr: &Expression, var_name: &str) -> bool {
+    match expr {
+        Expression::Variable(v) | Expression::Bound(v) => v.as_str() == var_name,
+        Expression::Not(a) | Expression::UnaryPlus(a) | Expression::UnaryMinus(a) => {
+            expression_references_variable(a, var_name)
+        }
+        Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            expression_references_variable(a, var_name)
+                || expression_references_variable(b, var_name)
+        }
+        Expression::If(a, b, c) => {
+            expression_references_variable(a, var_name)
+                || expression_references_variable(b, var_name)
+                || expression_references_variable(c, var_name)
+        }
+        Expression::Coalesce(args) | Expression::FunctionCall(_, args) => {
+            args.iter().any(|e| expression_references_variable(e, var_name))
+        }
+        Expression::In(a, args) => {
+            expression_references_variable(a, var_name)
+                || args.iter().any(|e| expression_references_variable(e, var_name))
+        }
+        // EXISTS / NOT EXISTS — the variable could appear inside the
+        // inner GraphPattern. Scan the in-scope variable set; this is
+        // an over-approximation (it returns `true` when the variable
+        // is shadowed inside the inner pattern as well) but the
+        // collapse-rejection use-case is conservative by design.
+        Expression::Exists(inner) => collect_in_scope_variables(inner).contains(var_name),
+        // Leaf literals / named nodes / blank-node references / silent
+        // function calls don't carry variable references.
+        _ => false,
+    }
+}
+
+/// True iff `term` is a `Term::Variable(var_name)`. Used by the
+/// prefix-3 OPTIONAL collapse soundness scope check to detect outer
+/// BIND / ORDER BY references through the IR's `Term` representation
+/// (BIND lowers to a `Binding { variable, term: Term::Variable(...) }`).
+pub(crate) fn term_references_variable(term: &Term, var_name: &str) -> bool {
+    matches!(term, Term::Variable(v) if v == var_name)
+}
+
+/// True iff `pattern` references the variable `var_name` anywhere in
+/// its IR -- bindings (LHS variable name OR right-hand side
+/// `Term::Variable`), assertions, filters, OPTIONAL inner patterns,
+/// UNION branches, or NOT EXISTS / MINUS / easy-OPTIONAL
+/// `inner_terms` / `absent_terms` arrays. Used by the prefix-3
+/// OPTIONAL collapse soundness scope check.
+///
+/// The check **excludes** the easy-OPTIONAL whose `inner_only_var` is
+/// being checked (caller passes `skip_easy_optional_id`), so the
+/// inner_terms entries that legitimately reference the inner-only var
+/// inside its own OPTIONAL aren't counted as escape-points.
+pub(crate) fn pattern_references_variable(
+    pattern: &PatternInfo,
+    var_name: &str,
+    skip_easy_optional_id: usize,
+) -> bool {
+    // Bindings whose **LHS variable name** is `var_name` -- a
+    // sibling required triple (`?o ex:foo ?z` after `OPTIONAL { ?p
+    // ex:age ?o }`) lowers to a `Binding { variable: "o", term:
+    // Term::Input(...) }`. The prefix-3 matched arm leaves the
+    // inner-only `?o` slot unconstrained, so SPARQL's
+    // OPTIONAL+later-required join semantics ("matched-arm `?o`
+    // must agree with the later triple's `?o` binding") is broken
+    // -- the prover could pick any prefix-`(p, age, *, g)` leaf
+    // and any later-triple binding for `?o`. Reject the collapse.
+    // Roborev finding 2026-05-04 follow-up (job 664).
+    //
+    // Also flag bindings whose **RHS term** references the variable
+    // (BIND-shaped `?out := ?inner_only`).
+    for b in &pattern.bindings {
+        if b.variable == var_name || term_references_variable(&b.term, var_name) {
+            return true;
+        }
+    }
+    // Assertions whose either side references the variable.
+    for a in &pattern.assertions {
+        if term_references_variable(&a.0, var_name) || term_references_variable(&a.1, var_name) {
+            return true;
+        }
+    }
+    // Outer filters mentioning the variable.
+    for f in &pattern.filters {
+        if expression_references_variable(f, var_name) {
+            return true;
+        }
+    }
+    // UNION branches.
+    if let Some(branches) = &pattern.union_branches {
+        for branch in branches {
+            if pattern_references_variable(branch, var_name, skip_easy_optional_id) {
+                return true;
+            }
+        }
+    }
+    // Other (non-collapsed) OPTIONAL blocks. We only walk power-set
+    // OPTIONALs here -- the `easy_optionals` collapse list is
+    // inspected separately below so we can skip the OPTIONAL whose
+    // inner-only var we're checking.
+    for opt in &pattern.optional_blocks {
+        for b in &opt.bindings {
+            if b.variable == var_name || term_references_variable(&b.term, var_name) {
+                return true;
+            }
+        }
+        for a in &opt.assertions {
+            if term_references_variable(&a.0, var_name)
+                || term_references_variable(&a.1, var_name)
+            {
+                return true;
+            }
+        }
+        for f in &opt.filters {
+            if expression_references_variable(f, var_name) {
+                return true;
+            }
+        }
+    }
+    // NOT EXISTS / MINUS absent-term arrays.
+    for ne in &pattern.not_exists {
+        for t in &ne.absent_terms {
+            if term_references_variable(t, var_name) {
+                return true;
+            }
+        }
+    }
+    for pne in &pattern.prefix_not_exists {
+        for t in &pne.absent_terms {
+            if term_references_variable(t, var_name) {
+                return true;
+            }
+        }
+    }
+    // Other easy-OPTIONALs' `inner_terms` (skip the one we're
+    // checking, identified by `skip_easy_optional_id`).
+    for eo in &pattern.easy_optionals {
+        if eo.id == skip_easy_optional_id {
+            continue;
+        }
+        for t in &eo.inner_terms {
+            if term_references_variable(t, var_name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Flatten an inner `GraphPattern` (the `P` in `EXISTS { P }`) into the
@@ -1450,12 +1748,45 @@ fn expand_negated_property_set(
 /// existing `2^n` power-set generation path — defaulting to the safe
 /// pre-collapse behaviour. The classifier is **conservative**: false
 /// negatives cost a power-set variant; false positives would corrupt
-/// soundness.
-fn optional_inner_is_easy_case(
+/// Result of OPTIONAL easy-case detection.
+///
+/// `EasyCase::Round3` -- every position is outer-bound or constant;
+/// the unmatched arm uses the leaf-hash sorted commitment (round 3).
+///
+/// `EasyCase::Prefix(kind)` -- exactly one inner-only position whose
+/// shape matches a shipped prefix kind (round 5: only `Prefix3SpG`),
+/// **and the inner-only variable is not in the query's projection**.
+/// The unmatched arm uses the prefix-tree commitment. The matched
+/// arm leaves the inner-only position unconstrained, so projecting
+/// it would produce a soundness break -- a malicious prover could
+/// pin `bgp[matched_idx].terms[free]` to any leaf-internal value
+/// (the inclusion check accepts every signed quad's value at that
+/// position) and bind `variables.<inner-only>` to that arbitrary
+/// witness, claiming it as the OPTIONAL's bound value. Roborev
+/// finding #545 (high). The projected check is enforced by the
+/// caller (`process_query`) which is the only place with the
+/// projection list; the caller passes `inner_only_var_projected`
+/// here.
+///
+/// `EasyCase::FallThrough` -- shape doesn't fit either; falls through
+/// to the existing `2^n` power-set lowering.
+#[derive(Clone, Copy, Debug)]
+enum EasyCase {
+    Round3,
+    Prefix(crate::ir::PrefixKind),
+    FallThrough,
+}
+
+/// Classify an OPTIONAL into the easy-case tier (round 3 ground-inner
+/// vs round 5 prefix-tree) or the power-set fallback. Splits the
+/// shared shape checks (no FILTER / no nested OPTIONAL etc.) from the
+/// per-tier free-position check so the dispatcher can route directly
+/// to the round-3 or prefix-3 lowering.
+fn optional_inner_easy_case(
     right_info: &PatternInfo,
     expression: &Option<Expression>,
     left_info: &PatternInfo,
-) -> bool {
+) -> EasyCase {
     // The outer `LeftJoin` may carry a FILTER expression
     // (`OPTIONAL { … FILTER(…) }` is hoisted there by spargebra). The
     // easy case forbids it: any non-trivial filter would constrain the
@@ -1463,56 +1794,71 @@ fn optional_inner_is_easy_case(
     // "matched ↔ inclusion of the substituted ground triple"
     // equivalence the soundness argument relies on.
     if expression.is_some() {
-        return false;
+        return EasyCase::FallThrough;
     }
     // No inner FILTER (same reason).
     if !right_info.filters.is_empty() {
-        return false;
+        return EasyCase::FallThrough;
     }
     // No UNION / nested OPTIONAL / NOT EXISTS / inner easy-case
-    // OPTIONAL inside the OPTIONAL we're classifying.
+    // OPTIONAL / prefix-tree NOT EXISTS inside the OPTIONAL we're
+    // classifying.
     if right_info.union_branches.is_some()
         || !right_info.optional_blocks.is_empty()
         || !right_info.not_exists.is_empty()
+        || !right_info.prefix_not_exists.is_empty()
         || !right_info.easy_optionals.is_empty()
     {
-        return false;
+        return EasyCase::FallThrough;
     }
-    // Single-triple inner. Multi-triple is round-4 (prefix-tree
-    // commitments).
+    // Single-triple inner. Multi-triple non-membership is a separate
+    // shape (deferred until a multi-triple prefix variant lands).
     if right_info.patterns.len() != 1 {
-        return false;
+        return EasyCase::FallThrough;
     }
-    // Every variable position in the inner triple must be outer-bound.
-    // `right_info.bindings` lists the variables that `process_patterns`
-    // saw as fresh-to-this-BGP — i.e. exactly the variables in the
-    // inner triple (they appear once each). For the easy case to fire,
-    // every such variable must already be bound by the outer μ
-    // (`left_info.bindings`).
+    let pattern = &right_info.patterns[0];
+
+    // Every variable position in the inner triple is either outer-
+    // bound or counts as "inner-only". `right_info.bindings` lists
+    // the variables `process_patterns` saw fresh-to-this-BGP -- i.e.
+    // exactly the variables in the inner triple (they appear once
+    // each). Round-3 case: every such variable is outer-bound.
     let outer_bound: std::collections::BTreeSet<&str> = left_info
         .bindings
         .iter()
         .map(|b| b.variable.as_str())
         .collect();
+    let mut inner_only_count = 0;
     for binding in &right_info.bindings {
         if !outer_bound.contains(binding.variable.as_str()) {
-            return false;
+            inner_only_count += 1;
         }
     }
-    // No graph variable that isn't outer-bound either. The graph
-    // context lives on the `ContextualizedTriple` and is folded into
-    // the `inner_terms` array; if it's a `Variable(name)` that the
-    // outer hasn't seen, we'd be substituting a free variable. The
-    // outer-bound check above covers `right_info.bindings`, but a
-    // graph variable doesn't go through that path — we have to check
-    // the pattern's graph context directly.
-    let pattern = &right_info.patterns[0];
-    if let GraphContext::Variable(name) = &pattern.graph {
-        if !outer_bound.contains(name.as_str()) {
-            return false;
+    let graph_inner_only = matches!(
+        &pattern.graph,
+        GraphContext::Variable(name) if !outer_bound.contains(name.as_str())
+    );
+    if graph_inner_only {
+        // The round-5 prefix-3 variant requires the graph position to
+        // be outer-bound (inner-only `?g` would need a different
+        // prefix subset). Reject the prefix path; round-3 also fails.
+        return EasyCase::FallThrough;
+    }
+
+    if inner_only_count == 0 {
+        return EasyCase::Round3;
+    }
+    if inner_only_count == 1 {
+        // Convert the inner pattern + outer-bound set to a prefix kind
+        // detection. The same helper that drives NOT EXISTS handles
+        // the per-position shape check.
+        let outer_bound_owned: std::collections::BTreeSet<String> =
+            outer_bound.iter().map(|s| s.to_string()).collect();
+        if let Some(kind) = detect_prefix_kind(pattern, &outer_bound_owned) {
+            return EasyCase::Prefix(kind);
         }
     }
-    true
+    EasyCase::FallThrough
 }
 
 /// Helper to adjust input indices in an optional block by an offset
@@ -1719,74 +2065,129 @@ fn process_graph_pattern_inner(
             // `optional_circuits[]` array is unaffected, so multiple
             // easy-case OPTIONALs in the same query do *not*
             // contribute to the `2^n` variant explosion.
-            if optional_inner_is_easy_case(&right_info, expression, &left_info) {
-                let inner_pattern = &right_info.patterns[0];
-                let inner_terms = absent_terms_from_pattern(inner_pattern)?;
+            match optional_inner_easy_case(&right_info, expression, &left_info) {
+                EasyCase::Round3 => {
+                    let inner_pattern = &right_info.patterns[0];
+                    let inner_terms = absent_terms_from_pattern(inner_pattern)?;
 
-                // Three appended BGP slots: a free placeholder for
-                // the matched arm followed by the two unmatched-arm
-                // bracket leaves. All three are inclusion-checked by
-                // `main.nr` regardless of which arm the prover
-                // actually witnesses — soundness lives in the
-                // `assert(matched | unmatched)` disjunction the emit
-                // layer produces.
-                //
-                // **All three slots are free placeholders** (not the
-                // concrete inner triple). This is load-bearing: the
-                // prover-side binding resolver iterates every
-                // `inputPatterns[i]` and matches it against the
-                // dataset. If we left a concrete pattern at the
-                // matched slot, the resolver would fail to produce a
-                // witness when the inner triple is *not* in the
-                // dataset (the unmatched case) — the very case the
-                // collapse is supposed to support. Free placeholders
-                // let the prover pick any valid leaf for each slot;
-                // the matched-arm position assertions in
-                // `checkBinding` then evaluate to true iff the
-                // prover happened to bind the matched slot to the
-                // substituted ground inner triple, which is only
-                // possible when that triple really is in the dataset
-                // — Merkle binding does the soundness work.
-                //
-                // Roborev finding 2026-05-03 (high) on the first
-                // round-3-follow-up commit: "easy-OPTIONAL slots
-                // appear as required input patterns".
-                let matched_idx = offset;
-                let bracket_left_idx = offset + 1;
-                let bracket_right_idx = offset + 2;
+                    // Three appended BGP slots: a free placeholder for
+                    // the matched arm followed by the two unmatched-arm
+                    // bracket leaves. All three are inclusion-checked by
+                    // `main.nr` regardless of which arm the prover
+                    // actually witnesses — soundness lives in the
+                    // `assert(matched | unmatched)` disjunction the emit
+                    // layer produces.
+                    //
+                    // **All three slots are free placeholders** (not the
+                    // concrete inner triple). This is load-bearing: the
+                    // prover-side binding resolver iterates every
+                    // `inputPatterns[i]` and matches it against the
+                    // dataset. If we left a concrete pattern at the
+                    // matched slot, the resolver would fail to produce a
+                    // witness when the inner triple is *not* in the
+                    // dataset (the unmatched case) — the very case the
+                    // collapse is supposed to support. Free placeholders
+                    // let the prover pick any valid leaf for each slot;
+                    // the matched-arm position assertions in
+                    // `checkBinding` then evaluate to true iff the
+                    // prover happened to bind the matched slot to the
+                    // substituted ground inner triple, which is only
+                    // possible when that triple really is in the dataset
+                    // — Merkle binding does the soundness work.
+                    //
+                    // Roborev finding 2026-05-03 (high) on the first
+                    // round-3-follow-up commit: "easy-OPTIONAL slots
+                    // appear as required input patterns".
+                    let matched_idx = offset;
+                    let bracket_left_idx = offset + 1;
+                    let bracket_right_idx = offset + 2;
 
-                // **Graph context is also free** — `GraphContext::Default`
-                // serialises as `DefaultGraph` in metadata, which the
-                // prover treats as a wildcard (alongside `Variable`-typed
-                // graph terms). Passing through `inner_pattern.graph`
-                // would, for `OPTIONAL { GRAPH ex:g { ... } }` blocks,
-                // pin the placeholder to graph `ex:g` and prevent the
-                // unmatched arm from witnessing any leaf when `ex:g`
-                // happens to be empty (roborev finding 2026-05-03,
-                // second high — same family as the first finding,
-                // generalised to the graph dimension). The matched-arm
-                // assertions in `checkBinding` still pin
-                // `bgp[matched_idx].terms[3]` to the substituted graph
-                // term, so the matched arm only succeeds when the
-                // prover actually witnessed a leaf in the right graph.
-                left_info
-                    .patterns
-                    .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
-                left_info
-                    .patterns
-                    .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
-                left_info
-                    .patterns
-                    .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
+                    left_info
+                        .patterns
+                        .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
+                    left_info
+                        .patterns
+                        .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
+                    left_info
+                        .patterns
+                        .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
 
-                left_info.easy_optionals.push(EasyOptional {
-                    id: fresh.next_optional_id(),
-                    matched_idx,
-                    bracket_left_idx,
-                    bracket_right_idx,
-                    inner_terms,
-                });
-                return Ok(left_info);
+                    left_info.easy_optionals.push(EasyOptional {
+                        id: fresh.next_optional_id(),
+                        matched_idx,
+                        bracket_left_idx,
+                        bracket_right_idx,
+                        inner_terms,
+                        prefix_kind: None,
+                        inner_only_var: None,
+                    });
+                    return Ok(left_info);
+                }
+                EasyCase::Prefix(prefix_kind) => {
+                    // Round-5 prefix-tree OPTIONAL collapse
+                    // (`spec/prefix-tree-commitment.md` Sec.8). The
+                    // matched arm pins the fixed positions of
+                    // `bgp[matched_idx]` -- the prover witnesses a
+                    // single quad whose `o` (the inner-only position)
+                    // can be any value. The unmatched arm proves
+                    // `(s, p, g)`-prefix non-membership against
+                    // `roots[1]`. Bracket leaves live in `bgp_prefix3`,
+                    // not `bgp`, so we allocate one BGP slot for the
+                    // matched arm and two prefix-3 slots for the
+                    // brackets.
+                    //
+                    // Soundness depends on the inner-only variable
+                    // **not being projected** -- the matched arm
+                    // leaves `bgp[matched_idx].terms[free_position]`
+                    // unconstrained, so a malicious prover could
+                    // pick any signed leaf's terms[free_position]
+                    // and have `variables.<inner-only>` bound to that
+                    // arbitrary value. `process_query` enforces the
+                    // projection check post-lowering (roborev #545
+                    // high). The lowering layer captures the
+                    // inner-only variable's name so the post-check
+                    // has the information it needs.
+                    let inner_pattern = &right_info.patterns[0];
+                    let inner_terms = absent_terms_from_pattern(inner_pattern)?;
+
+                    // Extract the inner-only variable's name from the
+                    // free position of the inner triple.
+                    let inner_only_var = match prefix_kind.free_position() {
+                        2 => match &inner_pattern.pattern.object {
+                            TermPattern::Variable(v) => Some(v.as_str().to_string()),
+                            _ => None,
+                        },
+                        // Future variants slot in here.
+                        _ => None,
+                    };
+
+                    let matched_idx = offset;
+                    let prefix_n = left_info.bgp_prefix3_len;
+                    let bracket_left_idx = prefix_n;
+                    let bracket_right_idx = prefix_n + 1;
+
+                    // One BGP slot for the matched-arm placeholder --
+                    // any valid leaf, with the position-assertion test
+                    // pinning each fixed term in the matched arm.
+                    left_info
+                        .patterns
+                        .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
+                    left_info.bgp_prefix3_len += 2;
+
+                    left_info.easy_optionals.push(EasyOptional {
+                        id: fresh.next_optional_id(),
+                        matched_idx,
+                        bracket_left_idx,
+                        bracket_right_idx,
+                        inner_terms,
+                        prefix_kind: Some(prefix_kind),
+                        inner_only_var,
+                    });
+                    return Ok(left_info);
+                }
+                EasyCase::FallThrough => {
+                    // Continue to the existing power-set machinery.
+                }
             }
 
             let optional_id = fresh.next_optional_id();
@@ -1946,6 +2347,8 @@ fn process_graph_pattern_inner(
                 union_branches: Some(branches),
                 optional_blocks: Vec::new(),
                 not_exists: Vec::new(),
+                prefix_not_exists: Vec::new(),
+                bgp_prefix3_len: 0,
                 easy_optionals: Vec::new(),
             })
         }
@@ -1975,7 +2378,16 @@ fn process_graph_pattern_inner(
                 .easy_optionals
                 .iter()
                 .flat_map(|eo| {
-                    [eo.matched_idx, eo.bracket_left_idx, eo.bracket_right_idx]
+                    // Round-3 collapses keep all three bracket /
+                    // matched indices in `bgp`. Round-5 prefix-tree
+                    // collapses only allocate `matched_idx` in `bgp`;
+                    // bracket indices live in `bgp_prefix3`.
+                    let mut v = vec![eo.matched_idx];
+                    if eo.prefix_kind.is_none() {
+                        v.push(eo.bracket_left_idx);
+                        v.push(eo.bracket_right_idx);
+                    }
+                    v
                 })
                 .collect();
 
@@ -2003,11 +2415,20 @@ fn process_graph_pattern_inner(
                 // Only rewrite the graph slot if the inner pattern
                 // saw the default graph (no inner GRAPH wrapper); a
                 // pre-existing inner GRAPH already substituted a
-                // concrete term.
+                // concrete term. After the roborev encoding-mismatch
+                // fix (2026-05-04) the default-graph marker is
+                // `Term::DefaultGraph`; the legacy
+                // `Static(NamedNode(""))` shape is also matched
+                // defensively in case any caller still produces it.
                 let is_default = matches!(
                     &eo.inner_terms[3],
-                    Term::Static(GroundTerm::NamedNode(nn)) if nn.as_str().is_empty()
-                );
+                    Term::DefaultGraph
+                        | Term::Static(GroundTerm::NamedNode(_))
+                ) && match &eo.inner_terms[3] {
+                    Term::DefaultGraph => true,
+                    Term::Static(GroundTerm::NamedNode(nn)) => nn.as_str().is_empty(),
+                    _ => false,
+                };
                 if is_default {
                     eo.inner_terms[3] = effective_graph_term.clone();
                 }
@@ -2518,6 +2939,50 @@ pub(crate) fn process_query_with_options_and_form(
                 }
                 already.insert(key.variable.clone());
                 circuit_vars.push(key.variable.clone());
+            }
+
+            // Round-5 soundness check (roborev #545 high, widened
+            // 2026-05-04 per the third HIGH on PR #61). A prefix-3
+            // OPTIONAL collapse leaves
+            // `bgp[matched_idx].terms[free_position]` unconstrained
+            // in the matched arm -- so any reference to the inner-
+            // only variable outside the OPTIONAL would let a
+            // malicious prover bind that reference to an arbitrary
+            // signed leaf's term value. The previous check inspected
+            // only the projected `circuit_vars`, which misses outer
+            // FILTER expressions, BIND right-hand sides, ORDER BY
+            // expressions, aggregate sources, and references in
+            // sibling easy-OPTIONALs / NOT EXISTS / UNION branches.
+            // Reject the collapse if the inner-only var is referenced
+            // anywhere outside its own OPTIONAL.
+            let projected: std::collections::HashSet<&str> =
+                circuit_vars.iter().map(String::as_str).collect();
+            for eo in &pattern.easy_optionals {
+                if eo.prefix_kind.is_none() {
+                    continue;
+                }
+                if let Some(name) = &eo.inner_only_var {
+                    let escapes = projected.contains(name.as_str())
+                        || pattern_references_variable(&pattern, name.as_str(), eo.id)
+                        || aggregates.iter().any(|a| {
+                            a.source.as_deref() == Some(name.as_str())
+                                || a.output.as_str() == name.as_str()
+                        })
+                        || post.order_by.iter().any(|k| k.variable == *name);
+                    if escapes {
+                        return Err(format!(
+                            "OPTIONAL with inner-only variable `?{}` referenced outside the OPTIONAL \
+                             from a prefix-tree collapse is not yet supported -- the matched arm leaves \
+                             the inner-only position unconstrained, which would let a malicious prover \
+                             bind `variables.{}` (or any expression that references it) to any leaf's \
+                             value at that position. Drop the variable from the projection / FILTER / \
+                             BIND / ORDER BY / aggregate, or rewrite the OPTIONAL to bind it via an \
+                             outer-pattern triple. See spec/prefix-tree-commitment.md Sec.8 / \
+                             roborev #545.",
+                            name, name
+                        ));
+                    }
+                }
             }
 
             Ok(QueryInfo {

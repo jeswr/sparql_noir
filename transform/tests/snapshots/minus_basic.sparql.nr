@@ -16,7 +16,7 @@ pub(crate) fn checkBinding(bgp: BGP, variables: Variables, low_sentinel: Sentine
   assert(variables.o == bgp[0].terms[2]);
   assert(consts::hash2([0, consts::encode_string("http://example.org/knows")]) == bgp[0].terms[1]);
   assert(true);
-  let absent_0 = consts::hash4([variables.s, consts::hash2([0, consts::encode_string("http://example.org/hates")]), variables.o, consts::hash2([0, consts::encode_string("")])]);
+  let absent_0 = consts::hash4([variables.s, consts::hash2([0, consts::encode_string("http://example.org/hates")]), variables.o, consts::hash2([4, consts::encode_string("")])]);
   if boundary_cases[0] == 0 {
     utils::verify_non_membership_low_sentinel_no_inclusion(low_sentinel, bgp[2], absent_0);
   } else if boundary_cases[0] == 1 {

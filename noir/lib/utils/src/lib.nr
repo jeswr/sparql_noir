@@ -1,6 +1,14 @@
 use dep::types::{IndexedRoot, Root, SentinelLeaf, Triple};
 use dep::consts;
 
+// Round-4 prefix-tree commitment scaffolding. See
+// `spec/prefix-tree-commitment.md`. The module re-uses
+// `verify_leaf_inclusion`, `verify_low_sentinel_inclusion`,
+// `verify_high_sentinel_inclusion`, and `reconstruct_index` from this
+// crate -- prefix-tree primitives are layered on top of the shared
+// Merkle-walk machinery, not parallel reimplementations.
+pub mod prefix3;
+
 pub struct MerkleInfo<let M: u32, let N: u32> {
     pub triples: [[Field; 4]; N],
     pub root: Field,
@@ -552,7 +560,7 @@ fn test_non_membership_high_boundary() {
 /// depth -- the `_no_inclusion` variants are exposed publicly and a
 /// future caller that bypasses `verify_inclusion` would otherwise be
 /// exposed to the high-severity Roborev 2026-05-03 finding.
-fn reconstruct_index(directions: [u8; consts::MERKLE_DEPTH - 1]) -> u64 {
+pub fn reconstruct_index(directions: [u8; consts::MERKLE_DEPTH - 1]) -> u64 {
     let mut idx: u64 = 0;
     let mut bit: u64 = 1;
     for j in 0..(consts::MERKLE_DEPTH - 1) {

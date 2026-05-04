@@ -1,14 +1,74 @@
 {
   "aggregates": [],
+  "bgpPrefix3Length": 0,
+  "bgp_prefix3_length": 0,
   "easyOptionals": [
     {
       "bracketLeftIdx": 2,
       "bracketRightIdx": 3,
       "bracket_left_idx": 2,
       "bracket_right_idx": 3,
+      "fixedPositions": null,
+      "fixed_positions": null,
+      "freePosition": null,
+      "free_position": null,
       "id": 0,
+      "innerTerms": [
+        {
+          "kind": "variable",
+          "name": "s"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/type"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/Person"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "DefaultGraph"
+          }
+        }
+      ],
+      "inner_terms": [
+        {
+          "kind": "variable",
+          "name": "s"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/type"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/Person"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "DefaultGraph"
+          }
+        }
+      ],
       "matchedIdx": 1,
-      "matched_idx": 1
+      "matched_idx": 1,
+      "prefixKind": null,
+      "prefix_kind": null
     }
   ],
   "easy_optionals": [
@@ -17,9 +77,67 @@
       "bracketRightIdx": 3,
       "bracket_left_idx": 2,
       "bracket_right_idx": 3,
+      "fixedPositions": null,
+      "fixed_positions": null,
+      "freePosition": null,
+      "free_position": null,
       "id": 0,
+      "innerTerms": [
+        {
+          "kind": "variable",
+          "name": "s"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/type"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/Person"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "DefaultGraph"
+          }
+        }
+      ],
+      "inner_terms": [
+        {
+          "kind": "variable",
+          "name": "s"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/type"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/Person"
+          }
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "DefaultGraph"
+          }
+        }
+      ],
       "matchedIdx": 1,
-      "matched_idx": 1
+      "matched_idx": 1,
+      "prefixKind": null,
+      "prefix_kind": null
     }
   ],
   "hiddenInputs": [],
@@ -173,6 +291,8 @@
   "optional_patterns": [],
   "orderBy": [],
   "order_by": [],
+  "prefixNotExists": [],
+  "prefix_not_exists": [],
   "skip_signing": false,
   "total_patterns": 4,
   "unionBranches": [],

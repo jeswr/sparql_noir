@@ -1,0 +1,209 @@
+{
+  "aggregates": [],
+  "bgpPrefix3Length": 2,
+  "bgp_prefix3_length": 2,
+  "easyOptionals": [],
+  "easy_optionals": [],
+  "hiddenInputs": [],
+  "hidden_inputs": [],
+  "inputPatterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "p"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "input_patterns": [
+    {
+      "graph": {
+        "termType": "DefaultGraph"
+      },
+      "object": {
+        "termType": "Variable",
+        "value": "p"
+      },
+      "predicate": {
+        "termType": "NamedNode",
+        "value": "http://example.org/knows"
+      },
+      "subject": {
+        "termType": "Variable",
+        "value": "s"
+      }
+    }
+  ],
+  "limit": null,
+  "notExists": [],
+  "not_exists": [],
+  "num_optionals": 0,
+  "offset": null,
+  "optionalPatterns": [],
+  "optional_patterns": [],
+  "orderBy": [],
+  "order_by": [],
+  "prefixNotExists": [
+    {
+      "absentTerms": [
+        {
+          "kind": "variable",
+          "name": "p"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          }
+        },
+        {
+          "kind": "variable",
+          "name": "age"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "DefaultGraph"
+          }
+        }
+      ],
+      "absent_terms": [
+        {
+          "kind": "variable",
+          "name": "p"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          }
+        },
+        {
+          "kind": "variable",
+          "name": "age"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "DefaultGraph"
+          }
+        }
+      ],
+      "boundaryCaseDispatch": {
+        "0": "lower",
+        "1": "middle",
+        "2": "upper"
+      },
+      "bracketLeftIdx": 0,
+      "bracketRightIdx": 1,
+      "bracket_left_idx": 0,
+      "bracket_right_idx": 1,
+      "fixedPositions": [
+        0,
+        1,
+        3
+      ],
+      "fixed_positions": [
+        0,
+        1,
+        3
+      ],
+      "freePosition": 2,
+      "free_position": 2,
+      "prefixKind": "prefix3_sp_g",
+      "prefix_kind": "prefix3_sp_g"
+    }
+  ],
+  "prefix_not_exists": [
+    {
+      "absentTerms": [
+        {
+          "kind": "variable",
+          "name": "p"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          }
+        },
+        {
+          "kind": "variable",
+          "name": "age"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "DefaultGraph"
+          }
+        }
+      ],
+      "absent_terms": [
+        {
+          "kind": "variable",
+          "name": "p"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "NamedNode",
+            "value": "http://example.org/age"
+          }
+        },
+        {
+          "kind": "variable",
+          "name": "age"
+        },
+        {
+          "kind": "static",
+          "term": {
+            "termType": "DefaultGraph"
+          }
+        }
+      ],
+      "boundaryCaseDispatch": {
+        "0": "lower",
+        "1": "middle",
+        "2": "upper"
+      },
+      "bracketLeftIdx": 0,
+      "bracketRightIdx": 1,
+      "bracket_left_idx": 0,
+      "bracket_right_idx": 1,
+      "fixedPositions": [
+        0,
+        1,
+        3
+      ],
+      "fixed_positions": [
+        0,
+        1,
+        3
+      ],
+      "freePosition": 2,
+      "free_position": 2,
+      "prefixKind": "prefix3_sp_g",
+      "prefix_kind": "prefix3_sp_g"
+    }
+  ],
+  "skip_signing": false,
+  "total_patterns": 1,
+  "unionBranches": [],
+  "union_branches": [],
+  "variables": [
+    "s"
+  ]
+}

@@ -6,6 +6,8 @@
       "source": "s"
     }
   ],
+  "bgpPrefix3Length": 0,
+  "bgp_prefix3_length": 0,
   "easyOptionals": [],
   "easy_optionals": [],
   "hiddenInputs": [],
@@ -57,6 +59,8 @@
   "optional_patterns": [],
   "orderBy": [],
   "order_by": [],
+  "prefixNotExists": [],
+  "prefix_not_exists": [],
   "skip_signing": false,
   "total_patterns": 1,
   "unionBranches": [],

@@ -42,6 +42,31 @@ pub global MERKLE_DEPTH: u32 = 11;
 pub global LOW_SENTINEL_HASH: Field = 0;
 pub global HIGH_SENTINEL_HASH: Field = 0 - 1;
 
+// --- Prefix-tree commitment domain separators (round 4) -------------
+//
+// Round 4's prefix-tree commitments (`spec/prefix-tree-commitment.md`)
+// keep the same `consts::hash4` Pedersen primitive but specialise it
+// per prefix subset by padding the unused position(s) with a fixed
+// domain-separator constant. This avoids cross-tree collision (a
+// prefix-tree leaf cannot equal a leaf-hash sorted-tree leaf, even if
+// some adversarial choice of `o == DOMAIN_SEPARATOR` were attempted,
+// because the position layout differs and `hash4` is collision-
+// resistant) without introducing any new hash primitive.
+//
+// `PREFIX3_SP_G_DOMAIN_SEPARATOR` is the constant used in the `o`
+// slot when computing `hash3_sp_g(s, p, g) = hash4([s, p, g, sep])`
+// for the prefix-3 `(s, p, g)` tree. The value
+// `0x707265666978335f7370675f` ASCII-packs `"prefix3_spg_"`; any
+// non-zero, non-`HIGH_SENTINEL_HASH` value works -- the only
+// requirements are (a) it is fixed and public, (b) it is unlikely to
+// collide with any real `o` term under collision-resistant `hash4`
+// (overwhelmingly likely for a 96-bit ASCII string in BN254's
+// ~254-bit field).
+//
+// New domain separators are added here as new prefix-tree variants
+// land; one constant per `2^4 = 16` prefix subset.
+pub global PREFIX3_SP_G_DOMAIN_SEPARATOR: Field = 0x707265666978335f7370675f;
+
 pub fn hash2(input: [Field; 2]) -> Field {
   {{hash2}}(input)
 }

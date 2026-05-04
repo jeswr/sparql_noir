@@ -62,9 +62,13 @@ const CORPUS: &[Case] = &[
         name: "filter_float_const",
         query: "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ?p ?o . FILTER(\"1.5\"^^xsd:float < \"2.0\"^^xsd:float) }",
     },
+    // OPTIONAL where the inner-only `?o` is **not** projected -- the
+    // round-5 prefix-3 collapse fires (`?p` outer-bound, `?o` free).
+    // Projecting `?o` would be unsound (roborev #545); see the
+    // dedicated `optional_inner_only_object_projected_is_rejected` test.
     Case {
         name: "optional_basic",
-        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?p WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
     },
     // Round-3 follow-up — tiered partial OPTIONAL collapse (easy
     // case). The inner triple `?s ex:type ex:Person` has every
@@ -142,9 +146,15 @@ const CORPUS: &[Case] = &[
         name: "filter_abs",
         query: "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ex:n ?n . FILTER(ABS(?n) > \"5\"^^xsd:integer) }",
     },
+    // Two prefix-3 OPTIONAL collapses sharing the outer `?s`. The
+    // inner-only `?a` / `?b` are *not* projected (they would be
+    // unsound at projection time -- see
+    // `optional_inner_only_object_projected_is_rejected`). The two
+    // collapses share `bgp_prefix3` (each contributes 2 slots) and
+    // `boundary_cases_prefix3[0..2]`.
     Case {
         name: "double_optional",
-        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?a ?b WHERE { ?s ex:p ?o . OPTIONAL { ?s ex:a ?a . } OPTIONAL { ?s ex:b ?b . } }",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:p ?o . OPTIONAL { ?s ex:a ?a . } OPTIONAL { ?s ex:b ?b . } }",
     },
     // Aggregates via the disclose-and-verify pattern (SPARQL_ROADMAP.md
     // §8.6, Q6 decision 2026-05-03). The circuit body for each of these
@@ -291,21 +301,47 @@ const CORPUS: &[Case] = &[
         query: "PREFIX ex: <http://example.org/>\n\
                 SELECT ?s ?o WHERE { ?s ex:knows ?o . MINUS { ?s ex:hates ?o . } }",
     },
+    // Round 5 — NOT EXISTS over a single-triple inner pattern with
+    // one inner-only **object** position. The round-3 leaf-hash
+    // primitive cannot witness this (it hashes over a fully-ground
+    // 4-tuple); the round-5 prefix-3 commitment can. Lowers to a
+    // `PrefixNonExistenceConstraint` against `roots[1]`. See
+    // `spec/prefix-tree-commitment.md` Sec.8.
+    Case {
+        name: "not_exists_prefix3",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s WHERE { ?s ex:knows ?p . FILTER(NOT EXISTS { ?p ex:age ?age . }) }",
+    },
+    // Round 5 — OPTIONAL collapse over a single-triple inner pattern
+    // with one inner-only **object** position. The round-3 ground-inner
+    // easy case can't fire (`?o` is inner-only); the round-5 prefix-3
+    // collapse takes over. The matched arm pins `s, p, g`; the
+    // unmatched arm proves `(s, p, g)`-prefix non-membership. The
+    // inner-only `?o` is not projected (projecting it would be
+    // unsound -- see `optional_inner_only_object_projected_is_rejected`).
+    // See `spec/prefix-tree-commitment.md` Sec.8.
+    Case {
+        name: "optional_prefix3_collapse",
+        query: "PREFIX ex: <http://example.org/>\n\
+                SELECT ?s ?p WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
+    },
 ];
 
 /// Round 2 §7 — defensive cap on OPTIONAL blocks. The transform must
 /// reject queries with more than `optional_cap` OPTIONAL blocks rather
-/// than silently generating `2^n` circuit variants.
+/// than silently generating `2^n` circuit variants. This test uses
+/// multi-triple inner OPTIONALs that fall through the round-3 / round-5
+/// easy-case predicates so the power-set path is exercised.
 #[test]
 fn rejects_too_many_optionals() {
     let q = "PREFIX ex: <http://example.org/>
 SELECT ?s ?a ?b ?c ?d ?e WHERE {
   ?s ex:p ?o .
-  OPTIONAL { ?s ex:a ?a }
-  OPTIONAL { ?s ex:b ?b }
-  OPTIONAL { ?s ex:c ?c }
-  OPTIONAL { ?s ex:d ?d }
-  OPTIONAL { ?s ex:e ?e }
+  OPTIONAL { ?s ex:a ?a . ?a ex:flag ex:A . }
+  OPTIONAL { ?s ex:b ?b . ?b ex:flag ex:B . }
+  OPTIONAL { ?s ex:c ?c . ?c ex:flag ex:C . }
+  OPTIONAL { ?s ex:d ?d . ?d ex:flag ex:D . }
+  OPTIONAL { ?s ex:e ?e . ?e ex:flag ex:E . }
 }";
     let err = match transform_query(q) {
         Err(e) => e,
@@ -323,11 +359,11 @@ fn raises_optional_cap() {
     let q = "PREFIX ex: <http://example.org/>
 SELECT ?s ?a ?b ?c ?d ?e WHERE {
   ?s ex:p ?o .
-  OPTIONAL { ?s ex:a ?a }
-  OPTIONAL { ?s ex:b ?b }
-  OPTIONAL { ?s ex:c ?c }
-  OPTIONAL { ?s ex:d ?d }
-  OPTIONAL { ?s ex:e ?e }
+  OPTIONAL { ?s ex:a ?a . ?a ex:flag ex:A . }
+  OPTIONAL { ?s ex:b ?b . ?b ex:flag ex:B . }
+  OPTIONAL { ?s ex:c ?c . ?c ex:flag ex:C . }
+  OPTIONAL { ?s ex:d ?d . ?d ex:flag ex:D . }
+  OPTIONAL { ?s ex:e ?e . ?e ex:flag ex:E . }
 }";
     let opts = TransformOptions {
         optional_cap: 8,
@@ -480,17 +516,21 @@ fn check_or_update(path: &PathBuf, actual: &str, update: bool, label: &str, name
     }
 }
 
-/// Non-ground-inner `NOT EXISTS` is rejected — round 3 main event ships
-/// single-triple ground-inner only. See `spec/exists.md` §7.
+/// Non-ground-inner `NOT EXISTS` with an inner-only **subject**
+/// position is still rejected -- round 5 ships only the prefix-3
+/// (`s, p, g`) commitment whose free position is `o`. An inner-only
+/// `?s` would need a different prefix subset (e.g. `prefix2_pg` or
+/// `prefix1_p`) which haven't been built. See
+/// `spec/prefix-tree-commitment.md` Sec.7.
 #[test]
-fn not_exists_non_ground_inner_is_rejected() {
+fn not_exists_inner_only_subject_is_rejected() {
     let q = "PREFIX ex: <http://example.org/>\n\
-             SELECT ?s WHERE { ?s ex:knows ?o . FILTER(NOT EXISTS { ?o ex:age ?age . }) }";
+             SELECT ?o WHERE { ?p ex:knows ?o . FILTER(NOT EXISTS { ?x ex:age ?o . }) }";
     match transform_query(q) {
-        Ok(_) => panic!("expected non-ground-inner NOT EXISTS to be rejected"),
+        Ok(_) => panic!("expected inner-only-subject NOT EXISTS to be rejected"),
         Err(err) => assert!(
-            err.contains("NOT EXISTS") && err.contains("ground-inner") && err.contains("?age"),
-            "expected error to mention NOT EXISTS, ground-inner, and ?age, got: {}",
+            err.contains("NOT EXISTS") && err.contains("?x") && err.contains("prefix"),
+            "expected error to mention NOT EXISTS, ?x, and the unshipped prefix variant, got: {}",
             err
         ),
     }
@@ -654,15 +694,18 @@ fn optional_easy_case_collapses_to_single_circuit() {
     );
 }
 
-/// Round-3 follow-up — tiered partial OPTIONAL collapse fall-through.
-/// `OPTIONAL { ?p ex:age ?o }` (where `?p` is outer-bound but `?o` is
-/// inner-only) does **not** satisfy the easy-case predicate; it must
-/// still flow through the existing `2^n` power-set path unchanged —
-/// `optional_circuits` non-empty, regular `optionalPatterns` populated.
+/// Round-3 follow-up — tiered partial OPTIONAL collapse fall-through
+/// for multi-triple inner OPTIONALs. Multi-triple inner patterns
+/// don't satisfy any easy-case predicate (round-3 ground-inner or
+/// round-5 single-inner-only-position prefix-tree); they must flow
+/// through the existing `2^n` power-set path unchanged.
 #[test]
-fn optional_inner_only_var_falls_through_to_power_set() {
+fn optional_multi_triple_falls_through_to_power_set() {
     let q = "PREFIX ex: <http://example.org/>\n\
-             SELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . ?p ex:status ex:Active . } \
+             }";
     let result = transform_query(q).expect("transform should succeed");
 
     // Power-set path preserved.
@@ -693,6 +736,269 @@ fn optional_inner_only_var_falls_through_to_power_set() {
             .sparql_nr
             .contains("verify_non_membership_no_inclusion_check"),
         "fall-through OPTIONAL must NOT emit the boolean non-membership check"
+    );
+}
+
+/// Round-5 soundness check (roborev finding #545 high). Projecting
+/// the inner-only variable from a prefix-tree-collapsed OPTIONAL is
+/// unsound: the matched arm leaves `bgp[matched_idx].terms[free]`
+/// unconstrained, so a malicious prover could pick any signed leaf's
+/// value at that position and the verifier would accept the
+/// projected binding. Reject the query rather than silently emit an
+/// unsound proof.
+#[test]
+fn optional_inner_only_object_projected_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected projected-inner-only OPTIONAL to be rejected"),
+        Err(err) => assert!(
+            err.contains("?o") && err.contains("prefix-tree") && err.contains("unconstrained"),
+            "expected error mentioning ?o, prefix-tree, unconstrained, got: {}",
+            err
+        ),
+    }
+}
+
+/// Widened soundness scope check (roborev finding 2026-05-04, third
+/// HIGH on PR #61). The previous predicate looked only at projected
+/// `circuit_vars`; an outer FILTER over the inner-only variable
+/// escapes that net but still lets a malicious prover bind the
+/// reference unconstrained. The widened check rejects the collapse
+/// when the inner-only var appears in the outer pattern's filters.
+#[test]
+fn optional_inner_only_object_filter_referenced_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+               FILTER(?o > 18) \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected outer-FILTER on inner-only ?o to be rejected"),
+        Err(err) => assert!(
+            err.contains("?o") && err.contains("unconstrained"),
+            "expected error mentioning ?o + unconstrained, got: {}",
+            err
+        ),
+    }
+}
+
+/// As above, but a sibling required triple after the OPTIONAL
+/// rebinds `?o` (the inner-only variable). SPARQL semantics require
+/// that the OPTIONAL's matched `?o` agree with the later triple's
+/// `?o`; the prefix-3 matched arm leaves that position unconstrained,
+/// so the collapse is unsound. This is the second-pass roborev finding
+/// (job 664) -- the widened scope check must inspect `Binding.variable`
+/// (the LHS), not just the RHS term.
+#[test]
+fn optional_inner_only_object_rebind_by_sibling_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?z WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+               ?o ex:foo ?z . \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected sibling-required ?o to be rejected"),
+        Err(err) => assert!(
+            err.contains("?o") && err.contains("unconstrained"),
+            "expected error mentioning ?o + unconstrained, got: {}",
+            err
+        ),
+    }
+}
+
+/// As above, but the outer reference is via a `BIND(?o AS ?out)`
+/// alias. The inner-only var still escapes the OPTIONAL, so the
+/// widened scope check must reject.
+#[test]
+fn optional_inner_only_object_bind_alias_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?out WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+               BIND(?o AS ?out) \
+             }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected outer-BIND on inner-only ?o to be rejected"),
+        Err(err) => assert!(
+            err.contains("?o") && err.contains("unconstrained"),
+            "expected error mentioning ?o + unconstrained, got: {}",
+            err
+        ),
+    }
+}
+
+/// As above, but the outer reference is in an `ORDER BY ?o` key.
+/// The ORDER BY validation runs before the soundness scope check
+/// and rejects the inner-only variable as "not bound by the query
+/// body" -- functionally still rejecting the query, which is the
+/// correct outcome (the query is unsound either way). We assert the
+/// rejection regardless of which error wins the race so a future
+/// rearrangement of the validation order doesn't silently start
+/// accepting the unsound query.
+#[test]
+fn optional_inner_only_object_order_by_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+             } ORDER BY ?o";
+    match transform_query(q) {
+        Ok(_) => panic!("expected ORDER-BY on inner-only ?o to be rejected"),
+        Err(err) => {
+            let mentions_o = err.contains("?o");
+            let unsound = err.contains("unconstrained")
+                || err.contains("not bound by the query body");
+            assert!(
+                mentions_o && unsound,
+                "expected error mentioning ?o and either unconstrained or not-bound, got: {}",
+                err
+            );
+        }
+    }
+}
+
+/// Round-5 default-graph encoding mismatch (roborev finding
+/// 2026-05-04, first HIGH on PR #61). When the default graph is the
+/// graph context for an OPTIONAL absent prefix or a NOT EXISTS absent
+/// quad, the circuit must hash the graph slot with term-type tag `4`
+/// (matching the signer's `getTermEncodingString` for
+/// `quad.graph: DefaultGraph` in `src/encode.ts:11`). Previously the
+/// transform serialised the slot as `hash2([0, encode_string("")])`
+/// (term-type tag `0` = NamedNode), creating a soundness mismatch:
+/// a default-graph quad present in the dataset could be proven
+/// absent because the circuit's absent-hash bound a different graph
+/// field than the signer's leaf hash.
+///
+/// This test pins the emitted absent-graph encoding in `sparql.nr`
+/// so a regression that swaps the term-type tag is caught at the
+/// snapshot level.
+#[test]
+fn default_graph_absent_uses_term_type_tag_4() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?p WHERE { \
+               ?s ex:knows ?p . \
+               OPTIONAL { ?p ex:age ?o . } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+    // The default-graph term in the absent-prefix expression must be
+    // hash2([4, ...]) -- term-type tag 4 = DefaultGraph -- to match
+    // the signer's leaf-hash encoding.
+    assert!(
+        result.sparql_nr.contains("consts::hash2([4, consts::encode_string(\"\")])"),
+        "expected default-graph slot to use term-type tag 4 (DefaultGraph), got:\n{}",
+        result.sparql_nr
+    );
+    // Negative check: the legacy mismatch (term-type 0 + empty-string
+    // value) must not appear for the graph slot of the absent term.
+    // The substring would be the same shape as a NamedNode("")
+    // encoding -- a proxy match for the bug we're fixing.
+    assert!(
+        !result.sparql_nr.contains("consts::hash2([0, consts::encode_string(\"\")])"),
+        "default-graph slot must not use term-type tag 0 (NamedNode-with-empty-IRI), got:\n{}",
+        result.sparql_nr
+    );
+
+    // The metadata should also surface `DefaultGraph` (not
+    // `NamedNode` with empty value) so the TS prover can route it
+    // through `DF.defaultGraph()` in `encodeAbsentTerm`.
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    let inner_terms = easy[0]
+        .get("innerTerms")
+        .and_then(|v| v.as_array())
+        .expect("innerTerms array");
+    let graph_term = inner_terms[3]
+        .get("term")
+        .expect("inner_terms[3].term must be present for DefaultGraph slot");
+    assert_eq!(
+        graph_term.get("termType").and_then(|v| v.as_str()),
+        Some("DefaultGraph"),
+        "expected innerTerms[3].term.termType = DefaultGraph, got {:?}",
+        graph_term
+    );
+}
+
+/// Round-5 prefix-3 OPTIONAL collapse acceptance test. Single-triple
+/// inner OPTIONAL with one inner-only `o` position lifts via the
+/// prefix-3 commitment instead of falling through to the power-set
+/// path. The inner-only `?o` is **not** projected (the soundness
+/// post-check enforces this -- see
+/// `optional_inner_only_object_projected_is_rejected`). See
+/// `spec/prefix-tree-commitment.md` Sec.8.
+#[test]
+fn optional_inner_only_object_collapses_via_prefix3() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?p WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    // No power-set variants -- prefix-3 collapse fires.
+    assert!(
+        result.optional_circuits.is_empty(),
+        "prefix-3 OPTIONAL collapse must not produce power-set variants, got {}",
+        result.optional_circuits.len()
+    );
+    let easy = result
+        .metadata
+        .get("easyOptionals")
+        .and_then(|v| v.as_array())
+        .expect("easyOptionals metadata array");
+    assert_eq!(
+        easy.len(),
+        1,
+        "expected one prefix-3 easy-case OPTIONAL, got {:?}",
+        easy
+    );
+    assert_eq!(
+        easy[0].get("prefixKind").and_then(|v| v.as_str()),
+        Some("prefix3_sp_g"),
+        "expected prefixKind metadata tag, got {:?}",
+        easy[0]
+    );
+    // The unmatched arm uses the prefix-3 boolean variant -- not the
+    // round-3 leaf-hash variant.
+    assert!(
+        result
+            .sparql_nr
+            .contains("verify_non_membership_prefix3_no_inclusion_check"),
+        "expected prefix-3 boolean variant in the body, got:\n{}",
+        result.sparql_nr
+    );
+    // The `BgpPrefix3` slot array is sized to 2 (one bracket pair).
+    assert!(
+        result.sparql_nr.contains("type BgpPrefix3 = [PrefixTriple3; 2]"),
+        "expected BgpPrefix3 size 2, got:\n{}",
+        result.sparql_nr
+    );
+    // `BoundaryCasesPrefix3` is sized to 1 (the one OPTIONAL collapse
+    // dispatch -- no NOT EXISTS in this query).
+    assert!(
+        result
+            .sparql_nr
+            .contains("type BoundaryCasesPrefix3 = [Field; 1]"),
+        "expected BoundaryCasesPrefix3 size 1, got:\n{}",
+        result.sparql_nr
+    );
+    // `main.nr` carries the two-root signer ABI.
+    assert!(
+        result.main_nr.contains("roots: [Root; 2]"),
+        "expected two-root signer ABI in main.nr, got:\n{}",
+        result.main_nr
+    );
+    assert!(
+        result
+            .main_nr
+            .contains("verify_low_sentinel_inclusion(low_sentinel_3, roots[1].value)")
+            && result
+                .main_nr
+                .contains("verify_high_sentinel_inclusion(high_sentinel_3, roots[1].value)"),
+        "expected prefix-3 sentinel inclusion against roots[1], got:\n{}",
+        result.main_nr
     );
 }
 
@@ -1298,6 +1604,60 @@ fn multiple_not_exists_emit_independent_boundary_dispatches() {
             result.sparql_nr
         );
     }
+}
+
+/// Round 5 -- a query mixing a round-3 ground-inner `NOT EXISTS`
+/// with a round-5 prefix-3 `NOT EXISTS` must emit **both** dispatch
+/// chains, with disjoint index spaces (`boundary_cases[]` vs
+/// `boundary_cases_prefix3[]`). Guards against shared-state
+/// regressions where the IR's two constraint vectors get conflated.
+#[test]
+fn mixed_round3_and_prefix3_not_exists() {
+    // Use a MINUS for the prefix-3 case: `MINUS { ?p ex:age ?age }`
+    // -- `?p` outer-bound, `?age` inner-only -- to avoid stacking
+    // two FILTER(NOT EXISTS) which spargebra normalises into a
+    // single `&&`-joined filter (rejected as nested-EXISTS-in-and).
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               ?s ex:knows ?p . \
+               FILTER(NOT EXISTS { ?s ex:type ex:Person . }) \
+               MINUS { ?p ex:age ?age . } \
+             }";
+    let result = transform_query(q).expect("transform should succeed");
+
+    assert!(
+        result.sparql_nr.contains("type BoundaryCases = [Field; 1]"),
+        "expected one round-3 dispatch, got:\n{}",
+        result.sparql_nr
+    );
+    assert!(
+        result
+            .sparql_nr
+            .contains("type BoundaryCasesPrefix3 = [Field; 1]"),
+        "expected one prefix-3 dispatch, got:\n{}",
+        result.sparql_nr
+    );
+    // Both dispatch chains must appear in the body.
+    assert!(
+        result.sparql_nr.contains("if boundary_cases[0] == 0")
+            && result
+                .sparql_nr
+                .contains("if boundary_cases_prefix3[0] == 0"),
+        "expected both dispatch chains, got:\n{}",
+        result.sparql_nr
+    );
+    // Round-3 NOT EXISTS still uses bgp[i] for brackets; prefix-3
+    // NOT EXISTS uses bgp_prefix3[i].
+    assert!(
+        result
+            .sparql_nr
+            .contains("utils::verify_non_membership_no_inclusion(bgp[")
+            && result
+                .sparql_nr
+                .contains("utils::prefix3::verify_non_membership_prefix3_no_inclusion(bgp_prefix3["),
+        "expected disjoint slot arrays for the two dispatches, got:\n{}",
+        result.sparql_nr
+    );
 }
 
 /// EXISTS nested under boolean operators is rejected for now (see
