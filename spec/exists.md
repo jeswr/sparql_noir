@@ -101,15 +101,65 @@ Approach (c) violates the workspace-level rule from `feedback_zkp_no_proof_of_re
 
 ## 4. Round-3 main-event delivery — what shipped
 
-Round 3 main event ships **Stages 1–3** (sorted commitment + non-membership primitive + NOT EXISTS + MINUS). Stage 4 (OPTIONAL collapse) is deferred — see §6 / `questions/optional-collapse-pattern-non-membership.md`.
+Round 3 main event ships **Stages 1–3** (sorted commitment + non-membership primitive + NOT EXISTS + MINUS). Stage 4 (OPTIONAL collapse) is split: the **easy case** lands as the round-3 follow-up (see §4.1); the **multi-triple / inner-only-free-position case** is deferred to round 4 (prefix-tree commitments).
 
 - **Sorted Merkle commitment.** `noir::utils::merkle` now sorts leaves ascending by `consts::hash4` before building the tree (insertion sort over the `N` triples; permutation-invariance property-tested). The signature commits to the sorted root. The sort is **stable** — equal-hash leaves keep input order — so canonical roots are deterministic in input set rather than input permutation.
 - **`verify_non_membership` / `verify_non_membership_no_inclusion` primitives** in `noir::utils`. The `_no_inclusion` variant assumes the bracketing leaves are already inclusion-checked elsewhere — used by the transform layer, which puts the brackets in `bgp` (so they pick up the standard per-triple inclusion in `main.nr`) and emits only the ordering / adjacency check inside `sparql.nr::checkBinding`.
 - **EXISTS** unchanged from the round-3 spike (PR #41) — the §2 flatten-into-outer-BGP reformulation.
 - **NOT EXISTS** lowering: **single-triple ground-inner only** — every position in the inner triple is either constant or a variable already bound by the outer μ. Lowers to a `NonExistenceConstraint`: two bracket-leaf BGP slots are appended (auto-inclusion-checked); the constraint emits a `verify_non_membership_no_inclusion(bgp[k], bgp[k+1], consts::hash4(absent_terms))` call inside `checkBinding`. Multi-triple inner / non-ground inner / nested NOT-EXISTS / inner UNION-or-OPTIONAL are rejected with clear errors — see §7.
 - **MINUS.** `MINUS { P_o } { P_i }` lowers to `Filter(NOT EXISTS { P_i }, P_o)` per W3C §18.5 — pure transform-side rewrite; no new primitive needed. Same single-triple ground-inner restriction inherits from the NOT EXISTS lowering. The W3C variable-disjoint freshness side-condition (rows where `dom(μ) ∩ dom(μ') = ∅` should be kept by MINUS) is documented as a small over-restriction; round-4 follow-up.
-- **OPTIONAL collapse — deferred.** Stage 4 of the round-3 main event would have replaced the `2^n` circuit-variant generation with a single circuit + `is_matched: bool[N]`. The unmatched arm requires non-membership of a *pattern* with free positions (e.g. `OPTIONAL { ?p ex:age ?o }` introduces `?o` as inner-only). This is strictly harder than Stage 2's single-triple ground-inner NOT EXISTS — see `questions/optional-collapse-pattern-non-membership.md` for the three candidate approaches and the round-4 decision needed. `optional_circuits[]` and the `ts.js:945-969` consumer **stay** in round 3.
-- The emit layer adds `verify_non_membership_no_inclusion` calls after the main assertion block; otherwise unchanged.
+- **OPTIONAL collapse — tiered partial (round-3 follow-up; see §4.1).** The easy case — single-triple inner with every variable position outer-bound — collapses to a single circuit per outer query via `assert(matched | unmatched)`. Multi-triple / inner-only-free-position OPTIONALs continue on the existing `2^n` power-set path (with the round-2 `optional_cap` guard). Round 4 (prefix-tree commitments) lifts the multi-triple restriction.
+- The emit layer adds `verify_non_membership_no_inclusion` calls after the main assertion block (NOT EXISTS / MINUS) and `assert(matched | unmatched)` lines for each easy-case OPTIONAL; otherwise unchanged.
+
+## 4.1 OPTIONAL collapse — tiered partial (round-3 follow-up, landed)
+
+The round-3 main event ships single-triple ground-inner NOT EXISTS / MINUS via the §3.3 sorted-commitment primitive. The OPTIONAL semantics ([W3C §18.5 LeftJoin](https://www.w3.org/TR/sparql11-query/#sparqlAlgebraEval)) requires the same primitive in the unmatched arm — a binding survives the LeftJoin either with the inner extension applied (matched) or, if no compatible inner solution exists, untouched (unmatched). For the round-4 collapse to work in full generality, the unmatched arm must prove non-membership of a *pattern* with free positions; that is the **prefix-tree commitment** work picked up by Jesse for round 4 (the round-3 question file at `questions/optional-collapse-pattern-non-membership.md` has been resolved and deleted from the workspace; git history is the audit trail).
+
+**This round-3 follow-up lands the easy slice of that collapse.**
+
+### Easy-case predicate
+
+The OPTIONAL block qualifies for collapse iff **all** of:
+
+1. The inner pattern is a **single triple**.
+2. Every variable position of the inner triple is bound by the outer mapping μ (i.e. the variable already appears in the outer scope's `bindings`). Constant positions are always fine.
+3. No inner FILTER, no nested OPTIONAL, no UNION inside the inner, no EXISTS / NOT EXISTS inside the inner.
+4. No outer LeftJoin filter expression (`OPTIONAL { … FILTER(…) }` is hoisted to a `LeftJoin` filter and is rejected from the easy case).
+5. If the inner triple sits in a `GRAPH ?g` context, `?g` itself is outer-bound.
+
+Anything else falls through to the existing `optional_cap`-guarded power-set path. The classifier is conservative: false negatives cost a power-set variant; false positives would corrupt soundness.
+
+### Why this is sound
+
+Under the easy-case predicate, the inner triple becomes **fully ground** after substituting μ — every position is a concrete term the outer scope has already witnessed. Crucially, **the easy case has no inner-only variables**: inner-only variables would not be in `outer_bound` and the predicate (clause 2) would reject. Therefore:
+
+- The matched arm extends μ with no new bindings (μ ∪ μ' = μ, since μ' carries no new variables).
+- The unmatched arm leaves μ alone.
+
+The disclosed solution multiset is **identical** under either arm. The reason to encode both arms (rather than dropping the OPTIONAL entirely) is so the prover commits to which arm holds, giving the verifier a sound circuit-level guarantee that the disclosed bindings genuinely come from a SPARQL evaluation against the committed dataset — including the OPTIONAL block's witness. The matched arm reduces to standard inclusion of the substituted ground triple (Merkle binding, identical cost to a regular BGP entry); the unmatched arm reuses the existing §3.3 sorted-commitment non-membership primitive (`verify_non_membership_no_inclusion_check`, the boolean variant added for this round).
+
+The collapse therefore reduces to: at evaluation time the prover supplies one of two witness shapes; the circuit asserts `matched | unmatched`; soundness reduces to the existing primitives' soundness arguments (§3.3, §5).
+
+### What is NOT covered
+
+The hard cases — multi-triple inner, inner with positions not bound by outer μ, nested OPTIONALs — continue to use the round-2 `optional_cap`-guarded power-set strategy. The IR's `OptionalBlock` (and the variant emitter consuming it) stays for these. Multi-triple inner non-membership unblocks via round-4's prefix-tree commitments.
+
+### Witness / circuit shape
+
+Three appended BGP slots per easy-case OPTIONAL:
+
+- `bgp[matched_idx]` — carries the inner triple in the matched arm; in the unmatched arm an unconstrained valid leaf (still inclusion-checked by `main.nr`'s generic per-triple loop).
+- `bgp[bracket_left_idx]` / `bgp[bracket_right_idx]` — the two sorted-tree neighbour leaves bracketing the absent hash in the unmatched arm; in the matched arm unconstrained valid leaves.
+
+The emit layer produces one `assert(matched_clause | unmatched_clause)` line in `checkBinding`, where `matched_clause` is the conjunction of the four position equalities pinning `bgp[matched_idx]` to the substituted inner triple, and `unmatched_clause` is `utils::verify_non_membership_no_inclusion_check(bgp[bracket_left_idx], bgp[bracket_right_idx], consts::hash4([…]))`.
+
+### Disclosure
+
+Inner-only variables aren't an issue here — the easy-case predicate excludes them. The fall-through (multi-triple) path continues to expose only outer-projected variables via `Variables`; inner-only variables in OPTIONAL inners follow the same `__exists_<name>_<id>` renaming pattern documented in §2.2 and remain hidden from metadata.
+
+### Power-set arithmetic — easy-case OPTIONALs do not multiply
+
+A query with `k` easy-case OPTIONALs and `n` non-easy OPTIONALs produces `2^n` circuit variants (driven by the non-easy power-set), not `2^(n+k)`. The `optional_cap` guard now reads on the non-easy population only — adding an easy-case OPTIONAL does not push a query past the cap.
 
 ## 5. Soundness argument — EXISTS
 
@@ -128,7 +178,7 @@ The argument reuses existing `verify_inclusion` soundness — the EXISTS primiti
 - **EXISTS:** ✓ shipped this spike.
 - **NOT EXISTS:** deferred until the dataset commitment is upgraded to a sorted Merkle tree (approach b above). This is the right scope for the round-3 main event — likely 3–5 days for the sign-time sorting + commitment shape change + non-membership primitive in `noir/lib/utils`, plus the lowering update to use it.
 - **MINUS:** blocked on NOT EXISTS. Once NOT EXISTS lands, MINUS is a 1-day rewrite at the algebra level (`Minus(P_o, P_i)` → `Filter(NOT EXISTS{P_i}, P_o)` per W3C §18.5 modulo the freshness side-condition).
-- **OPTIONAL collapse (§6.4):** blocked on NOT EXISTS. The unmatched arm needs the same primitive.
+- **OPTIONAL collapse (§6.4):** *partial* — easy case (single-triple inner with every position outer-bound) shipped as round-3 follow-up via the boolean variant of `verify_non_membership_no_inclusion`. Multi-triple / inner-only-free-position cases continue on the `optional_cap` power-set path until round 4's prefix-tree commitments land.
 - **Subqueries:** *not* blocked on NOT EXISTS. They're an independent piece of work involving inner SELECT scope plumbing.
 
 ## 7. Open questions

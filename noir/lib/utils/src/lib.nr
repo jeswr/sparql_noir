@@ -312,3 +312,47 @@ pub fn verify_non_membership_no_inclusion(
         "non-membership: right leaf is not adjacent to left leaf",
     );
 }
+
+/// Boolean-returning variant of `verify_non_membership_no_inclusion`.
+/// Returns `true` iff the ordering and adjacency constraints hold.
+///
+/// **Why a boolean variant exists.** The asserting variant is convenient
+/// when non-membership must hold unconditionally (NOT EXISTS / MINUS).
+/// The round-3-follow-up tiered partial OPTIONAL collapse (`spec/exists.md`
+/// section 4.1) lowers the OPTIONAL's two arms to
+/// `assert(matched | unmatched)` -- both arms must be Field-valued
+/// booleans inside a single assertion. The asserting variant cannot
+/// appear inside an `|` because it has no return value.
+///
+/// Soundness is identical to `verify_non_membership_no_inclusion`: every
+/// constituent check becomes a bit `&`-folded into `ok`, so the returned
+/// `true` is equivalent to the asserting variant having succeeded. The
+/// Boolean direction-bit invariants stay enforced (defence-in-depth
+/// against the high-severity 2026-05-03 finding).
+pub fn verify_non_membership_no_inclusion_check(
+    left: Triple,
+    right: Triple,
+    absent_hash: Field,
+) -> bool {
+    let mut ok: bool = true;
+    ok &= left.path[0].lt(absent_hash);
+    ok &= absent_hash.lt(right.path[0]);
+
+    let mut left_idx: u64 = 0;
+    let mut right_idx: u64 = 0;
+    let mut bit: u64 = 1;
+    for j in 0..(consts::MERKLE_DEPTH - 1) {
+        let l = left.directions[j];
+        let r = right.directions[j];
+        ok &= (l == 0) | (l == 1);
+        ok &= (r == 0) | (r == 1);
+        if l == 1 {
+            left_idx += bit;
+        }
+        if r == 1 {
+            right_idx += bit;
+        }
+        bit *= 2;
+    }
+    ok & (right_idx == left_idx + 1)
+}
