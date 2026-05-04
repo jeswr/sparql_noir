@@ -46,6 +46,10 @@ test/circuits/sparql11/
 test/circuits/compiled/
 test/circuits/edge-cases/
 
+# W3C conformance harness output (regenerated per run; CI uploads as artifact)
+test/conformance/w3c-sparql10-report.json
+test/conformance/w3c-sparql10-report.*.json
+
 legacy/
 *.log
 libs/
