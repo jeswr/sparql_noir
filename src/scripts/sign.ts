@@ -266,11 +266,16 @@ export async function signRdfData(inputPath: string): Promise<SignedData> {
   // Add quad string representations
   jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
 
-  // Generate cryptographic signature using shared logic. The
-  // signature covers `root` (round-3 leaf-hash commitment); the
-  // round-5 ABI extends to a concatenated `(root, rootPrefix3)`
-  // payload once the verifier-side check is plumbed through (TODO
-  // in `noir/bin/signature/`).
+  // Generate cryptographic signature using shared logic.
+  //
+  // **Round-5 follow-up gap (roborev #545 high 2)**: the signature
+  // currently covers only `root` (round-3 leaf-hash commitment);
+  // generated prefix-3 circuits verify a signature on **both**
+  // `roots[0]` and `roots[1]`, so a prefix-3 query proof will fail
+  // verification until this is fixed. Tracked in
+  // `spec/prefix-tree-commitment.md` Sec.8.6. The fix is to sign
+  // a canonical concatenation (e.g. `hash2([root, rootPrefix3])`)
+  // and update `noir/bin/signature/src/main.nr` accordingly.
   await generateSignature(jsonRes, defaultConfig.signature);
 
   return jsonRes as SignedData;

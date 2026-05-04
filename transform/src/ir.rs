@@ -292,6 +292,20 @@ pub struct EasyOptional {
     /// reference `bgp`. The original easy case (every position
     /// outer-bound or constant).
     pub(crate) prefix_kind: Option<PrefixKind>,
+    /// For prefix-tree collapses (`prefix_kind == Some(...)`), the
+    /// name of the inner-only variable at `prefix_kind.free_position()`.
+    /// `process_query` reads this to enforce the projection check
+    /// (roborev finding #545 high): if this variable appears in the
+    /// query's projected `Variables`, the collapse is **unsound** and
+    /// must be rejected -- the matched arm leaves
+    /// `bgp[matched_idx].terms[free_position]` unconstrained, so a
+    /// malicious prover could bind `variables.<inner-only>` to any
+    /// leaf-internal value. `None` for round-3 collapses (no
+    /// inner-only variable) and prefix-3 cases where the inner-only
+    /// position was a literal / constant after substitution (which
+    /// the easy-case predicate currently doesn't allow but the field
+    /// is shape-future-proofed).
+    pub(crate) inner_only_var: Option<String>,
 }
 
 #[derive(Clone, Debug)]

@@ -1550,8 +1550,19 @@ fn expand_negated_property_set(
 /// the unmatched arm uses the leaf-hash sorted commitment (round 3).
 ///
 /// `EasyCase::Prefix(kind)` -- exactly one inner-only position whose
-/// shape matches a shipped prefix kind (round 5: only `Prefix3SpG`).
-/// The unmatched arm uses the prefix-tree commitment.
+/// shape matches a shipped prefix kind (round 5: only `Prefix3SpG`),
+/// **and the inner-only variable is not in the query's projection**.
+/// The unmatched arm uses the prefix-tree commitment. The matched
+/// arm leaves the inner-only position unconstrained, so projecting
+/// it would produce a soundness break -- a malicious prover could
+/// pin `bgp[matched_idx].terms[free]` to any leaf-internal value
+/// (the inclusion check accepts every signed quad's value at that
+/// position) and bind `variables.<inner-only>` to that arbitrary
+/// witness, claiming it as the OPTIONAL's bound value. Roborev
+/// finding #545 (high). The projected check is enforced by the
+/// caller (`process_query`) which is the only place with the
+/// projection list; the caller passes `inner_only_var_projected`
+/// here.
 ///
 /// `EasyCase::FallThrough` -- shape doesn't fit either; falls through
 /// to the existing `2^n` power-set lowering.
@@ -1904,13 +1915,14 @@ fn process_graph_pattern_inner(
                         bracket_right_idx,
                         inner_terms,
                         prefix_kind: None,
+                        inner_only_var: None,
                     });
                     return Ok(left_info);
                 }
                 EasyCase::Prefix(prefix_kind) => {
                     // Round-5 prefix-tree OPTIONAL collapse
                     // (`spec/prefix-tree-commitment.md` Sec.8). The
-                    // matched arm still pins all four positions of
+                    // matched arm pins the fixed positions of
                     // `bgp[matched_idx]` -- the prover witnesses a
                     // single quad whose `o` (the inner-only position)
                     // can be any value. The unmatched arm proves
@@ -1920,21 +1932,30 @@ fn process_graph_pattern_inner(
                     // matched arm and two prefix-3 slots for the
                     // brackets.
                     //
-                    // Soundness: if the matched arm can witness a
-                    // quad with the substituted (s, p, g) prefix, the
-                    // prefix is in the dataset and the unmatched arm's
-                    // strict-`<` bracketing must fail. If no such
-                    // quad exists, the matched arm cannot satisfy the
-                    // position assertions (no leaf with the right
-                    // (s, p, g)) and the unmatched arm's prefix
-                    // non-membership succeeds. The disjunction is
-                    // therefore tautologous on the live data and the
-                    // outer μ's projected bindings are unchanged in
-                    // both arms (the matched arm pins to a concrete
-                    // value; the unmatched arm does not bind the
-                    // inner-only variable, but it isn't projected).
+                    // Soundness depends on the inner-only variable
+                    // **not being projected** -- the matched arm
+                    // leaves `bgp[matched_idx].terms[free_position]`
+                    // unconstrained, so a malicious prover could
+                    // pick any signed leaf's terms[free_position]
+                    // and have `variables.<inner-only>` bound to that
+                    // arbitrary value. `process_query` enforces the
+                    // projection check post-lowering (roborev #545
+                    // high). The lowering layer captures the
+                    // inner-only variable's name so the post-check
+                    // has the information it needs.
                     let inner_pattern = &right_info.patterns[0];
                     let inner_terms = absent_terms_from_pattern(inner_pattern)?;
+
+                    // Extract the inner-only variable's name from the
+                    // free position of the inner triple.
+                    let inner_only_var = match prefix_kind.free_position() {
+                        2 => match &inner_pattern.pattern.object {
+                            TermPattern::Variable(v) => Some(v.as_str().to_string()),
+                            _ => None,
+                        },
+                        // Future variants slot in here.
+                        _ => None,
+                    };
 
                     let matched_idx = offset;
                     let prefix_n = left_info.bgp_prefix3_len;
@@ -1943,28 +1964,11 @@ fn process_graph_pattern_inner(
 
                     // One BGP slot for the matched-arm placeholder --
                     // any valid leaf, with the position-assertion test
-                    // pinning each term in the matched arm.
+                    // pinning each fixed term in the matched arm.
                     left_info
                         .patterns
                         .push(bracket_placeholder_pattern(&GraphContext::Default, fresh));
-                    // Allocate two prefix-3 slots; no synthetic
-                    // patterns added to `bgp` for these, since
-                    // bgp_prefix3 is its own array in `main.nr`.
                     left_info.bgp_prefix3_len += 2;
-
-                    // The inner-only position is unconstrained in the
-                    // matched arm; rewrite it to `Term::Variable(__)`
-                    // pointing at the matched slot's free position so
-                    // the matched-arm equality is "free position can
-                    // be anything", which is naturally enforced by
-                    // skipping the per-position assertion. We do this
-                    // by swapping that term to a fresh dummy variable
-                    // and threading it via the binding map. Concretely:
-                    // we ask the emit layer to omit the equality at
-                    // `prefix_kind.free_position()` for prefix-tree
-                    // collapses. The `EasyOptional` IR just records
-                    // the `prefix_kind`; emit branches on it.
-                    let _ = inner_terms.clone();
 
                     left_info.easy_optionals.push(EasyOptional {
                         id: fresh.next_optional_id(),
@@ -1973,6 +1977,7 @@ fn process_graph_pattern_inner(
                         bracket_right_idx,
                         inner_terms,
                         prefix_kind: Some(prefix_kind),
+                        inner_only_var,
                     });
                     return Ok(left_info);
                 }
@@ -2581,6 +2586,38 @@ pub(crate) fn process_query_with_options_and_form(
                 }
                 already.insert(key.variable.clone());
                 circuit_vars.push(key.variable.clone());
+            }
+
+            // Round-5 soundness check (roborev #545 high). A
+            // prefix-3 OPTIONAL collapse leaves
+            // `bgp[matched_idx].terms[free_position]` unconstrained
+            // in the matched arm -- if the inner-only variable bound
+            // to that position is in the projected `circuit_vars`,
+            // a malicious prover could pick any signed leaf's
+            // value and the verifier would accept the projected
+            // binding without it being live in the dataset. Reject
+            // with a clear error rather than silently emit an
+            // unsound proof.
+            let projected: std::collections::HashSet<&str> =
+                circuit_vars.iter().map(String::as_str).collect();
+            for eo in &pattern.easy_optionals {
+                if eo.prefix_kind.is_none() {
+                    continue;
+                }
+                if let Some(name) = &eo.inner_only_var {
+                    if projected.contains(name.as_str()) {
+                        return Err(format!(
+                            "OPTIONAL with inner-only variable `?{}` projected from a prefix-tree \
+                             collapse is not yet supported -- the matched arm leaves the inner-only \
+                             position unconstrained, which would let a malicious prover bind \
+                             `variables.{}` to any leaf's value at that position. Drop the variable \
+                             from the projection or rewrite the OPTIONAL to bind it via an \
+                             outer-pattern triple. See spec/prefix-tree-commitment.md Sec.8 / \
+                             roborev #545.",
+                            name, name
+                        ));
+                    }
+                }
             }
 
             Ok(QueryInfo {

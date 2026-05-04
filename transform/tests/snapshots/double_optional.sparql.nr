@@ -8,14 +8,14 @@ use dep::types::PrefixTriple3;
 pub(crate) type BGP = [Triple; 3];
 pub(crate) struct Variables {
   pub(crate) s: Field,
-  pub(crate) a: Field,
-  pub(crate) b: Field,
+  pub(crate) o: Field,
 }
 
 pub(crate) type BgpPrefix3 = [PrefixTriple3; 4];
 pub(crate) type BoundaryCasesPrefix3 = [Field; 2];
 pub(crate) fn checkBinding(bgp: BGP, variables: Variables, bgp_prefix3: BgpPrefix3, low_sentinel_3: SentinelLeaf, high_sentinel_3: SentinelLeaf, boundary_cases_prefix3: BoundaryCasesPrefix3) {
   assert(variables.s == bgp[0].terms[0]);
+  assert(variables.o == bgp[0].terms[2]);
   assert(consts::hash2([0, consts::encode_string("http://example.org/p")]) == bgp[0].terms[1]);
   assert(((variables.s == bgp[1].terms[0]) & (consts::hash2([0, consts::encode_string("http://example.org/a")]) == bgp[1].terms[1]) & (consts::hash2([0, consts::encode_string("")]) == bgp[1].terms[3])) | (((boundary_cases_prefix3[0] == 0) & utils::prefix3::verify_non_membership_prefix3_low_sentinel_no_inclusion_check(low_sentinel_3, bgp_prefix3[1], utils::prefix3::hash3_sp_g(variables.s, consts::hash2([0, consts::encode_string("http://example.org/a")]), consts::hash2([0, consts::encode_string("")])))) | ((boundary_cases_prefix3[0] == 1) & utils::prefix3::verify_non_membership_prefix3_no_inclusion_check(bgp_prefix3[0], bgp_prefix3[1], utils::prefix3::hash3_sp_g(variables.s, consts::hash2([0, consts::encode_string("http://example.org/a")]), consts::hash2([0, consts::encode_string("")])))) | ((boundary_cases_prefix3[0] == 2) & utils::prefix3::verify_non_membership_prefix3_high_sentinel_no_inclusion_check(bgp_prefix3[0], high_sentinel_3, utils::prefix3::hash3_sp_g(variables.s, consts::hash2([0, consts::encode_string("http://example.org/a")]), consts::hash2([0, consts::encode_string("")]))))));
   assert(((variables.s == bgp[2].terms[0]) & (consts::hash2([0, consts::encode_string("http://example.org/b")]) == bgp[2].terms[1]) & (consts::hash2([0, consts::encode_string("")]) == bgp[2].terms[3])) | (((boundary_cases_prefix3[1] == 0) & utils::prefix3::verify_non_membership_prefix3_low_sentinel_no_inclusion_check(low_sentinel_3, bgp_prefix3[3], utils::prefix3::hash3_sp_g(variables.s, consts::hash2([0, consts::encode_string("http://example.org/b")]), consts::hash2([0, consts::encode_string("")])))) | ((boundary_cases_prefix3[1] == 1) & utils::prefix3::verify_non_membership_prefix3_no_inclusion_check(bgp_prefix3[2], bgp_prefix3[3], utils::prefix3::hash3_sp_g(variables.s, consts::hash2([0, consts::encode_string("http://example.org/b")]), consts::hash2([0, consts::encode_string("")])))) | ((boundary_cases_prefix3[1] == 2) & utils::prefix3::verify_non_membership_prefix3_high_sentinel_no_inclusion_check(bgp_prefix3[2], high_sentinel_3, utils::prefix3::hash3_sp_g(variables.s, consts::hash2([0, consts::encode_string("http://example.org/b")]), consts::hash2([0, consts::encode_string("")]))))));

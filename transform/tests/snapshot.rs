@@ -62,9 +62,13 @@ const CORPUS: &[Case] = &[
         name: "filter_float_const",
         query: "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ?p ?o . FILTER(\"1.5\"^^xsd:float < \"2.0\"^^xsd:float) }",
     },
+    // OPTIONAL where the inner-only `?o` is **not** projected -- the
+    // round-5 prefix-3 collapse fires (`?p` outer-bound, `?o` free).
+    // Projecting `?o` would be unsound (roborev #545); see the
+    // dedicated `optional_inner_only_object_projected_is_rejected` test.
     Case {
         name: "optional_basic",
-        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?p WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
     },
     // Round-3 follow-up — tiered partial OPTIONAL collapse (easy
     // case). The inner triple `?s ex:type ex:Person` has every
@@ -142,9 +146,15 @@ const CORPUS: &[Case] = &[
         name: "filter_abs",
         query: "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nSELECT ?s WHERE { ?s ex:n ?n . FILTER(ABS(?n) > \"5\"^^xsd:integer) }",
     },
+    // Two prefix-3 OPTIONAL collapses sharing the outer `?s`. The
+    // inner-only `?a` / `?b` are *not* projected (they would be
+    // unsound at projection time -- see
+    // `optional_inner_only_object_projected_is_rejected`). The two
+    // collapses share `bgp_prefix3` (each contributes 2 slots) and
+    // `boundary_cases_prefix3[0..2]`.
     Case {
         name: "double_optional",
-        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?a ?b WHERE { ?s ex:p ?o . OPTIONAL { ?s ex:a ?a . } OPTIONAL { ?s ex:b ?b . } }",
+        query: "PREFIX ex: <http://example.org/>\nSELECT ?s ?o WHERE { ?s ex:p ?o . OPTIONAL { ?s ex:a ?a . } OPTIONAL { ?s ex:b ?b . } }",
     },
     // Aggregates via the disclose-and-verify pattern (SPARQL_ROADMAP.md
     // §8.6, Q6 decision 2026-05-03). The circuit body for each of these
@@ -306,12 +316,14 @@ const CORPUS: &[Case] = &[
     // with one inner-only **object** position. The round-3 ground-inner
     // easy case can't fire (`?o` is inner-only); the round-5 prefix-3
     // collapse takes over. The matched arm pins `s, p, g`; the
-    // unmatched arm proves `(s, p, g)`-prefix non-membership. See
-    // `spec/prefix-tree-commitment.md` Sec.8.
+    // unmatched arm proves `(s, p, g)`-prefix non-membership. The
+    // inner-only `?o` is not projected (projecting it would be
+    // unsound -- see `optional_inner_only_object_projected_is_rejected`).
+    // See `spec/prefix-tree-commitment.md` Sec.8.
     Case {
         name: "optional_prefix3_collapse",
         query: "PREFIX ex: <http://example.org/>\n\
-                SELECT ?s WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
+                SELECT ?s ?p WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }",
     },
 ];
 
@@ -727,14 +739,38 @@ fn optional_multi_triple_falls_through_to_power_set() {
     );
 }
 
+/// Round-5 soundness check (roborev finding #545 high). Projecting
+/// the inner-only variable from a prefix-tree-collapsed OPTIONAL is
+/// unsound: the matched arm leaves `bgp[matched_idx].terms[free]`
+/// unconstrained, so a malicious prover could pick any signed leaf's
+/// value at that position and the verifier would accept the
+/// projected binding. Reject the query rather than silently emit an
+/// unsound proof.
+#[test]
+fn optional_inner_only_object_projected_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
+    match transform_query(q) {
+        Ok(_) => panic!("expected projected-inner-only OPTIONAL to be rejected"),
+        Err(err) => assert!(
+            err.contains("?o") && err.contains("prefix-tree") && err.contains("unconstrained"),
+            "expected error mentioning ?o, prefix-tree, unconstrained, got: {}",
+            err
+        ),
+    }
+}
+
 /// Round-5 prefix-3 OPTIONAL collapse acceptance test. Single-triple
 /// inner OPTIONAL with one inner-only `o` position lifts via the
 /// prefix-3 commitment instead of falling through to the power-set
-/// path. See `spec/prefix-tree-commitment.md` Sec.8.
+/// path. The inner-only `?o` is **not** projected (the soundness
+/// post-check enforces this -- see
+/// `optional_inner_only_object_projected_is_rejected`). See
+/// `spec/prefix-tree-commitment.md` Sec.8.
 #[test]
 fn optional_inner_only_object_collapses_via_prefix3() {
     let q = "PREFIX ex: <http://example.org/>\n\
-             SELECT ?s ?o WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
+             SELECT ?s ?p WHERE { ?s ex:knows ?p . OPTIONAL { ?p ex:age ?o . } }";
     let result = transform_query(q).expect("transform should succeed");
 
     // No power-set variants -- prefix-3 collapse fires.

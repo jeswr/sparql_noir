@@ -245,6 +245,22 @@ The TS layer's `signRdfData` (`src/scripts/sign.ts`) computes both trees in para
 
 Deployments that don't need the prefix tree set `rootPrefix3 = "0x0"` and omit `prefix3`; any prover attempting a prefix-3 non-membership against an empty tree fails because the genuine tree-build hash never equals zero. See Sec.6.3.
 
+### 8.6 Runtime ABI gaps (round-5 follow-up)
+
+Round 5 ships the **transform-side** wiring -- the generated `sparql.nr` / `main.nr` correctly reference the two-root signer ABI and the prefix-3 inputs. Two pieces of **runtime glue** are still scaffolding-level and tracked as round-5 follow-ups:
+
+1. **Signature over both roots** (roborev #545 high). The TS signer publishes both roots in `signed.json` but currently signs only `root` (round-3). The round-5 generated circuits' `verify_signature(public_key, roots[1])` call therefore receives a `roots[1]` whose `.signature` field is a placeholder. Fix in flight: extend `generateSignature` to sign a canonical `(root, rootPrefix3)` payload (e.g. `hash2([root, rootPrefix3])`) and update `noir/bin/signature/src/main.nr` to verify against that payload. Until then, a prefix-3 query proof will fail signature verification.
+
+2. **Prove-time input population** (roborev #545 high). `src/scripts/prove.ts` and the WASM input builders don't yet populate `roots[1]`, `bgp_prefix3`, `low_sentinel_3`, `high_sentinel_3`, or `boundary_cases_prefix3` from the signer's `prefix3` data. Round-5 follow-up. Until then, the generated `main.nr` for a prefix-3 query is correct but no prover-side glue exists to invoke it.
+
+Neither gap affects the transform-layer correctness (the focus of this round); both are tracked in the round-5 follow-up branch and will land before the prefix-3 commitment is exercised end-to-end on real datasets.
+
+### 8.7 Soundness check on projection (roborev #545 high 1)
+
+The matched arm of a prefix-3 OPTIONAL collapse pins the fixed positions but leaves `bgp[matched_idx].terms[free_position]` unconstrained, so a malicious prover could pick any signed leaf's value at that position. If the inner-only variable bound to the free position is **projected** in the query's `Variables`, the verifier would accept a binding that wasn't witnessed by a live (s, p, o, g) tuple in the matched-arm sense. This is unsound.
+
+`process_query` enforces a post-lowering check: if any prefix-3 `EasyOptional`'s `inner_only_var` appears in `circuit_vars`, reject the query with a clear error rather than silently emitting an unsound circuit. This is the round-5 conservative position; a future round can extend the matched arm to pin all four positions when the inner-only is projected (at the cost of a richer witness shape) and lift the rejection.
+
 ## 9. Open questions for the follow-up round
 
 1. **Cross-tree consistency check at sign time** (Sec.4 subtlety). The `O(N²)` check is acceptable; an `O(N log N)` Merkle-multiset-equality argument would be cleaner. Defer until the prefix-tree variants multiply and the constant factor matters.
