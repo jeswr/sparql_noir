@@ -1,0 +1,81 @@
+name: W3C SPARQL 1.0 conformance
+
+# Authoritative pass-rate harness for paper §8.2.
+#
+# Reports the rate; never gates merging on it. The threshold below is
+# kept at 0 deliberately so the row in the §8.2 table can ratchet
+# upwards as the supported algebra fragment grows. Bump --threshold
+# only after a deliberate decision to lock in a regression floor.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Harness mode (transform-only is fast and CI-safe; full also runs prove/verify)'
+        required: false
+        default: 'transform-only'
+        type: choice
+        options:
+          - transform-only
+          - full
+
+jobs:
+  conformance:
+    name: SPARQL 1.0 conformance harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: |
+          if ! command -v wasm-pack >/dev/null 2>&1; then
+            curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          fi
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Bundle Noir library sources
+        run: npm run bundle:noir-lib
+
+      - name: Build TypeScript
+        run: npm run build:tsc
+
+      - name: Build transform WASM bundle
+        run: npm run build:wasm
+
+      - name: Run W3C SPARQL 1.0 conformance harness
+        env:
+          MODE: ${{ github.event.inputs.mode || 'transform-only' }}
+        run: |
+          npx tsx test/conformance/run-w3c-sparql10.ts \
+            --concurrency=4 \
+            --threshold=0 \
+            ${MODE:+$( [ "$MODE" = "full" ] && echo "--full" )}
+
+      - name: Upload JSON report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w3c-sparql10-report
+          path: test/conformance/w3c-sparql10-report.json
+          if-no-files-found: warn
+          retention-days: 90
