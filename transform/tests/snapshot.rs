@@ -1246,6 +1246,183 @@ fn optional_easy_case_graph_var_bound_by_sibling() {
     );
 }
 
+/// Round-3 follow-up — Copilot soundness flag (issue #57, flag 1 /
+/// `lower.rs:1967`). When `GRAPH ?g { OPTIONAL { ground } }` is the
+/// entire WHERE body, every BGP slot is an easy-OPTIONAL synthetic
+/// slot, so no real triple binds `?g`. The earlier comment in
+/// `lower.rs` deferred validation to `process_query`, but no such
+/// validation existed: the lowering succeeded and emitted a circuit
+/// where `variables.g` appeared inside the matched-arm equality and
+/// the unmatched-arm absent hash with no constraint pinning it to a
+/// graph that actually appears in the dataset. The unmatched arm
+/// becomes vacuous (the prover can claim `?g = ex:not_in_dataset`
+/// and prove the inner triple isn't in that graph, which is true for
+/// any unused IRI), so a projected `?g` would carry a value the
+/// dataset doesn't witness — soundness gap.
+///
+/// Fix: reject the query at lowering time. The user-facing message
+/// must point them at the workaround (introduce a sibling pattern
+/// outside the `GRAPH` wrapper, exactly the case covered by
+/// `optional_easy_case_graph_var_bound_by_sibling`).
+#[test]
+fn optional_easy_case_graph_var_with_no_real_slot_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?g WHERE { GRAPH ?g { OPTIONAL { ex:a ex:p ex:b . } } }";
+    match transform_query(q) {
+        Ok(result) => panic!(
+            "expected lowering to reject the all-easy-OPTIONAL graph-variable case, \
+             got circuit:\n{}",
+            result.sparql_nr
+        ),
+        Err(err) => assert!(
+            err.contains("GRAPH") && err.contains("?g"),
+            "error should mention the unbound GRAPH variable, got: {}",
+            err
+        ),
+    }
+}
+
+/// Round-3 follow-up — Copilot soundness flag (issue #57, flag 2 /
+/// `emit.rs:290`). An easy-case OPTIONAL lowered inside a UNION
+/// branch lives in `branch.easy_optionals`, but the emit layer's
+/// branch handler only joins the branch's `bindings` / `assertions`
+/// / `filters` into the per-branch boolean — branch-local
+/// `easy_optionals` are silently dropped. The result: the BGP grows
+/// by 3 placeholder slots (matched + 2 brackets) which `main.nr`
+/// inclusion-checks, but no constraint forces those slots to relate
+/// to the OPTIONAL inner triple. A prover can always satisfy the
+/// branch by providing arbitrary leaves for the 3 phantom slots —
+/// the OPTIONAL is meaningless. Mirrors the pre-existing rejection
+/// of NOT EXISTS / MINUS inside UNION branches.
+///
+/// Fix: reject the query at lowering time, consistent with the
+/// existing UNION-branch non-membership rejection.
+#[test]
+fn optional_easy_case_inside_union_branch_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               { ?s ex:a ?o . OPTIONAL { ?s ex:type ex:Person . } } \
+               UNION \
+               { ?s ex:b ?o . } \
+             }";
+    match transform_query(q) {
+        Ok(result) => panic!(
+            "expected lowering to reject easy-case OPTIONAL inside UNION branch, \
+             got circuit:\n{}",
+            result.sparql_nr
+        ),
+        Err(err) => assert!(
+            err.contains("OPTIONAL") && err.contains("UNION"),
+            "error should mention OPTIONAL inside UNION, got: {}",
+            err
+        ),
+    }
+}
+
+/// Round-3 follow-up — Copilot soundness flag (issue #57, flag 3 /
+/// `metadata.rs:197`). The same code path as flag 2: when an
+/// easy-case OPTIONAL lives inside a UNION branch, the base metadata
+/// only serializes top-level `info.pattern.easy_optionals` and the
+/// emitted `easyOptionals` array is empty even though extra
+/// synthetic witness slots have been introduced in `inputPatterns`.
+/// The prover-side glue (which reads `easyOptionals` to learn which
+/// BGP slots are matched / bracket placeholders for each collapsed
+/// OPTIONAL) sees nothing — yet the circuit still demands inclusion
+/// witnesses for those slots. Independent of soundness, this would
+/// also break the prover.
+///
+/// Fix: same as flag 2 — rejection at lowering time prevents the
+/// metadata layer from ever observing branch-internal easy
+/// OPTIONALs. Test asserts both the rejection (so the metadata layer
+/// is unreachable) and that no surprise empty `easyOptionals` array
+/// can leak through.
+#[test]
+fn optional_easy_case_metadata_never_silently_drops_branch_internal_collapse() {
+    // Same query as flag 2; if rejection is in place, this Err path
+    // fires and the metadata layer is never reached.
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               { ?s ex:a ?o . OPTIONAL { ?s ex:type ex:Person . } } \
+               UNION \
+               { ?s ex:b ?o . } \
+             }";
+    let err = transform_query(q)
+        .err()
+        .expect("expected rejection — see flag 2 regression test");
+    // Belt-and-braces: the error message must clearly attribute the
+    // rejection to the OPTIONAL-in-UNION condition, not some
+    // unrelated post-facto failure that happens to match `Err(_)`.
+    assert!(
+        err.contains("OPTIONAL") && err.contains("UNION"),
+        "metadata-layer protection relies on the lowering-layer rejection \
+         catching the case before metadata runs; error must clearly attribute \
+         rejection to OPTIONAL inside UNION, got: {}",
+        err
+    );
+}
+
+/// Round-3 follow-up — Copilot review on PR #58. A non-easy OPTIONAL
+/// inside a UNION branch lives in `branch.optional_blocks`, but
+/// `transform_query` only flattens top-level
+/// `info.pattern.optional_blocks`, and `emit.rs`'s UNION path doesn't
+/// consume per-branch optional blocks at all. The branch-local OPTIONAL
+/// is silently dropped — the verifier expects the OPTIONAL's bindings
+/// to be filled but they never are. Mirrors the existing rejection of
+/// branch-local easy-OPTIONALs / NOT EXISTS / MINUS.
+#[test]
+fn optional_general_case_inside_union_branch_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               { ?s ex:a ?o . OPTIONAL { ?s ex:p ?p . ?p ex:q ?q . } } \
+               UNION \
+               { ?s ex:b ?o . } \
+             }";
+    match transform_query(q) {
+        Ok(result) => panic!(
+            "expected lowering to reject general-case OPTIONAL inside UNION branch, \
+             got circuit:\n{}",
+            result.sparql_nr
+        ),
+        Err(err) => assert!(
+            err.contains("OPTIONAL") && err.contains("UNION"),
+            "error should mention OPTIONAL inside UNION, got: {}",
+            err
+        ),
+    }
+}
+
+/// Round-3 follow-up — Copilot review on PR #58 (issue #57 follow-up).
+/// `info.bindings` contains BIND aliases as well as BGP-bound variables;
+/// the validator must not treat a BIND-aliased variable as proof that a
+/// dataset triple pins the GRAPH variable. The query below uses
+/// `BIND(ex:not_in_dataset AS ?g)` to alias the GRAPH variable to a
+/// constant — no dataset triple constrains `?g`, so the unmatched arm of
+/// the easy-OPTIONAL collapses to a vacuous proof.
+///
+/// Fix: `binding_pins_to_dataset_triple` requires `Term::Input(_, _)`,
+/// rejecting both `Term::Static` (BIND alias to a constant) and
+/// `Term::Variable` (BIND alias forwarding another variable).
+#[test]
+fn optional_easy_case_graph_var_aliased_by_bind_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?g WHERE { \
+               BIND(<http://example.org/not_in_dataset> AS ?g) \
+               GRAPH ?g { OPTIONAL { ex:a ex:p ex:b . } } \
+             }";
+    match transform_query(q) {
+        Ok(result) => panic!(
+            "expected lowering to reject BIND-aliased GRAPH variable in easy-OPTIONAL, \
+             got circuit:\n{}",
+            result.sparql_nr
+        ),
+        Err(err) => assert!(
+            err.contains("GRAPH") && err.contains("?g"),
+            "error should mention the unbound GRAPH variable, got: {}",
+            err
+        ),
+    }
+}
+
 /// Multi-triple inner `OPTIONAL` falls through to power-set even when
 /// every variable is outer-bound — easy-case scope is single-triple
 /// inner only. Round-4's prefix-tree commitments will lift this.

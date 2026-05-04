@@ -1,0 +1,28 @@
+# yamllint config — picked up by the `yamllint` pre-commit hook
+# (`.pre-commit-config.yaml`) and consumable by any CI step that runs
+# `yamllint`.
+# Reference: https://yamllint.readthedocs.io/en/stable/configuration.html
+
+extends: default
+
+rules:
+  # YAML-LD documents naturally have long lines (IRIs).
+  line-length:
+    max: 200
+    level: warning
+  # Require a leading space after `#` (e.g. `# HOOK:` not `#HOOK:`); the
+  # default `min-spaces-from-content: 2` is relaxed to 1 to allow the
+  # `# HOOK:foo` marker convention used in workflow templates.
+  comments:
+    require-starting-space: true
+    min-spaces-from-content: 1
+  # Documents — yaml-ld files don't need `---`.
+  document-start: disable
+  # Truthy — `on:` in workflow files is a YAML pseudo-key.
+  truthy:
+    allowed-values: ["true", "false", "yes", "no", "on", "off"]
+    check-keys: false
+  # Empty values are common in `references:` blocks.
+  empty-values:
+    forbid-in-block-mappings: false
+    forbid-in-flow-mappings: true

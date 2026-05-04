@@ -354,6 +354,20 @@ fn join_pattern_infos(
             // pre-shift offset.
             let left_branches = left.union_branches.clone().unwrap_or_default();
             let right_branches = right.union_branches.clone().unwrap_or_default();
+            // Defence-in-depth: branch-internal `easy_optionals` are
+            // rejected upstream by the `Union` handler (issue #57
+            // flags 2 + 3); none should reach the merge. If one does,
+            // the cross-product would silently drop it because
+            // `branch` below copies only `patterns`/`bindings`/
+            // `assertions`/`filters` — not `easy_optionals`.
+            debug_assert!(
+                left_branches.iter().all(|b| b.easy_optionals.is_empty()),
+                "easy_optionals inside UNION branches must be rejected upstream",
+            );
+            debug_assert!(
+                right_branches.iter().all(|b| b.easy_optionals.is_empty()),
+                "easy_optionals inside UNION branches must be rejected upstream",
+            );
             let mut combined: Vec<PatternInfo> = Vec::new();
             for lb in &left_branches {
                 for rb in &right_branches {
@@ -454,6 +468,15 @@ fn distribute_into_branches(
     order: BranchOrder,
 ) -> PatternInfo {
     let branches = with_branches.union_branches.clone().unwrap_or_default();
+    // Defence-in-depth (issue #57 flags 2 + 3): branch-internal
+    // `easy_optionals` are rejected upstream by the `Union` handler.
+    // The per-branch merge below copies only `patterns`/`bindings`/
+    // `assertions`/`filters`, so any `easy_optionals` slipping
+    // through here would be silently dropped.
+    debug_assert!(
+        branches.iter().all(|b| b.easy_optionals.is_empty()),
+        "easy_optionals inside UNION branches must be rejected upstream",
+    );
     let mut combined: Vec<PatternInfo> = Vec::with_capacity(branches.len());
     for b in &branches {
         let mut branch = PatternInfo::new();
@@ -2256,12 +2279,55 @@ fn process_graph_pattern_inner(
             // composed inside the per-branch `branch_X = (...) & (...)`
             // boolean form). Round-4 follow-up — see roborev finding
             // 2026-05-03 (high).
+            //
+            // Easy-case OPTIONAL collapse inside a UNION branch is
+            // rejected for the same reason — the emit-layer branch
+            // handler reads `info.pattern.easy_optionals` (top-level
+            // only); a branch-local easy-OPTIONAL would be silently
+            // dropped, so the BGP would grow by 3 phantom slots
+            // (matched + 2 brackets) which `main.nr` inclusion-checks
+            // but which carry no constraint relating them to the
+            // OPTIONAL inner triple. The base-metadata layer
+            // (`metadata.rs`) has the same blind spot: `easyOptionals`
+            // would be empty despite the synthetic slots being live in
+            // `inputPatterns`. Copilot review on PR #46 surfaced both
+            // (issue #57, flags 2 + 3) — both close together by
+            // rejecting at the lowering layer.
             for branch in &branches {
                 if !branch.not_exists.is_empty() {
                     return Err(
                         "NOT EXISTS / MINUS inside a UNION branch is not yet implemented. \
                          The branch-local non-membership constraints would be silently dropped \
                          by the emit layer. Round-4 follow-up — see spec/exists.md §7."
+                            .into(),
+                    );
+                }
+                if !branch.easy_optionals.is_empty() {
+                    return Err(
+                        "OPTIONAL inside a UNION branch (easy-case collapse) is not yet \
+                         implemented. The branch-local easy-OPTIONAL constraints would be \
+                         silently dropped by the emit + metadata layers (only top-level \
+                         `info.pattern.easy_optionals` are consumed). Round-4 follow-up — see \
+                         spec/exists.md §7 and issue #57."
+                            .into(),
+                    );
+                }
+                if !branch.optional_blocks.is_empty() {
+                    // Non-easy OPTIONAL inside a UNION branch is the same shape as
+                    // the easy-case rejection above: `transform_query` only flattens
+                    // top-level `info.pattern.optional_blocks` and `emit.rs`'s UNION
+                    // path serialises each branch's BGP without consuming the
+                    // branch-local optional blocks, so the branch-local OPTIONAL
+                    // would be silently dropped — bindings the verifier expects to
+                    // see populated never get filled. Reject explicitly until the
+                    // emit layer learns to lower per-branch optional blocks.
+                    // Copilot review on PR #58 (issue #57 follow-up).
+                    return Err(
+                        "OPTIONAL inside a UNION branch (general-case `LeftJoin`) is not yet \
+                         implemented. The branch-local optional block would be silently dropped \
+                         by the emit + metadata layers (only top-level \
+                         `info.pattern.optional_blocks` are flattened by `transform_query`). \
+                         Round-4 follow-up — see spec/exists.md §7."
                             .into(),
                     );
                 }
@@ -2391,14 +2457,22 @@ fn process_graph_pattern_inner(
                     // above. We do **not** error here because a sibling
                     // pattern outside this `GRAPH` (e.g.
                     // `?x ex:g ?g . GRAPH ?g { OPTIONAL { … } }`) may
-                    // bind `?g` later in the surrounding Join. The
-                    // post-Join `process_query` layer is the right
-                    // place to validate that `?g` ends up bound; if
-                    // not, noir codegen produces a `variables.g`
-                    // reference that fails to compile (loud failure,
-                    // not silent soundness corruption). Roborev
-                    // finding 2026-05-03 (fourth pass, medium):
-                    // earlier rejection was too aggressive.
+                    // bind `?g` later in the surrounding Join.
+                    //
+                    // The post-Join validation step
+                    // `validate_easy_optional_var_bindings` (in
+                    // `process_query_with_options_and_form`) catches
+                    // the genuine sibling-less case at lowering time
+                    // with a clear error message. An earlier comment
+                    // here claimed noir codegen would fail to compile
+                    // when `?g` is unbound — that was wrong (and was
+                    // the soundness gap Copilot flagged on PR #46,
+                    // issue #57 flag 1): codegen succeeds and emits a
+                    // `variables.g` field whose unmatched-arm usage is
+                    // unconstrained. The post-Join validation closes
+                    // that gap. Roborev finding 2026-05-03 (fourth
+                    // pass, medium): earlier rejection was too
+                    // aggressive — checking *post*-Join is correct.
                     let first_real = (0..info.patterns.len())
                         .find(|i| !easy_slot_indices.contains(i));
                     if let Some(first) = first_real {
@@ -2640,6 +2714,86 @@ fn unwrap_project_inner<'a>(
     Ok(current)
 }
 
+/// Confirm every `Term::Variable(name)` referenced by an
+/// `EasyOptional`'s `inner_terms` is bound somewhere in the post-Join
+/// pattern. The classifier `optional_inner_is_easy_case` requires
+/// every variable in the inner triple to be outer-bound at
+/// classification time (`left_info.bindings`); but a `GRAPH ?g {
+/// OPTIONAL { ground } }` lowering rewrites the easy-OPTIONAL's
+/// `inner_terms[3]` to `Term::Variable(?g)` *after* the classifier
+/// has run, deferring `?g`-binding to a sibling pattern in the
+/// surrounding Join. The deferred-binding promise has to be checked —
+/// otherwise the unmatched arm becomes a vacuous proof
+/// (`verify_non_membership_no_inclusion_check` over an
+/// arbitrary-leaf hash includes `variables.g` but no constraint pins
+/// `variables.g` to a graph the dataset witnesses).
+///
+/// Walk every variable referenced by any easy-OPTIONAL's
+/// `inner_terms` and require it to be bound by a real dataset slot in
+/// `info.bindings` (top-level) OR by every UNION branch's bindings
+/// (the cross-branch case the post-Join distribution produces). If any
+/// easy-OPTIONAL references an unbound variable, reject. Copilot
+/// review on PR #46 flag 1, issue #57.
+///
+/// "Bound by a real dataset slot" is `Term::Input(triple_idx, slot_idx)`
+/// — that's the only `Term` variant whose value the inclusion check on
+/// a sibling pattern actually pins to a triple the dataset witnesses.
+/// `Term::Static` (BIND alias to a constant or NamedNode) and
+/// `Term::Variable` (BIND alias forwarding another variable, which may
+/// itself be unbound) are *not* sufficient: an attacker can pick the
+/// constant or the forwarded variable freely, so the unmatched arm of
+/// the easy-OPTIONAL collapses to a vacuous proof.
+fn binding_pins_to_dataset_triple(b: &Binding) -> bool {
+    matches!(b.term, Term::Input(_, _))
+}
+
+fn variable_is_post_join_bound(name: &str, info: &PatternInfo) -> bool {
+    if info
+        .bindings
+        .iter()
+        .any(|b| b.variable == name && binding_pins_to_dataset_triple(b))
+    {
+        return true;
+    }
+    if let Some(branches) = &info.union_branches {
+        // A variable is reliably bound only if every branch binds it
+        // *with a dataset-triple slot* (otherwise some branch leaves it
+        // free or aliased to a constant and a prover can pick an
+        // arbitrary value for that branch).
+        if !branches.is_empty() {
+            return branches.iter().all(|b| {
+                b.bindings
+                    .iter()
+                    .any(|x| x.variable == name && binding_pins_to_dataset_triple(x))
+            });
+        }
+    }
+    false
+}
+
+fn validate_easy_optional_var_bindings(info: &PatternInfo) -> Result<(), String> {
+    for eo in &info.easy_optionals {
+        for term in &eo.inner_terms {
+            if let Term::Variable(name) = term {
+                if !variable_is_post_join_bound(name, info) {
+                    return Err(format!(
+                        "GRAPH variable ?{name} referenced by an easy-case OPTIONAL collapse \
+                         is not bound by any real BGP slot. The lowering kept ?{name} as a \
+                         free reference inside the matched-arm equality and the \
+                         unmatched-arm absent hash, but no constraint pins ?{name} to a \
+                         graph the dataset witnesses — the unmatched arm becomes a \
+                         vacuous proof. Bind ?{name} via a sibling pattern outside the \
+                         enclosing GRAPH wrapper (e.g. `?x ex:g ?{name} . GRAPH ?{name} \
+                         {{ ... }}`). Copilot review on PR #46, issue #57 flag 1.",
+                        name = name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn process_query(gp: &GraphPattern) -> Result<QueryInfo, String> {
     process_query_with_options_and_form(gp, &TransformOptions::default(), QueryForm::Select)
@@ -2689,6 +2843,15 @@ pub(crate) fn process_query_with_options_and_form(
                 }
                 other => (process_graph_pattern_with_options(other, options)?, Vec::new()),
             };
+
+            // Easy-case OPTIONAL collapses inside `GRAPH ?g { ... }`
+            // wrappers may have rewritten `EasyOptional.inner_terms[3]`
+            // to `Term::Variable(?g)` deferring `?g`-binding to a
+            // sibling pattern in the surrounding Join. Confirm the
+            // deferred-binding promise was kept — see
+            // `validate_easy_optional_var_bindings` for the full
+            // soundness rationale (issue #57 flag 1).
+            validate_easy_optional_var_bindings(&pattern)?;
 
             // Per the disclose-and-verify pattern (SPARQL_ROADMAP.md
             // §8.6 Q6 decision 2026-05-03), the circuit discloses the
@@ -2844,6 +3007,12 @@ pub(crate) fn process_query_with_options_and_form(
         // `parse::query_form` so we can distinguish.
         _ => {
             let pattern = process_graph_pattern_with_options(inner, options)?;
+            // Same easy-OPTIONAL deferred-binding check as the Project
+            // arm above (issue #57 flag 1). Applies to ASK as well as
+            // the auto-project fallback because both can emit
+            // `easy_optionals` from a `GRAPH ?g { OPTIONAL { ground } }`
+            // body that fails to bind `?g` via a sibling pattern.
+            validate_easy_optional_var_bindings(&pattern)?;
             let vars: Vec<String> = match form {
                 QueryForm::Ask => Vec::new(),
                 _ => {
