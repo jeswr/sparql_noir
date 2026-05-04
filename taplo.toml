@@ -1,0 +1,36 @@
+# Canonical TOML formatting for `Cargo.toml`, `pyproject.toml`,
+# `Nargo.toml`, `lakefile.toml`, etc.
+# Reference: https://taplo.tamasfe.dev/configuration/file.html
+
+include = [
+  "**/Cargo.toml",
+  "**/pyproject.toml",
+  "**/Nargo.toml",
+  "**/lakefile.toml",
+  "**/lean-toolchain",
+  "**/*.toml",
+]
+exclude = [
+  "**/node_modules/**",
+  "**/dist/**",
+  "**/build/**",
+  "**/target/**",
+  "**/.lake/**",
+]
+
+[formatting]
+align_entries = false
+align_comments = true
+array_trailing_comma = true
+array_auto_expand = true
+column_width = 100
+indent_string = "  "
+reorder_keys = false
+trailing_newline = true
+
+[[rule]]
+include = ["**/Cargo.toml"]
+keys = ["dependencies", "dev-dependencies", "build-dependencies"]
+
+[rule.formatting]
+reorder_keys = true
