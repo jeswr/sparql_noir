@@ -5,6 +5,43 @@ pub global MERKLE_DEPTH: u32 = 11;
 // pub global hash4: fn([Field; 4]) -> Field = {{hash4}};
 // pub global verify_signature: fn([u8; 32], [u8; 32], [u8; 64], [u8; 32]) -> bool = {{signature}};
 
+// --- Sorted-Merkle non-membership sentinels (permanent ABI) ----------
+//
+// `merkle()` (in `noir/lib/utils`) inserts two synthetic leaves into
+// every signed dataset:
+//
+// - the **low sentinel** at sorted index 0 with leaf-hash
+//   `LOW_SENTINEL_HASH = 0`,
+// - the **high sentinel** at sorted index `N + 1` with leaf-hash
+//   `HIGH_SENTINEL_HASH = 0 - 1` (= `Field::MAX` = the BN254 prime
+//   minus one). Real `consts::hash4` outputs are Field elements and
+//   could in principle equal `p - 1` (or `0`); under Pedersen-hash
+//   preimage-resistance the probability of any specific output is
+//   `<= 1/p ~= 2^-254` -- negligible. See `Real triples whose hash4
+//   collides with a sentinel hash` paragraph below for the contract.
+//
+// These bracket the populated leaf range so non-membership proofs
+// witness **every** `absent_hash` -- including ones smaller than the
+// smallest real leaf or larger than the largest. Without them,
+// boundary-falling absent hashes are unwitnessable, so a valid
+// `NOT EXISTS` query gets rejected with probability `2/(n+1)`
+// (Copilot's finding on `sparql_noir#42`, 2026-05-03 -- order-statistic
+// argument: `E[X_(1)] = F/(n+1)`, `E[X_(n)] = nF/(n+1)`, hence
+// `P(absent not in [X_(1), X_(n)]) = 2/(n+1)`; ~18 % at n=10, ~2 % at
+// n=100). See `spec/exists.md` Sec.3.3.
+//
+// The sentinels' hash values are **fixed**, not derived from any
+// triple, so they bypass `hash4` entirely; they are committed by the
+// signer at sign time as raw leaf values at sorted positions 0 and
+// `N + 1` of the tree. Real triples whose `hash4` outputs `0` or
+// `p - 1` (a preimage event, not a collision) are excluded under
+// Pedersen-hash preimage-resistance (over the BN254 field, `p ~=
+// 2^254`, so the probability is `<= 2^-254` for either constant).
+// A real-world preimage finding would itself be a publishable
+// cryptographic event, in which case these constants would rotate.
+pub global LOW_SENTINEL_HASH: Field = 0;
+pub global HIGH_SENTINEL_HASH: Field = 0 - 1;
+
 pub fn hash2(input: [Field; 2]) -> Field {
   {{hash2}}(input)
 }

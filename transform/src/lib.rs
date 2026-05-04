@@ -29,8 +29,9 @@ mod parse;
 
 pub use crate::expr::{ieee754_equal, ieee754_less_than, FloatSpecial};
 pub use crate::ir::{
-    Aggregate, AggregateKind, Assertion, Binding, ContextualizedTriple, EasyOptional, GraphContext,
-    NonExistenceConstraint, OptionalBlock, OrderDirection, OrderKey, PatternInfo, QueryInfo, Term,
+    Aggregate, AggregateKind, Assertion, Binding, BoundaryCase, ContextualizedTriple, EasyOptional,
+    GraphContext, NonExistenceConstraint, OptionalBlock, OrderDirection, OrderKey, PatternInfo,
+    QueryInfo, Term,
 };
 
 use crate::emit::{
@@ -162,14 +163,21 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
     }
     
     // Generate the base circuit (the "all optionals matched" variant).
-    let (base_sparql_nr, base_hidden, has_hidden, needs_xpath) = generate_circuit_for_optional_combination(
-        &info,
-        &all_optionals,
-        &(0..num_optionals).collect::<Vec<_>>(),
-        &options,
-    )?;
+    let (base_sparql_nr, base_hidden, has_hidden, needs_xpath, has_not_exists) =
+        generate_circuit_for_optional_combination(
+            &info,
+            &all_optionals,
+            &(0..num_optionals).collect::<Vec<_>>(),
+            &options,
+        )?;
 
-    let main_nr = fill_main_nr_template(options.skip_signing, has_hidden);
+    let num_not_exists = info.pattern.not_exists.len();
+    let main_nr = fill_main_nr_template(
+        options.skip_signing,
+        has_hidden,
+        has_not_exists,
+        num_not_exists,
+    );
 
     // EBV pulls in `dep::ebv`; that detection lives at the same layer as
     // the `Nargo.toml` shape, so they share a derivation step.
@@ -192,7 +200,7 @@ pub fn transform_query_with_options(query_str: &str, options: TransformOptions) 
                 .filter(|i| (combo >> i) & 1 == 1)
                 .collect();
 
-            let (circuit_sparql_nr, circuit_hidden, _, _) =
+            let (circuit_sparql_nr, circuit_hidden, _, _, _) =
                 generate_circuit_for_optional_combination(
                     &info,
                     &all_optionals,
