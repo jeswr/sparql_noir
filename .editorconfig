@@ -23,5 +23,7 @@ indent_style = tab
 [*.{ttl,nq,nt,trig,n3}]
 indent_size = 2
 
+# In Markdown, two trailing spaces denote a hard line break, so we
+# must NOT strip them.
 [*.md]
-trim_trailing_whitespace = false  # trailing spaces = hard break in MD
+trim_trailing_whitespace = false
