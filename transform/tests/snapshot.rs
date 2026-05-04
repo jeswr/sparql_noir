@@ -1055,6 +1055,68 @@ fn optional_easy_case_metadata_never_silently_drops_branch_internal_collapse() {
     );
 }
 
+/// Round-3 follow-up — Copilot review on PR #58. A non-easy OPTIONAL
+/// inside a UNION branch lives in `branch.optional_blocks`, but
+/// `transform_query` only flattens top-level
+/// `info.pattern.optional_blocks`, and `emit.rs`'s UNION path doesn't
+/// consume per-branch optional blocks at all. The branch-local OPTIONAL
+/// is silently dropped — the verifier expects the OPTIONAL's bindings
+/// to be filled but they never are. Mirrors the existing rejection of
+/// branch-local easy-OPTIONALs / NOT EXISTS / MINUS.
+#[test]
+fn optional_general_case_inside_union_branch_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { \
+               { ?s ex:a ?o . OPTIONAL { ?s ex:p ?p . ?p ex:q ?q . } } \
+               UNION \
+               { ?s ex:b ?o . } \
+             }";
+    match transform_query(q) {
+        Ok(result) => panic!(
+            "expected lowering to reject general-case OPTIONAL inside UNION branch, \
+             got circuit:\n{}",
+            result.sparql_nr
+        ),
+        Err(err) => assert!(
+            err.contains("OPTIONAL") && err.contains("UNION"),
+            "error should mention OPTIONAL inside UNION, got: {}",
+            err
+        ),
+    }
+}
+
+/// Round-3 follow-up — Copilot review on PR #58 (issue #57 follow-up).
+/// `info.bindings` contains BIND aliases as well as BGP-bound variables;
+/// the validator must not treat a BIND-aliased variable as proof that a
+/// dataset triple pins the GRAPH variable. The query below uses
+/// `BIND(ex:not_in_dataset AS ?g)` to alias the GRAPH variable to a
+/// constant — no dataset triple constrains `?g`, so the unmatched arm of
+/// the easy-OPTIONAL collapses to a vacuous proof.
+///
+/// Fix: `binding_pins_to_dataset_triple` requires `Term::Input(_, _)`,
+/// rejecting both `Term::Static` (BIND alias to a constant) and
+/// `Term::Variable` (BIND alias forwarding another variable).
+#[test]
+fn optional_easy_case_graph_var_aliased_by_bind_is_rejected() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?g WHERE { \
+               BIND(<http://example.org/not_in_dataset> AS ?g) \
+               GRAPH ?g { OPTIONAL { ex:a ex:p ex:b . } } \
+             }";
+    match transform_query(q) {
+        Ok(result) => panic!(
+            "expected lowering to reject BIND-aliased GRAPH variable in easy-OPTIONAL, \
+             got circuit:\n{}",
+            result.sparql_nr
+        ),
+        Err(err) => assert!(
+            err.contains("GRAPH") && err.contains("?g"),
+            "error should mention the unbound GRAPH variable, got: {}",
+            err
+        ),
+    }
+}
+
 /// Multi-triple inner `OPTIONAL` falls through to power-set even when
 /// every variable is outer-bound — easy-case scope is single-triple
 /// inner only. Round-4's prefix-tree commitments will lift this.

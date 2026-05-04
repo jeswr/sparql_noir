@@ -1911,6 +1911,25 @@ fn process_graph_pattern_inner(
                             .into(),
                     );
                 }
+                if !branch.optional_blocks.is_empty() {
+                    // Non-easy OPTIONAL inside a UNION branch is the same shape as
+                    // the easy-case rejection above: `transform_query` only flattens
+                    // top-level `info.pattern.optional_blocks` and `emit.rs`'s UNION
+                    // path serialises each branch's BGP without consuming the
+                    // branch-local optional blocks, so the branch-local OPTIONAL
+                    // would be silently dropped — bindings the verifier expects to
+                    // see populated never get filled. Reject explicitly until the
+                    // emit layer learns to lower per-branch optional blocks.
+                    // Copilot review on PR #58 (issue #57 follow-up).
+                    return Err(
+                        "OPTIONAL inside a UNION branch (general-case `LeftJoin`) is not yet \
+                         implemented. The branch-local optional block would be silently dropped \
+                         by the emit + metadata layers (only top-level \
+                         `info.pattern.optional_blocks` are flattened by `transform_query`). \
+                         Round-4 follow-up — see spec/exists.md §7."
+                            .into(),
+                    );
+                }
             }
 
             let patterns = branches
@@ -2289,23 +2308,43 @@ fn unwrap_project_inner<'a>(
 /// `variables.g` to a graph the dataset witnesses).
 ///
 /// Walk every variable referenced by any easy-OPTIONAL's
-/// `inner_terms` and require it to be bound by `info.bindings`
-/// (top-level) OR by every UNION branch's bindings (the cross-branch
-/// case the post-Join distribution produces). If any easy-OPTIONAL
-/// references an unbound variable, reject. Copilot review on PR #46
-/// flag 1, issue #57.
+/// `inner_terms` and require it to be bound by a real dataset slot in
+/// `info.bindings` (top-level) OR by every UNION branch's bindings
+/// (the cross-branch case the post-Join distribution produces). If any
+/// easy-OPTIONAL references an unbound variable, reject. Copilot
+/// review on PR #46 flag 1, issue #57.
+///
+/// "Bound by a real dataset slot" is `Term::Input(triple_idx, slot_idx)`
+/// — that's the only `Term` variant whose value the inclusion check on
+/// a sibling pattern actually pins to a triple the dataset witnesses.
+/// `Term::Static` (BIND alias to a constant or NamedNode) and
+/// `Term::Variable` (BIND alias forwarding another variable, which may
+/// itself be unbound) are *not* sufficient: an attacker can pick the
+/// constant or the forwarded variable freely, so the unmatched arm of
+/// the easy-OPTIONAL collapses to a vacuous proof.
+fn binding_pins_to_dataset_triple(b: &Binding) -> bool {
+    matches!(b.term, Term::Input(_, _))
+}
+
 fn variable_is_post_join_bound(name: &str, info: &PatternInfo) -> bool {
-    if info.bindings.iter().any(|b| b.variable == name) {
+    if info
+        .bindings
+        .iter()
+        .any(|b| b.variable == name && binding_pins_to_dataset_triple(b))
+    {
         return true;
     }
     if let Some(branches) = &info.union_branches {
         // A variable is reliably bound only if every branch binds it
-        // (otherwise some branch leaves it free and a prover can pick
-        // an arbitrary value for that branch).
+        // *with a dataset-triple slot* (otherwise some branch leaves it
+        // free or aliased to a constant and a prover can pick an
+        // arbitrary value for that branch).
         if !branches.is_empty() {
-            return branches
-                .iter()
-                .all(|b| b.bindings.iter().any(|x| x.variable == name));
+            return branches.iter().all(|b| {
+                b.bindings
+                    .iter()
+                    .any(|x| x.variable == name && binding_pins_to_dataset_triple(x))
+            });
         }
     }
     false
