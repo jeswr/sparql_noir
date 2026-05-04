@@ -969,6 +969,48 @@ fn exists_grounded_lowers_to_two_triple_bgp() {
     assert!(result.sparql_nr.contains("assert(true);"));
 }
 
+/// `STRSTARTS(?o, "")` is vacuously true, but the structural binding
+/// (`bind_term_bytes_plain_string_literal`) on the operand must still
+/// be emitted so a non-string `?o` cannot satisfy the filter. Roborev
+/// review 2026-05-04 (medium) on PR #60.
+#[test]
+fn strstarts_empty_prefix_keeps_operand_binding() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:label ?o . FILTER(STRSTARTS(?o, \"\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("bind_term_bytes_plain_string_literal"),
+        "STRSTARTS(?o, \"\") must still emit the operand binding:\n{}",
+        r.sparql_nr
+    );
+    // The result is `true`, but it must come from the binding block,
+    // not a bare `assert(true)`.
+    assert!(
+        r.sparql_nr.contains("); true }"),
+        "binding block must end in `; true }}`:\n{}",
+        r.sparql_nr
+    );
+}
+
+/// `CONTAINS(?o, "")` is vacuously true, but the structural binding
+/// on the operand must still be emitted. Same regression as above.
+#[test]
+fn contains_empty_needle_keeps_operand_binding() {
+    let q = "PREFIX ex: <http://example.org/>\n\
+             SELECT ?s WHERE { ?s ex:label ?o . FILTER(CONTAINS(?o, \"\")) }";
+    let r = transform_query(q).expect("transform succeeds");
+    assert!(
+        r.sparql_nr.contains("bind_term_bytes_plain_string_literal"),
+        "CONTAINS(?o, \"\") must still emit the operand binding:\n{}",
+        r.sparql_nr
+    );
+    assert!(
+        r.sparql_nr.contains("); true }"),
+        "binding block must end in `; true }}`:\n{}",
+        r.sparql_nr
+    );
+}
+
 #[test]
 fn corpus_byte_identical() {
     let update = env::var("UPDATE_SNAPSHOTS").map(|v| v == "1").unwrap_or(false);

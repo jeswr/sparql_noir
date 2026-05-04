@@ -1417,8 +1417,17 @@ fn string_op_strstarts(term: &Term, prefix: &str, query: &QueryInfo, bindings: &
     let prefix_bytes = prefix.as_bytes();
     let prefix_len = prefix_bytes.len();
     if prefix_len == 0 {
-        // Vacuously true; STRSTARTS(s, "") === true for any s.
-        return Ok("true".into());
+        // STRSTARTS(s, "") is vacuously true *for any plain xsd:string s*.
+        // The Boolean result is `true`, but operand validation -- the
+        // structural check that `?x` is a plain xsd:string literal --
+        // must still happen. Otherwise the prover could supply any term
+        // (NamedNode, language-tagged literal, numeric, etc.) and the
+        // expression would silently pass without binding the bytes.
+        // Roborev review 2026-05-04 (medium).
+        return Ok(format!(
+            "{{ utils::bind_term_bytes_plain_string_literal({w}, utils::empty_string_lexical_hash(), utils::xsd_string_datatype_hash()); true }}",
+            w = witness,
+        ));
     }
     Ok(format!(
         "{{ utils::bind_term_bytes_plain_string_literal({w}, utils::empty_string_lexical_hash(), utils::xsd_string_datatype_hash()); let prefix: [u8; {n}] = {arr}; utils::string_starts_with::<{n}>({w}, prefix, {n}) }}",
@@ -1441,8 +1450,15 @@ fn string_op_contains(
     let needle_bytes = needle.as_bytes();
     let needle_len = needle_bytes.len();
     if needle_len == 0 {
-        // CONTAINS(s, "") === true for any s.
-        return Ok("true".into());
+        // CONTAINS(s, "") is vacuously true *for any plain xsd:string s*.
+        // Same operand-validation contract as the STRSTARTS empty-prefix
+        // fast path: keep the binding so the structural check on `?x`
+        // still runs; only the substring search is short-circuited.
+        // Roborev review 2026-05-04 (medium).
+        return Ok(format!(
+            "{{ utils::bind_term_bytes_plain_string_literal({w}, utils::empty_string_lexical_hash(), utils::xsd_string_datatype_hash()); true }}",
+            w = witness,
+        ));
     }
     let pos_idx = push_contains_position(hidden, term, needle);
     Ok(format!(
