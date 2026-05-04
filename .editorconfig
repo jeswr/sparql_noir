@@ -1,0 +1,27 @@
+# EditorConfig — baseline whitespace rules across every sub-repo.
+# https://editorconfig.org
+
+root = true
+
+[*]
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+indent_style = space
+indent_size = 2
+
+[*.{py,nr,rs}]
+indent_size = 4
+
+[*.lean]
+indent_size = 2
+
+[Makefile]
+indent_style = tab
+
+[*.{ttl,nq,nt,trig,n3}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false  # trailing spaces = hard break in MD

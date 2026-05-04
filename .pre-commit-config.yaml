@@ -1,0 +1,93 @@
+# Canonical pre-commit hook config — fast checks only.
+#
+# Source of truth: zkp-sparql-workspace/templates/lint/.pre-commit-config.yaml
+# Copy into a sub-repo's root (or extend) and run `pre-commit install`
+# to enable on `git commit`. Slow checks (mypy, eslint, pyshacl) live
+# in CI per `feedback_offload_to_ci.md`.
+#
+# Pinned versions: bump these together; CI workflows mirror them.
+#
+# Tools auto-discover their config from repo-root dotfiles:
+#   .markdownlint-cli2.jsonc, .prettierrc.json, .prettierignore,
+#   .yamllint.yml, .shellcheckrc, taplo.toml, .editorconfig.
+
+minimum_pre_commit_version: "3.6.0"
+
+repos:
+  # ----- Fast Python -----
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # ----- Whitespace / generic -----
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'  # MD trailing-space = hard break
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-yaml
+        # yaml-ld files use unsafe Python tags occasionally; let the
+        # dedicated yamllint hook catch them. Skip workflow .tmpl files
+        # (HOOK markers fail strict YAML parsing).
+        exclude: '\.yaml\.ld$|\.github/workflows/.*\.yml\.tmpl$|^vocab/.*\.md$'
+      - id: check-json
+      - id: check-toml
+
+  # ----- YAML -----
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        # Reads `.yamllint.yml` from the repo root.
+        exclude: '\.github/workflows/.*\.yml\.tmpl$'
+
+  # ----- Shell -----
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.10.0-2
+    hooks:
+      - id: shfmt
+        args: [-i, "2", -ci, -d]
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+
+  # ----- Markdown -----
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.14.0
+    hooks:
+      - id: markdownlint-cli2
+        # Reads `.markdownlint-cli2.jsonc` from the repo root.
+
+  # ----- Prettier (TS/JS/JSON/YAML/MD) -----
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        types_or: [javascript, jsx, ts, tsx, json, yaml, markdown]
+        args: [--write]
+        # Reads `.prettierrc.json` and `.prettierignore` from the repo root.
+
+  # ----- TOML -----
+  - repo: https://github.com/ComPWA/taplo-pre-commit
+    rev: v0.9.3
+    hooks:
+      - id: taplo-format
+      - id: taplo-lint
+
+  # ----- Noir (project-local hook; skipped on machines without nargo) -----
+  - repo: local
+    hooks:
+      - id: nargo-fmt
+        name: nargo fmt --check
+        entry: bash -c 'command -v nargo >/dev/null 2>&1 && nargo fmt --check || echo "nargo not installed; skipping"'
+        language: system
+        files: '\.nr$'
+        pass_filenames: false
