@@ -23,8 +23,11 @@ import { getNoirLibFilesEncoded } from './noir-lib-bundle.js';
 // --- Circuit Cache ---
 
 /**
- * Cache for compiled circuits, keyed by query string.
- * This avoids recompiling the same query multiple times.
+ * Cache for compiled circuits, keyed by `(query, signature)`.
+ * Different signature schemes pull in different `consts/Nargo.toml`
+ * dependency graphs (see `noir-lib-bundle.ts`), so the same query
+ * compiled under e.g. `schnorr` and `babyjubjubOpt` produces distinct
+ * circuits and must not share a cache slot.
  */
 const circuitCache = new Map<string, { circuit: CompiledCircuit; metadata: Record<string, unknown> }>();
 
@@ -135,22 +138,32 @@ export {
 /**
  * Get static noir lib files (pre-encoded as Uint8Array from bundle).
  * These are decoded once on first access and cached in the bundle module.
+ *
+ * `signature` selects which signature-scheme package the bundled
+ * `consts/Nargo.toml` should depend on. When omitted, the bundle's
+ * compiled-in default (`babyjubjubOpt`) is used. See
+ * `noir-lib-bundle.ts` for the swap mechanics.
  */
-function getStaticNoirLibFiles(): Map<string, Uint8Array> {
-  return getNoirLibFilesEncoded();
+function getStaticNoirLibFiles(signature?: string): Map<string, Uint8Array> {
+  return getNoirLibFilesEncoded(signature ? { signature } : {});
 }
 
 /**
  * In-memory filesystem for noir_wasm compilation.
  * Implements the FileManager interface without any disk I/O.
  * Noir lib files are always available as static unmodifiable files.
+ *
+ * `signature` is plumbed into `getStaticNoirLibFiles` so different
+ * compilations can resolve `consts::signature` to different packages.
  */
 class InMemoryFileManager {
   private files: Map<string, Uint8Array> = new Map();
   private dataDir: string;
+  private signature: string | undefined;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, signature?: string) {
     this.dataDir = dataDir;
+    this.signature = signature;
   }
 
   getDataDir(): string {
@@ -169,7 +182,7 @@ class InMemoryFileManager {
     // Check for exact file match in instance files
     if (this.files.has(normalizedPath)) return true;
     // Check static noir lib files
-    const staticFiles = getStaticNoirLibFiles();
+    const staticFiles = getStaticNoirLibFiles(this.signature);
     if (staticFiles.has(normalizedPath)) return true;
     // Check if path is a directory (any file starts with this path + /)
     const dirPrefix = normalizedPath.endsWith('/') ? normalizedPath : normalizedPath + '/';
@@ -221,7 +234,7 @@ class InMemoryFileManager {
     // Check instance files first, then static noir lib files
     let content = this.files.get(path);
     if (!content) {
-      content = getStaticNoirLibFiles().get(path);
+      content = getStaticNoirLibFiles(this.signature).get(path);
     }
     if (!content) {
       throw new Error(`File not found: ${path}`);
@@ -310,7 +323,7 @@ class InMemoryFileManager {
     }
     
     // Check static noir lib files
-    for (const filePath of getStaticNoirLibFiles().keys()) {
+    for (const filePath of getStaticNoirLibFiles(this.signature).keys()) {
       processPath(filePath);
     }
     
@@ -320,19 +333,24 @@ class InMemoryFileManager {
 
 /**
  * Creates an in-memory FileManager populated with circuit files
+ *
+ * `signature` selects which signature-scheme package the bundled
+ * `consts/Nargo.toml` should depend on for this compilation; defaults
+ * to the bundle's compiled-in default.
  */
 function createInMemoryFileManager(
   dataDir: string,
-  files: Record<string, string>
+  files: Record<string, string>,
+  signature?: string,
 ): InMemoryFileManager {
-  const fm = new InMemoryFileManager(dataDir);
-  
+  const fm = new InMemoryFileManager(dataDir, signature);
+
   // Pre-populate files synchronously by converting to Uint8Array
   for (const [path, content] of Object.entries(files)) {
     const fullPath = isAbsolutePath(path) ? path : joinPath(dataDir, path);
     fm['files'].set(normalizePath(fullPath), new TextEncoder().encode(content));
   }
-  
+
   return fm;
 }
 
@@ -476,10 +494,13 @@ export async function prove(
     throw new Error('signedData is required');
   }
   
-  // Check circuit cache first
-  const cacheKey = hashQuery(query);
+  // Check circuit cache first. The cache key encodes the signature
+  // scheme because different schemes wire `consts::signature` to
+  // different packages with different `PubKey` / `Signature` shapes,
+  // so the compiled circuits are not interchangeable.
+  const cacheKey = `${effectiveConfig.signature}::${hashQuery(query)}`;
   let cached = circuitCache.get(cacheKey);
-  
+
   if (!cached) {
     // Transform SPARQL query to Noir circuit code (in-memory)
     let wasmModule: any;
@@ -492,15 +513,15 @@ export async function prove(
     } catch (error) {
       throw new Error('WASM transform module not found. Please build it first with: npm run build:wasm');
     }
-    
+
     // Call transform (returns JSON string with sparql_nr, main_nr, nargo_toml, metadata)
     const transformResultJson = wasmModule.transform(query);
     const transformResult = JSON.parse(transformResultJson);
-    
+
     if (transformResult.error) {
       throw new Error(`Circuit generation failed: ${transformResult.error}`);
     }
-    
+
     // Prepare circuit files for the in-memory filesystem
     // (noir/lib files are automatically available as static files)
     const circuitFiles: Record<string, string> = {
@@ -508,9 +529,11 @@ export async function prove(
       'src/main.nr': transformResult.main_nr,
       'src/sparql.nr': transformResult.sparql_nr,
     };
-    
-    // Create in-memory FileManager with circuit files
-    const fm = createInMemoryFileManager('/circuit', circuitFiles);
+
+    // Create in-memory FileManager with circuit files; thread the
+    // configured signature so `consts/Nargo.toml` resolves to the
+    // matching `signatures/<scheme>` package.
+    const fm = createInMemoryFileManager('/circuit', circuitFiles, effectiveConfig.signature);
     
     // Compile circuit using noir_wasm (completely in-memory)
     let compiledCircuit: CompiledCircuit;
