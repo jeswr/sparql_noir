@@ -33,7 +33,12 @@ export function run(fn: string) {
 
   const content = template.replaceAll('{{fn}}', fn)
   fs.writeFileSync(MAIN_NR_PATH, content);
-  const res = execSync('nargo execute', { stdio: 'pipe', cwd: ENCODE_PKG_DIR }).toString();
+  // Larger datasets (e.g. the bench seed once it grew beyond the
+  // bootstrap LUBM-only fragment) push `nargo execute`'s stdout
+  // beyond the 1 MB default; bump the buffer to 64 MB to keep the
+  // signer responsive on multi-credential seeds. Anything genuinely
+  // exceeding 64 MB belongs in a generator, not the seed.
+  const res = execSync('nargo execute', { stdio: 'pipe', cwd: ENCODE_PKG_DIR, maxBuffer: 64 * 1024 * 1024 }).toString();
   fs.rmSync(MAIN_NR_PATH);
 
   const resObj = res
