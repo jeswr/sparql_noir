@@ -11,7 +11,7 @@ import type { VerifyResult } from './scripts/verify.js';
 import { defaultConfig } from './config.js';
 import N3 from 'n3';
 import { RDFC10 } from 'rdfjs-c14n';
-import { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
+import { processQuadsForMerkle, processQuadsForPrefix3, generateSignature } from './scripts/sign.js';
 import { runJson } from './encode.js';
 import { quadToStringQuad } from 'rdf-string-ttl';
 import { UltraHonkBackend } from '@aztec/bb.js';
@@ -23,8 +23,11 @@ import { getNoirLibFilesEncoded } from './noir-lib-bundle.js';
 // --- Circuit Cache ---
 
 /**
- * Cache for compiled circuits, keyed by query string.
- * This avoids recompiling the same query multiple times.
+ * Cache for compiled circuits, keyed by `(query, signature)`.
+ * Different signature schemes pull in different `consts/Nargo.toml`
+ * dependency graphs (see `noir-lib-bundle.ts`), so the same query
+ * compiled under e.g. `schnorr` and `babyjubjubOpt` produces distinct
+ * circuits and must not share a cache slot.
  */
 const circuitCache = new Map<string, { circuit: CompiledCircuit; metadata: Record<string, unknown> }>();
 
@@ -93,6 +96,29 @@ export { processQuadsForMerkle, generateSignature } from './scripts/sign.js';
 export { generateProofs } from './scripts/prove.js';
 export { verifyProofs } from './scripts/verify.js';
 
+// Boundary-case witness generation for NOT EXISTS / MINUS dispatch.
+// See `spec/exists.md` Sec.3.3.
+export {
+  computeBoundaryCase,
+  findMiddleBracketIndices,
+  BOUNDARY_CASE_LOWER,
+  BOUNDARY_CASE_MIDDLE,
+  BOUNDARY_CASE_UPPER,
+} from './boundaryCase.js';
+export type { BoundaryCaseTag } from './boundaryCase.js';
+
+// Verifier-side post-processing for aggregates / ORDER BY / LIMIT
+// (disclose-and-verify pattern, SPARQL_ROADMAP.md §8.6 Q6 decision).
+export { applyPostProcessing } from './aggregates.js';
+export type {
+  AggregateKindTag,
+  AggregateMetadata,
+  OrderByMetadata,
+  PostProcessingMetadata,
+  DisclosedRow,
+  ResultRow,
+} from './aggregates.js';
+
 // Export types
 export type { SignedData, ProveResult, VerifyResult };
 
@@ -112,22 +138,32 @@ export {
 /**
  * Get static noir lib files (pre-encoded as Uint8Array from bundle).
  * These are decoded once on first access and cached in the bundle module.
+ *
+ * `signature` selects which signature-scheme package the bundled
+ * `consts/Nargo.toml` should depend on. When omitted, the bundle's
+ * compiled-in default (`babyjubjubOpt`) is used. See
+ * `noir-lib-bundle.ts` for the swap mechanics.
  */
-function getStaticNoirLibFiles(): Map<string, Uint8Array> {
-  return getNoirLibFilesEncoded();
+function getStaticNoirLibFiles(signature?: string): Map<string, Uint8Array> {
+  return getNoirLibFilesEncoded(signature ? { signature } : {});
 }
 
 /**
  * In-memory filesystem for noir_wasm compilation.
  * Implements the FileManager interface without any disk I/O.
  * Noir lib files are always available as static unmodifiable files.
+ *
+ * `signature` is plumbed into `getStaticNoirLibFiles` so different
+ * compilations can resolve `consts::signature` to different packages.
  */
 class InMemoryFileManager {
   private files: Map<string, Uint8Array> = new Map();
   private dataDir: string;
+  private signature: string | undefined;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, signature?: string) {
     this.dataDir = dataDir;
+    this.signature = signature;
   }
 
   getDataDir(): string {
@@ -146,7 +182,7 @@ class InMemoryFileManager {
     // Check for exact file match in instance files
     if (this.files.has(normalizedPath)) return true;
     // Check static noir lib files
-    const staticFiles = getStaticNoirLibFiles();
+    const staticFiles = getStaticNoirLibFiles(this.signature);
     if (staticFiles.has(normalizedPath)) return true;
     // Check if path is a directory (any file starts with this path + /)
     const dirPrefix = normalizedPath.endsWith('/') ? normalizedPath : normalizedPath + '/';
@@ -198,7 +234,7 @@ class InMemoryFileManager {
     // Check instance files first, then static noir lib files
     let content = this.files.get(path);
     if (!content) {
-      content = getStaticNoirLibFiles().get(path);
+      content = getStaticNoirLibFiles(this.signature).get(path);
     }
     if (!content) {
       throw new Error(`File not found: ${path}`);
@@ -287,7 +323,7 @@ class InMemoryFileManager {
     }
     
     // Check static noir lib files
-    for (const filePath of getStaticNoirLibFiles().keys()) {
+    for (const filePath of getStaticNoirLibFiles(this.signature).keys()) {
       processPath(filePath);
     }
     
@@ -297,19 +333,24 @@ class InMemoryFileManager {
 
 /**
  * Creates an in-memory FileManager populated with circuit files
+ *
+ * `signature` selects which signature-scheme package the bundled
+ * `consts/Nargo.toml` should depend on for this compilation; defaults
+ * to the bundle's compiled-in default.
  */
 function createInMemoryFileManager(
   dataDir: string,
-  files: Record<string, string>
+  files: Record<string, string>,
+  signature?: string,
 ): InMemoryFileManager {
-  const fm = new InMemoryFileManager(dataDir);
-  
+  const fm = new InMemoryFileManager(dataDir, signature);
+
   // Pre-populate files synchronously by converting to Uint8Array
   for (const [path, content] of Object.entries(files)) {
     const fullPath = isAbsolutePath(path) ? path : joinPath(dataDir, path);
     fm['files'].set(normalizePath(fullPath), new TextEncoder().encode(content));
   }
-  
+
   return fm;
 }
 
@@ -364,17 +405,51 @@ export async function sign(
   
   // Convert dataset to canonicalized quads
   const quads = (new N3.Parser()).parse(await new RDFC10().canonicalize(dataset));
-  
-  // Process quads for Merkle tree
+
+  // Process quads for Merkle tree (round-3 leaf-hash sorted commitment)
+  // and the round-6 prefix-3 sorted commitment in **separate** Noir
+  // executions -- the two `merkle*` helpers return different generic
+  // struct types, so wrapping them in a single homogeneous array
+  // fails Noir's array-element type-equality check.
   const { noirInput } = await processQuadsForMerkle(quads);
-  
-  // Generate Merkle tree via Noir execution
-  const jsonRes = runJson(`[${noirInput}]`)[0];
-  
+  const prefix3Spec = await processQuadsForPrefix3(quads);
+
+  const jsonRes: any = runJson(`[${noirInput}]`)[0];
+
+  // Surface round-3 sentinel inclusion paths to the prover. Mirrors
+  // `signRdfData` (see `src/scripts/sign.ts` for the rationale).
+  jsonRes.lowSentinelPath = jsonRes.low_sentinel_path;
+  jsonRes.lowSentinelDirections = jsonRes.low_sentinel_directions;
+  jsonRes.highSentinelPath = jsonRes.high_sentinel_path;
+  jsonRes.highSentinelDirections = jsonRes.high_sentinel_directions;
+  delete jsonRes.low_sentinel_path;
+  delete jsonRes.low_sentinel_directions;
+  delete jsonRes.high_sentinel_path;
+  delete jsonRes.high_sentinel_directions;
+
+  if (prefix3Spec) {
+    const prefix3Res: any = runJson(`[${prefix3Spec.noirInput}]`)[0];
+    jsonRes.rootPrefix3 = prefix3Res.root;
+    jsonRes.rootPrefix3_u8 = prefix3Res.root_u8;
+    jsonRes.prefix3 = {
+      prefixes: prefix3Res.prefixes,
+      paths: prefix3Res.paths,
+      direction: prefix3Res.direction,
+      lowSentinelPath: prefix3Res.low_sentinel_path,
+      lowSentinelDirections: prefix3Res.low_sentinel_directions,
+      highSentinelPath: prefix3Res.high_sentinel_path,
+      highSentinelDirections: prefix3Res.high_sentinel_directions,
+    };
+  } else {
+    jsonRes.rootPrefix3 = "0x0";
+  }
+
   // Add quad string representations
   jsonRes.nquads = quads.map((quad: Quad) => quadToStringQuad(quad));
-  
-  // Generate cryptographic signature using shared logic
+
+  // Two-root signer ABI -- separate signatures over `root` and
+  // `rootPrefix3` under the same key. See
+  // `spec/prefix-tree-commitment.md` Sec.8.6.
   await generateSignature(jsonRes, effectiveConfig.signature);
 
   return jsonRes as SignedData;
@@ -419,10 +494,13 @@ export async function prove(
     throw new Error('signedData is required');
   }
   
-  // Check circuit cache first
-  const cacheKey = hashQuery(query);
+  // Check circuit cache first. The cache key encodes the signature
+  // scheme because different schemes wire `consts::signature` to
+  // different packages with different `PubKey` / `Signature` shapes,
+  // so the compiled circuits are not interchangeable.
+  const cacheKey = `${effectiveConfig.signature}::${hashQuery(query)}`;
   let cached = circuitCache.get(cacheKey);
-  
+
   if (!cached) {
     // Transform SPARQL query to Noir circuit code (in-memory)
     let wasmModule: any;
@@ -435,15 +513,15 @@ export async function prove(
     } catch (error) {
       throw new Error('WASM transform module not found. Please build it first with: npm run build:wasm');
     }
-    
+
     // Call transform (returns JSON string with sparql_nr, main_nr, nargo_toml, metadata)
     const transformResultJson = wasmModule.transform(query);
     const transformResult = JSON.parse(transformResultJson);
-    
+
     if (transformResult.error) {
       throw new Error(`Circuit generation failed: ${transformResult.error}`);
     }
-    
+
     // Prepare circuit files for the in-memory filesystem
     // (noir/lib files are automatically available as static files)
     const circuitFiles: Record<string, string> = {
@@ -451,9 +529,11 @@ export async function prove(
       'src/main.nr': transformResult.main_nr,
       'src/sparql.nr': transformResult.sparql_nr,
     };
-    
-    // Create in-memory FileManager with circuit files
-    const fm = createInMemoryFileManager('/circuit', circuitFiles);
+
+    // Create in-memory FileManager with circuit files; thread the
+    // configured signature so `consts/Nargo.toml` resolves to the
+    // matching `signatures/<scheme>` package.
+    const fm = createInMemoryFileManager('/circuit', circuitFiles, effectiveConfig.signature);
     
     // Compile circuit using noir_wasm (completely in-memory)
     let compiledCircuit: CompiledCircuit;

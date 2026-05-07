@@ -1,0 +1,34 @@
+// markdownlint-cli2 config — sensible defaults for prose-heavy repos.
+//
+// Source of truth: zkp-sparql-workspace/templates/lint/.markdownlint-cli2.jsonc
+{
+  "config": {
+    "default": true,
+    // Line length — too noisy on natural prose; prettier handles
+    // long-line wrapping where it matters.
+    "MD013": false,
+    // Allow inline HTML (LaTeX-flavoured prose, kbd, sub/sup).
+    "MD033": false,
+    // Multiple top-level headings — Markdown files rendered into the
+    // paper deliberately have multiple H1s.
+    "MD025": false,
+    // Bare URLs are fine in technical READMEs.
+    "MD034": false,
+    // First line in file does not have to be a heading (LICENSE, etc.).
+    "MD041": false,
+    // Trailing punctuation in headings — allow `?` (FAQ-style).
+    "MD026": { "punctuation": ".,;:!" }
+  },
+  "globs": ["**/*.md"],
+  "ignores": [
+    "node_modules/",
+    "dist/",
+    "build/",
+    "target/",
+    ".lake/",
+    "CHANGELOG.md",
+    "test_packages/",
+    "paper/sources/iswc2025-dc/",
+    "paper/sources/oxford-berkeley-kit/"
+  ]
+}

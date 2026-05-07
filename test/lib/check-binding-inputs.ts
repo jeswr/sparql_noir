@@ -14,18 +14,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync, spawnSync } from 'child_process';
 import N3 from 'n3';
-import dereferenceToStore from 'rdf-dereference-store';
-import { RDFC10 } from 'rdfjs-c14n';
 import type { Term, Quad, Literal } from '@rdfjs/types';
-import { quadToStringQuad, stringQuadToQuad } from 'rdf-string-ttl';
+import { stringQuadToQuad } from 'rdf-string-ttl';
 import { fileURLToPath } from 'url';
 
-// Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Dynamically import encode.ts
-const { getTermEncodingString, runJson } = await import('../../src/encode.js');
 
 // Re-export useful types
 export interface TermJson {
@@ -66,10 +60,84 @@ export interface SignedData {
   nquads: string[];      // Original n-quads as strings
 }
 
+/**
+ * Round-1 default for the bounded byte-array witness bound. Mirrors
+ * `noir/lib/consts::STRING_LEN_MAX` and `DEFAULT_STRING_LEN_MAX` in
+ * `src/config.ts`. The TS pipeline currently emits zero-padded
+ * placeholder witnesses (`bytes: [0, ...]`, `length: 0`); round-2 will
+ * populate them with real lexical bytes from the source quad. See
+ * `spec/encoding.md` sec.6 for the contract.
+ */
+export const STRING_LEN_MAX = 64;
+
+/**
+ * Per-term witness in the JSON form Noir's input loader expects. The
+ * `hash` field carries the term's Enc_t result (the same hex-encoded
+ * Field that previous versions stored as `terms[i]`); `bytes` /
+ * `length` are the bounded byte-array witness defined in
+ * `spec/encoding.md` sec.6.2.
+ */
+export interface TermWitness {
+  hash: string;
+  bytes: number[];
+  length: number;
+}
+
 export interface BGPTriple {
-  terms: string[];
+  terms: TermWitness[];
   path: string[];
   directions: boolean[];
+}
+
+/**
+ * Wrap a bare term-hash hex string as a round-1 placeholder
+ * `TermWitness` (zero-padded bytes, `length: 0`). Use this whenever
+ * legacy code only carries the hash; the byte witness is unconstrained
+ * at the Triple level (see `spec/encoding.md` sec.6.3) so a zero
+ * placeholder is sound until a string operator binds it locally.
+ *
+ * Round-2 callers that have access to the source RDF term should use
+ * `termToWitness` instead -- that populates `bytes` / `length` from
+ * the lexical form so string-operator bindings actually succeed.
+ */
+export function termHashToWitness(hash: string, stringLenMax: number = STRING_LEN_MAX): TermWitness {
+  return {
+    hash,
+    bytes: new Array(stringLenMax).fill(0),
+    length: 0,
+  };
+}
+
+/**
+ * Round-2 sibling of `termHashToWitness` that populates `bytes` /
+ * `length` from a source RDF term's lexical form (see
+ * `spec/encoding.md` sec.6.3). String-operator bindings
+ * (`utils::bind_term_bytes_*`) require the bytes to actually match
+ * the term's lexical preimage; this helper is the canonical way to
+ * produce witnesses that satisfy the round-2 contract.
+ */
+export function termToWitness(term: Term, hash: string, stringLenMax: number = STRING_LEN_MAX): TermWitness {
+  const lexical = termLexicalBytes(term);
+  const bytes = new Array<number>(stringLenMax).fill(0);
+  const len = Math.min(lexical.length, stringLenMax);
+  for (let i = 0; i < len; i++) {
+    const b = lexical[i];
+    if (b !== undefined) bytes[i] = b;
+  }
+  return { hash, bytes, length: len };
+}
+
+function termLexicalBytes(term: Term): Uint8Array {
+  switch (term.termType) {
+    case 'NamedNode':
+    case 'BlankNode':
+    case 'Literal':
+      return new TextEncoder().encode(term.value);
+    case 'DefaultGraph':
+      return new Uint8Array(0);
+    default:
+      return new Uint8Array(0);
+  }
 }
 
 export interface CheckBindingInputs {
@@ -201,62 +269,6 @@ function quadMatchesPattern(
 }
 
 /**
- * Sign RDF data and get encoded triples with merkle proofs
- */
-export async function signData(dataPath: string): Promise<SignedData> {
-  const tempOutput = path.join('/tmp', `signed-${Date.now()}.json`);
-  
-  try {
-    // Use the sign script to process the data
-    execSync(`npx tsx src/scripts/sign.ts -i "${dataPath}" -o "${tempOutput}"`, {
-      cwd: path.resolve(__dirname, '../..'),
-      stdio: 'pipe',
-    });
-    
-    const signedData = JSON.parse(fs.readFileSync(tempOutput, 'utf-8')) as SignedData;
-    return signedData;
-  } finally {
-    if (fs.existsSync(tempOutput)) {
-      fs.unlinkSync(tempOutput);
-    }
-  }
-}
-
-/**
- * Transform a SPARQL query and get circuit metadata
- */
-export async function transformQuery(queryPath: string): Promise<CircuitMetadata> {
-  const projectRoot = path.resolve(__dirname, '../..');
-  const transformPath = path.join(projectRoot, 'transform', 'target', 'release', 'transform');
-  
-  // Ensure transform is built
-  if (!fs.existsSync(transformPath)) {
-    execSync('cargo build --release', {
-      cwd: path.join(projectRoot, 'transform'),
-      stdio: 'pipe',
-    });
-  }
-  
-  // Run transform (outputs to noir_prove/ in project root)
-  const result = spawnSync(transformPath, ['-q', queryPath], {
-    encoding: 'utf-8',
-    cwd: projectRoot,
-  });
-  
-  if (result.status !== 0) {
-    throw new Error(`Transform failed: ${result.stderr || result.stdout}`);
-  }
-  
-  // Read metadata from fixed output location
-  const metadataPath = path.join(projectRoot, 'noir_prove', 'metadata.json');
-  if (!fs.existsSync(metadataPath)) {
-    throw new Error('Transform did not produce metadata.json');
-  }
-  
-  return JSON.parse(fs.readFileSync(metadataPath, 'utf-8')) as CircuitMetadata;
-}
-
-/**
  * Convert a binding (map of variable names to string values) to RDF.js terms
  */
 export function parseBinding(binding: Record<string, string>): Map<string, Term> {
@@ -379,9 +391,11 @@ export function generateCheckBindingInputs(
     return null;
   }
   
-  // Build BGP triples from matched indices
+  // Build BGP triples from matched indices. Round-1: each term hash
+  // is wrapped in a placeholder `TermWitness` with zero-padded bytes
+  // (advisory at the Triple level; see `spec/encoding.md` sec.6.3).
   const bgpTriples: BGPTriple[] = matchedIndices.map(idx => ({
-    terms: signedData.triples[idx],
+    terms: signedData.triples[idx].map(h => termHashToWitness(h)),
     path: signedData.paths[idx],
     directions: signedData.direction[idx],
   }));
@@ -403,7 +417,7 @@ export function generateCheckBindingInputs(
           // Get the encoded value from the matched triple
           const triple = bgpTriples[patternIdx];
           if (triple && triple.terms[posIdx]) {
-            variables[varName] = triple.terms[posIdx];
+            variables[varName] = triple.terms[posIdx].hash;
           }
           break;
         }
@@ -427,46 +441,25 @@ export function generateCheckBindingInputs(
 }
 
 /**
- * High-level function to generate all checkBinding inputs for a test case
- */
-export async function generateTestInputs(
-  queryPath: string,
-  dataPath: string,
-  bindings: Array<Record<string, string>>
-): Promise<Array<{ binding: Record<string, string>; inputs: CheckBindingInputs | null }>> {
-  // Transform query to get metadata
-  const metadata = await transformQuery(queryPath);
-  
-  // Sign data to get encoded triples
-  const signedData = await signData(dataPath);
-  
-  // Generate inputs for each binding
-  const results: Array<{ binding: Record<string, string>; inputs: CheckBindingInputs | null }> = [];
-  
-  for (const binding of bindings) {
-    const inputs = generateCheckBindingInputs(metadata, signedData, binding);
-    results.push({ binding, inputs });
-  }
-  
-  return results;
-}
-
-/**
- * Alternative: Sign data in-memory without writing to file
+ * Sign RDF data and return encoded triples with merkle proofs.
+ *
+ * The `format` parameter is currently accepted for forward compatibility but
+ * not propagated to the sign script (which auto-detects via the file
+ * extension we hand it).
  */
 export async function signDataInMemory(dataContent: string, format: string = 'text/turtle'): Promise<SignedData> {
-  // Write to temp file
+  void format;
   const tempInput = path.join('/tmp', `data-${Date.now()}.ttl`);
   const tempOutput = path.join('/tmp', `signed-${Date.now()}.json`);
-  
+
   try {
     fs.writeFileSync(tempInput, dataContent);
-    
+
     execSync(`npx tsx src/scripts/sign.ts -i "${tempInput}" -o "${tempOutput}"`, {
       cwd: path.resolve(__dirname, '../..'),
       stdio: 'pipe',
     });
-    
+
     return JSON.parse(fs.readFileSync(tempOutput, 'utf-8')) as SignedData;
   } finally {
     if (fs.existsSync(tempInput)) fs.unlinkSync(tempInput);
@@ -475,15 +468,38 @@ export async function signDataInMemory(dataContent: string, format: string = 'te
 }
 
 /**
- * Transform query in-memory without writing to file
+ * Transform a SPARQL query string and return its circuit metadata.
  */
 export async function transformQueryInMemory(queryContent: string): Promise<CircuitMetadata> {
   const projectRoot = path.resolve(__dirname, '../..');
+  const transformPath = path.join(projectRoot, 'transform', 'target', 'release', 'transform');
   const tempQuery = path.join('/tmp', `query-${Date.now()}.rq`);
-  
+
   try {
     fs.writeFileSync(tempQuery, queryContent);
-    return await transformQuery(tempQuery);
+
+    if (!fs.existsSync(transformPath)) {
+      execSync('cargo build --release', {
+        cwd: path.join(projectRoot, 'transform'),
+        stdio: 'pipe',
+      });
+    }
+
+    const result = spawnSync(transformPath, ['-q', tempQuery], {
+      encoding: 'utf-8',
+      cwd: projectRoot,
+    });
+
+    if (result.status !== 0) {
+      throw new Error(`Transform failed: ${result.stderr || result.stdout}`);
+    }
+
+    const metadataPath = path.join(projectRoot, 'noir_prove', 'metadata.json');
+    if (!fs.existsSync(metadataPath)) {
+      throw new Error('Transform did not produce metadata.json');
+    }
+
+    return JSON.parse(fs.readFileSync(metadataPath, 'utf-8')) as CircuitMetadata;
   } finally {
     if (fs.existsSync(tempQuery)) fs.unlinkSync(tempQuery);
   }
@@ -575,7 +591,7 @@ export function generateNegativeTestCases(
     negativeTests.push({
       type: 'wrong_variable_value',
       description: `Variable ?${varName} has incorrect encoded value`,
-      expectedError: `Failed constraint: variables.${varName} == bgp[*].terms[*]`,
+      expectedError: `Failed constraint: variables.${varName} == bgp[*].terms[*].hash`,
       inputs: {
         ...baseInputs,
         bgp: validInputs.bgp,
@@ -583,23 +599,28 @@ export function generateNegativeTestCases(
       },
     });
   }
-  
+
   // 2. Wrong predicate - change the predicate term of a triple
   if (validInputs.bgp.length > 0) {
     const mutatedBgp = validInputs.bgp.map((t, i) => {
       if (i === 0) {
         return {
           ...t,
-          terms: [t.terms[0], mutateHexString(t.terms[1]), t.terms[2], t.terms[3]],
+          terms: [
+            t.terms[0],
+            { ...t.terms[1], hash: mutateHexString(t.terms[1].hash) },
+            t.terms[2],
+            t.terms[3],
+          ],
         };
       }
       return t;
     });
-    
+
     negativeTests.push({
       type: 'wrong_predicate',
       description: 'Predicate of first triple has incorrect encoded value',
-      expectedError: 'Failed constraint: consts::hash2([0, ...]) == bgp[0].terms[1]',
+      expectedError: 'Failed constraint: consts::hash2([0, ...]) == bgp[0].terms[1].hash',
       inputs: {
         ...baseInputs,
         bgp: mutatedBgp,
@@ -607,23 +628,28 @@ export function generateNegativeTestCases(
       },
     });
   }
-  
-  // 3. Wrong object - change the object term of a triple  
+
+  // 3. Wrong object - change the object term of a triple
   if (validInputs.bgp.length > 0) {
     const mutatedBgp = validInputs.bgp.map((t, i) => {
       if (i === 0) {
         return {
           ...t,
-          terms: [t.terms[0], t.terms[1], mutateHexString(t.terms[2]), t.terms[3]],
+          terms: [
+            t.terms[0],
+            t.terms[1],
+            { ...t.terms[2], hash: mutateHexString(t.terms[2].hash) },
+            t.terms[3],
+          ],
         };
       }
       return t;
     });
-    
+
     negativeTests.push({
       type: 'wrong_object',
       description: 'Object of first triple has incorrect encoded value',
-      expectedError: 'Failed constraint: ... == bgp[0].terms[2]',
+      expectedError: 'Failed constraint: ... == bgp[0].terms[2].hash',
       inputs: {
         ...baseInputs,
         bgp: mutatedBgp,
@@ -631,23 +657,28 @@ export function generateNegativeTestCases(
       },
     });
   }
-  
+
   // 4. Mismatched subjects - if there are multiple BGP patterns with shared variables
   if (validInputs.bgp.length >= 2) {
     const mutatedBgp = validInputs.bgp.map((t, i) => {
       if (i === 1) {
         return {
           ...t,
-          terms: [mutateHexString(t.terms[0]), t.terms[1], t.terms[2], t.terms[3]],
+          terms: [
+            { ...t.terms[0], hash: mutateHexString(t.terms[0].hash) },
+            t.terms[1],
+            t.terms[2],
+            t.terms[3],
+          ],
         };
       }
       return t;
     });
-    
+
     negativeTests.push({
       type: 'mismatched_subject',
       description: 'Subject of second triple differs from first (shared variable mismatch)',
-      expectedError: 'Failed constraint: bgp[0].terms[0] == bgp[1].terms[0]',
+      expectedError: 'Failed constraint: bgp[0].terms[0].hash == bgp[1].terms[0].hash',
       inputs: {
         ...baseInputs,
         bgp: mutatedBgp,

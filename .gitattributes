@@ -1,0 +1,9 @@
+*.ts text diff
+*.tsx text diff
+*.js text diff
+*.mjs text diff
+*.cjs text diff
+*.rs text diff
+*.toml text diff
+*.json text diff
+*.nr text diff
