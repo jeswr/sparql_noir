@@ -2,6 +2,8 @@
 import type { Term, Literal } from "@rdfjs/types";
 import { execSync } from 'child_process';
 import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const termTypeMapping: Partial<Record<Term['termType'], number>> = {
   "NamedNode": 0,
@@ -12,13 +14,32 @@ const termTypeMapping: Partial<Record<Term['termType'], number>> = {
   "Quad": 5,
 }
 
+// Resolve `noir/bin/encode/` relative to this compiled module so the
+// helper works regardless of the caller's `process.cwd()`. The bench
+// harness in `paper/sources/zkSPARQL-bench/` invokes `sign()` from a
+// sibling directory; without this anchoring the relative
+// `./noir/bin/encode/src/main.nr.template` path fails with ENOENT.
+//
+// Layout: this file compiles to `dist/encode.js`; the encode crate
+// lives at `noir/bin/encode/` -- one level up from `dist/`.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ENCODE_PKG_DIR = path.resolve(__dirname, '..', 'noir', 'bin', 'encode');
+const TEMPLATE_PATH = path.join(ENCODE_PKG_DIR, 'src', 'main.nr.template');
+const MAIN_NR_PATH = path.join(ENCODE_PKG_DIR, 'src', 'main.nr');
+
 export function run(fn: string) {
-  const template = fs.readFileSync('./noir/bin/encode/src/main.nr.template', 'utf8');
+  const template = fs.readFileSync(TEMPLATE_PATH, 'utf8');
 
   const content = template.replaceAll('{{fn}}', fn)
-  fs.writeFileSync('./noir/bin/encode/src/main.nr', content);
-  const res = execSync('cd noir/bin/encode && nargo execute', { stdio: 'pipe' }).toString();
-  fs.rmSync('./noir/bin/encode/src/main.nr');
+  fs.writeFileSync(MAIN_NR_PATH, content);
+  // Larger datasets (e.g. the bench seed once it grew beyond the
+  // bootstrap LUBM-only fragment) push `nargo execute`'s stdout
+  // beyond the 1 MB default; bump the buffer to 64 MB to keep the
+  // signer responsive on multi-credential seeds. Anything genuinely
+  // exceeding 64 MB belongs in a generator, not the seed.
+  const res = execSync('nargo execute', { stdio: 'pipe', cwd: ENCODE_PKG_DIR, maxBuffer: 64 * 1024 * 1024 }).toString();
+  fs.rmSync(MAIN_NR_PATH);
 
   const resObj = res
       .slice(res.indexOf('§') + 1, res.lastIndexOf('§'))
