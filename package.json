@@ -54,6 +54,7 @@
     "test:circuits:compile": "npx tsx test/run-circuit-tests.ts --compile-only",
     "test:parsing": "npx tsx test/test-sparql-parsing.ts",
     "test:aggregates": "npx tsx test/test-aggregates.ts",
+    "test:prove-config": "npx tsx test/test-prove-config.ts",
     "example:sign": "node dist/scripts/sign.js -i inputs/data/ -o temp/",
     "example:verify": "node dist/scripts/verify.js -i temp/data.json --signature-only",
     "example": "npm run example:sign && npm run example:verify",

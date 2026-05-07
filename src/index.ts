@@ -378,6 +378,58 @@ interface ProofOutputWithCircuit extends ProofOutput {
 }
 
 /**
+ * Soundness guard for `prove()` config.
+ *
+ * `prove()` only honours `effectiveConfig.signature` for circuit
+ * dispatch (see `getNoirLibFilesEncoded({ signature })` in
+ * `noir-lib-bundle.ts` and the `signature::...` cache key below). The
+ * remaining knobs -- string-hash, field-hash, merkle depth, string
+ * length max, and string-hash output size -- are baked into the
+ * pre-bundled `consts/Nargo.toml` and cannot vary per-call without a
+ * rebundle. Silently accepting a user override would mean a verifier
+ * who specified e.g. `merkleDepth: 13` could be handed back a proof
+ * generated against the default `merkleDepth: 11` circuit, breaking
+ * the verifier's expected commitment shape (issue #44 -- soundness
+ * flag).
+ *
+ * Until those knobs are wired through circuit dispatch, reject
+ * any non-default value at the API boundary so the asymmetry is loud
+ * rather than silent.
+ *
+ * NB: `signature` is NOT validated here -- it IS threaded into circuit
+ * compilation, so a non-default value is honoured.
+ */
+function assertProveConfigCompatible(effective: Config): void {
+  const checks: Array<readonly [keyof Config, unknown, unknown]> = [
+    ['stringHash', effective.stringHash, defaultConfig.stringHash],
+    ['fieldHash', effective.fieldHash, defaultConfig.fieldHash],
+    ['merkleDepth', effective.merkleDepth, defaultConfig.merkleDepth],
+    ['stringHashOutputSize', effective.stringHashOutputSize, defaultConfig.stringHashOutputSize],
+  ];
+  // `stringLenMax` lives on the internal config shape but isn't on the
+  // exported `Config` interface today; guard it dynamically so a
+  // future caller that constructs a partial config with a custom
+  // stringLenMax via `as Config` still gets the soundness check.
+  const eff = effective as unknown as Record<string, unknown>;
+  const def = defaultConfig as unknown as Record<string, unknown>;
+  if ('stringLenMax' in eff) {
+    checks.push(['stringLenMax' as keyof Config, eff.stringLenMax, def.stringLenMax]);
+  }
+  for (const [field, actual, expected] of checks) {
+    if (actual !== expected) {
+      throw new Error(
+        `prove() does not yet support a non-default \`${String(field)}\` ` +
+        `(got ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}). ` +
+        `Only \`signature\` is threaded into circuit dispatch today; ` +
+        `passing other config fields would silently produce a circuit ` +
+        `that mismatches the verifier's expected commitment shape ` +
+        `(issue #44).`,
+      );
+    }
+  }
+}
+
+/**
  * Sign an RDF dataset, producing a signed dataset with Merkle root and signature.
  * 
  * @param dataset - RDF/JS DatasetCore containing the quads to sign
@@ -480,7 +532,18 @@ export async function prove(
 ): Promise<ProveResult> {
   // Merge config with defaults
   const effectiveConfig = { ...defaultConfig, ...config };
-  
+
+  // Issue #44 soundness guard: reject any user-supplied config field
+  // that `prove()` cannot actually honour at circuit-dispatch time.
+  // Only `signature` is threaded through `getNoirLibFilesEncoded` /
+  // `createInMemoryFileManager` below; the remaining fields
+  // (stringHash, fieldHash, merkleDepth, stringLenMax,
+  // stringHashOutputSize) are baked into the pre-bundled
+  // `consts/Nargo.toml` and would silently drop if accepted. Loudly
+  // rejecting them prevents a verifier-vs-prover commitment-shape
+  // mismatch.
+  assertProveConfigCompatible(effectiveConfig);
+
   // Handle single dataset or array
   const datasets = Array.isArray(signedDatasets) ? signedDatasets : [signedDatasets];
   const signedData = datasets.length === 1 ? datasets[0]! : null;
