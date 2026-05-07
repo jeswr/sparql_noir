@@ -206,14 +206,21 @@ export function buildPrefix3Inputs(
   );
   const bgpPrefix3Length = metadata.bgpPrefix3Length ?? metadata.bgp_prefix3_length ?? 0;
 
+  // If the circuit declares no prefix-3 dispatches, the prover must
+  // not push the second root / `bgp_prefix3` / sentinels -- the
+  // generated `main.nr` declares `roots: [Root; 1]` and rejects the
+  // two-root payload at witness-generation time. The signer ALWAYS
+  // builds the prefix-3 commitment when the dataset is non-empty
+  // (so a single signed dataset works for any query), but the prover
+  // dispatches on circuit metadata and omits everything prefix-3 when
+  // the query is BGP-only / round-3 NOT EXISTS-only. See PR #66
+  // (TermWitness redesign) and `spec/prefix-tree-commitment.md`
+  // Sec.8.6.
+  if (constraints.length === 0 && prefix3EasyOptionals.length === 0 && bgpPrefix3Length === 0) {
+    return null;
+  }
+
   if (!signedData.prefix3) {
-    if (constraints.length === 0 && prefix3EasyOptionals.length === 0 && bgpPrefix3Length === 0) {
-      // No prefix-3 dispatches and no prefix-3 inputs needed -- but if
-      // the circuit declares a `BgpPrefix3` array of any size, the
-      // verifier still expects a (possibly empty) shape. Return null
-      // so the caller knows to omit the inputs entirely.
-      return null;
-    }
     throw new Error(
       'prefix-3 inputs requested by circuit metadata but signedData.prefix3 is absent. ' +
       'Re-sign the dataset with the round-6 signer (sign.ts) to populate the prefix-3 commitment.',
