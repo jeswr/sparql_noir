@@ -455,10 +455,85 @@ ${filesContent}
 export const HAS_EXTERNAL_DEPS = ${hasExtDeps};
 
 /**
- * Get all noir/lib files as a Map of normalized paths to Uint8Array content.
+ * Default signature scheme baked into the bundled \`consts/Nargo.toml\`.
+ * The bundle is generated with this signature; callers can override it
+ * at compile time by passing \`{ signature }\` to {@link getNoirLibFilesEncoded}.
  */
-export function getNoirLibFilesEncoded(): Map<string, Uint8Array> {
-  return NOIR_LIB_FILES;
+const DEFAULT_BUNDLED_SIGNATURE = 'babyjubjubOpt';
+
+/**
+ * Signature schemes whose noir-lib package ships under
+ * \`/noir/lib/signatures/<id>/\`. Kept in sync with
+ * \`noir/lib/signatures/\` on disk and \`signatures\` in \`config.ts\`.
+ */
+const KNOWN_SIGNATURE_PACKAGES = new Set([
+  'babyjubjub',
+  'babyjubjubOpt',
+  'bls',
+  'embedded',
+  'schnorr',
+  'secp256k1',
+  'secp256r1',
+]);
+
+/**
+ * Build a \`consts/Nargo.toml\` whose \`signature\` dependency points at
+ * the requested signature package. Mirrors the \`Nargo.toml.template\`
+ * substitution that \`scripts/setup.ts\` performs on disk -- but works
+ * against the in-memory bundle so callers can swap signature schemes
+ * without rerunning setup or rebundling.
+ */
+function rewriteConstsNargoForSignature(
+  baseToml: string,
+  signature: string,
+): string {
+  const sigLine = \`signature = { path = "../signatures/\${signature}" }\`;
+  const re = /signature\\s*=\\s*\\{\\s*path\\s*=\\s*"\\.\\.\\/signatures\\/[^"]+"\\s*\\}/;
+  if (re.test(baseToml)) {
+    return baseToml.replace(re, sigLine);
+  }
+  return baseToml.includes('[dependencies]')
+    ? baseToml.replace('[dependencies]', \`[dependencies]\\n\${sigLine}\`)
+    : \`\${baseToml.replace(/\\n$/, '')}\\n[dependencies]\\n\${sigLine}\\n\`;
+}
+
+/**
+ * Options for {@link getNoirLibFilesEncoded}.
+ */
+export interface NoirLibBundleOptions {
+  /** Signature-scheme package to wire into the bundled \`consts\` dependency graph. */
+  signature?: string;
+}
+
+/**
+ * Get all noir/lib files as a Map of normalized paths to Uint8Array content.
+ *
+ * When \`options.signature\` is supplied and differs from the default,
+ * the returned Map is a fresh copy with \`consts/Nargo.toml\` rewritten
+ * to depend on the requested signature package.
+ */
+export function getNoirLibFilesEncoded(
+  options: NoirLibBundleOptions = {},
+): Map<string, Uint8Array> {
+  const { signature } = options;
+  if (!signature || signature === DEFAULT_BUNDLED_SIGNATURE) {
+    return NOIR_LIB_FILES;
+  }
+  if (!KNOWN_SIGNATURE_PACKAGES.has(signature)) {
+    throw new Error(
+      \`Unknown signature package "\${signature}"; valid options: \${[...KNOWN_SIGNATURE_PACKAGES].join(', ')}\`,
+    );
+  }
+  const constsTomlKey = '/noir/lib/consts/Nargo.toml';
+  const original = NOIR_LIB_FILES.get(constsTomlKey);
+  if (!original) {
+    return NOIR_LIB_FILES;
+  }
+  const decoded = new TextDecoder().decode(original);
+  const rewritten = rewriteConstsNargoForSignature(decoded, signature);
+  const out = new Map(NOIR_LIB_FILES);
+  out.set(constsTomlKey, encode(rewritten));
+  return out;
 }
 `;
 
