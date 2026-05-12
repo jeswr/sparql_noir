@@ -79,6 +79,45 @@ cd circuits/sparql_noir
 ( cd bench/monolithic_filter_and_or && nargo info ) | tee /tmp/mono.txt
 ```
 
+## Easy follow-up rows (readable surface only)
+
+The expression heads landed in the easy-follow-up round (`IN` /
+`NOT IN`, `IF` / `COALESCE`, `isNumeric`) are not implemented by the
+monolithic surface, so this section is a **readable-only** count.
+The baseline is the original `algebra_example` (BGP + numeric range
+filter) for context.
+
+| Query shape | Package | `main` ACIR opcodes | `main` Expression Width |
+|---|---|---|---|
+| BGP + `?o > 18 && ?o < 30` | `algebra_example` | 97 | 10368 |
+| BGP + `?s IN (alice, bob, carol)` | `algebra_example_in` | 89 | 10557 |
+
+**Why the `IN` example is 8 ACIR opcodes cheaper than the i64
+comparison example.** `In<3>` unrolls to three direct field
+equalities + a disjunction fold; the i64 numeric comparison path
+in `algebra_example` decodes two `i64`-typed hidden inputs and runs
+through the `LtI64`/`GtI64` Noir comparators, which decompose into
+range-check + sign-aware compare primitives. Expression-width is
+slightly higher (~+189 = ~1.8 %) because `IN` constants are
+materialised as three precomputed Pedersen-hash accessors, each of
+which contributes a hash-evaluation cost the i64 path doesn't need.
+Both lines are within the round-1 "under 1 % delta vs monolith"
+spirit; only the comparison axis changes (the IN row has no
+monolithic counterpart to compare against today).
+
+`IF` / `COALESCE` / `isNumeric` are not yet wired into a worked
+example -- they are exercised by the in-tree `#[test]` blocks in
+`expr::if_coalesce` and `expr::is_numeric`. A future bench-row
+update can add an `algebra_example_isnumeric/` package once a
+representative query lands in the snapshot corpus.
+
+Reproducing:
+
+```
+cd circuits/sparql_noir
+( cd noir/bin/algebra_example_in && nargo info )
+```
+
 ## What's next
 
 Round-1 only covers a single query. Follow-ups:
