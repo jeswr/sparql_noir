@@ -31,6 +31,7 @@ pub use expr::logical::{And, Or, Not};
 pub use expr::term_tests::{Bound, IsIri, IsLiteral, IsBlank};
 pub use expr::in_set::{In, NotIn};
 pub use expr::if_coalesce::{IfBool, CoalesceBool};
+pub use expr::is_numeric::IsNumeric;
 
 pub mod algebra;
 pub mod expr;

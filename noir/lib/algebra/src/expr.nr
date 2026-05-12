@@ -6,3 +6,4 @@ pub mod logical;
 pub mod term_tests;
 pub mod in_set;
 pub mod if_coalesce;
+pub mod is_numeric;
