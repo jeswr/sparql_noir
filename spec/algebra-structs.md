@@ -465,13 +465,77 @@ pub struct Bound      { pub field: Field, pub bound: bool }
 pub struct IsIri<E>   { pub inner: E, pub type_witness: u8 }
 pub struct IsLiteral<E> { pub inner: E, pub type_witness: u8 }
 pub struct IsBlank<E>   { pub inner: E, pub type_witness: u8 }
+pub struct IsNumeric  { pub type_witness: u8, pub datatype_hash: Field }
 ```
 
-These mirror today's `type_check` shape — they consume a
-hidden-input `type_witness` (the term's encoded type code) and
-assert the witness matches the encoded value. The full encoding
-relationship lives in `noir/lib/utils::verify_type_encoding`
-(referenced from `spec/algebra.md` §6.6).
+`IsIri` / `IsLiteral` / `IsBlank` mirror today's `type_check`
+shape — they consume a hidden-input `type_witness` (the term's
+encoded type code) and assert the witness matches the encoded
+value. The full encoding relationship lives in
+`noir/lib/utils::verify_type_encoding` (referenced from
+`spec/algebra.md` §6.6).
+
+`IsNumeric` extends this with a second witness — `datatype_hash`,
+the Pedersen hash of the literal's datatype IRI sourced from a
+hidden input. The struct asserts both that the term is a literal
+(`type_witness == 2`) and that `datatype_hash` matches one of the
+four precomputed XSD numeric datatype hashes (`xsd:integer`,
+`xsd:decimal`, `xsd:float`, `xsd:double`). The four constants are
+materialised by accessor functions
+(`xsd_integer_hash`, `xsd_decimal_hash`, `xsd_float_hash`,
+`xsd_double_hash`) in `expr::is_numeric`. Derived numeric
+datatypes (`xsd:long`, `xsd:int`, ...) are an easy follow-up once
+the term-encoding contract grows a "numeric datatype family" tag.
+
+### 4.7 IN / NOT IN
+
+```rust
+pub struct In<let N: u32>    { pub var: Field, pub set: [Field; N] }
+pub struct NotIn<let N: u32> { pub var: Field, pub set: [Field; N] }
+```
+
+SPARQL §17.4.1.9: `expr IN (e1, ..., eN)` is sugar for
+`(expr = e1) || ... || (expr = eN)`. Both sides are hash-domain
+(`Field`), matching `EqF`'s convention — the transform projects
+each set element into a precomputed term hash or a
+`variables.<var>` public input. `evaluate` folds direct
+`Field`-equality over `N` elements; `NotIn` is the boolean
+inverse, implemented by re-evaluating `In` and negating.
+
+The round-1 surface restricts the comparison to the hash domain.
+Typed-value `IN` (mixing IRIs, literals, and numeric coercions per
+XPath 2.0 value comparison) follows the same gap as `LtI64` /
+`GtI64`: when the transform proves both sides are numerics it
+lowers to a future `EqI64`; for term-identity it lowers to
+`EqF`/`In`. This matches the monolithic surface's hash-equality
+shortcut.
+
+### 4.8 IF / COALESCE
+
+```rust
+pub struct IfBool<C, T, F>     { pub cond: C, pub then_branch: T, pub else_branch: F }
+pub struct CoalesceBool<L, R>  { pub primary_bound: bool, pub primary: L, pub fallback: R }
+```
+
+**Boolean-context only.** Round-1 lacks an `ExprField` typed-value
+expression family (see `traits.nr`). Both operators therefore take
+boolean-typed branches (all of `C`/`T`/`F`/`L`/`R` are
+`ExprBool`) and return a `bool`. The typed-value forms
+(`IF(?c, ?x, ?y)` returning a `Field`, `COALESCE(?x, ?y)`
+returning a `Field`) are deferred to round 2 alongside the rest
+of the typed-value expression family. This is consistent with the
+round-1 stance taken on numeric arithmetic.
+
+`CoalesceBool` is binary; wider coalesces lower to a right-nested
+chain at transform time (the same shape used for nested `OR`).
+`primary_bound` is the transform-supplied static-analysis flag
+(matches `expr::term_tests::Bound`).
+
+### 4.9 isNumeric
+
+`IsNumeric` is documented in §4.4 alongside the other term tests
+(it shares the type-witness pattern). Listed separately in the
+operator coverage matrix (§8) for clarity.
 
 ### 4.5 String / function calls
 
@@ -646,11 +710,13 @@ surface does not introduce new public inputs in round 1.
 | And, Or, Not | Y | boolean combinators |
 | Bound | Y | via static-analysis bool |
 | isIRI / isLiteral / isBlank | Y | via `type_witness: u8` hidden input |
+| isNumeric | Y | `type_witness == 2` + `datatype_hash` ∈ {xsd:integer, decimal, float, double} |
+| IN / NOT IN | Y | `In<N>` / `NotIn<N>` over hash domain; folded equality |
+| IF / COALESCE | Y (boolean-context only) | `IfBool` / `CoalesceBool`; typed-value forms deferred to round 2 |
 | STR / DATATYPE / LANG / LANGMATCHES (hash-eq) | N (round 2) | not in round-1 library; lower as `EqF` for now |
 | CONTAINS / STRSTARTS / STRENDS | N (round 2) | byte-witness binding -- ready once `noir/lib/xpath` calls are exposed |
 | SUBSTR / UCASE / LCASE / STRBEFORE / STRAFTER / CONCAT / REPLACE / ENCODE_FOR_URI | N | deferred |
 | REGEX | N | deferred |
-| IF / COALESCE / IN / NOT IN | N | deferred (easy follow-up per `SPARQL_ROADMAP.md` sec.3) |
 | EXISTS / NOT EXISTS | N | deferred |
 | Numeric arithmetic (IEEE-754 add/sub/mul/div) | N (round 2) | gap inherited from monolith; stub structs documented in sec.4.6 |
 | Integer arithmetic | N | gap inherited from monolith |
@@ -683,7 +749,10 @@ noir/lib/algebra/
         ├── atoms.nr            # Var, Lit, VarI64
         ├── cmp.nr              # EqF, NeqF, SameTerm, LtI64/LeI64/GtI64/GeI64
         ├── logical.nr          # And<L,R>, Or<L,R>, Not<E>
-        └── term_tests.nr       # Bound, IsIri, IsLiteral, IsBlank
+        ├── term_tests.nr       # Bound, IsIri, IsLiteral, IsBlank
+        ├── in_set.nr           # In<N>, NotIn<N>
+        ├── if_coalesce.nr      # IfBool<C,T,F>, CoalesceBool<L,R>
+        └── is_numeric.nr       # IsNumeric (+ xsd_*_hash accessors)
 ```
 
 String-function and arithmetic structs (`StrEq`, `Contains`,
