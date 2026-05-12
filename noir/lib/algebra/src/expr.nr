@@ -5,3 +5,4 @@ pub mod cmp;
 pub mod logical;
 pub mod term_tests;
 pub mod in_set;
+pub mod if_coalesce;
