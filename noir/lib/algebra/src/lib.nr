@@ -29,6 +29,7 @@ pub use expr::atoms::{Var, Lit, VarI64};
 pub use expr::cmp::{EqF, NeqF, SameTerm, LtI64, LeI64, GtI64, GeI64};
 pub use expr::logical::{And, Or, Not};
 pub use expr::term_tests::{Bound, IsIri, IsLiteral, IsBlank};
+pub use expr::in_set::{In, NotIn};
 
 pub mod algebra;
 pub mod expr;
