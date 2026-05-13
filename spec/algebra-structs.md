@@ -1,6 +1,11 @@
 # Readable Per-Operator Algebra Library — Specification
 
-**Status:** Round-1 design (parallel to monolithic surface).
+**Status:** Round-1 design + round-2 follow-ups (parallel to monolithic surface).
+Round-2 additions (2026-05-13): `GraphAssertable` trait (sec.3.9) lets
+`GraphCtx<P>` compose over `Join` / `Union` / `LeftJoin` / `Filter` /
+... instead of being specialised to `Bgp<N>`; `IsIriField` (sec.4.4)
+closes the `filter_isiri` ACIR delta. See
+`bench/readable-vs-monolithic.md` for the corpus numbers.
 **Scope:** Defines a Noir-side struct hierarchy where each SPARQL
 algebra operator and each expression head is a first-class type with a
 small `evaluate`/`check` method. The Rust transform's job becomes
@@ -40,14 +45,22 @@ Gutiérrez (TODS 34(3), 2009); W3C §18 = SPARQL 1.1 §18 algebra.**
 4. **Const-generic sizes.** Each operator that contains repeated
    sub-structures (e.g., `Bgp<N>` for an `N`-pattern BGP) takes its
    width as a const generic, picked by the transform per query.
-5. **One trait, monomorphic composition.** A single `trait Algebra
-   { fn evaluate(self) -> bool }` is the common interface; every
-   operator implements it. Combinators (`Filter<P, E>`, `Join<L, R>`,
-   etc.) carry concrete child types as generics with `T: Algebra`
-   bounds. Noir requires trait bounds to call methods on generic
-   parameters (see `/noir-lang/noir` docs); without one, the
-   composition does not type-check. The trait stays minimal — only
-   `evaluate`.
+5. **Two traits, monomorphic composition.** The common interface
+   stays minimal:
+   `trait Algebra { fn evaluate(self) -> bool }` plus
+   `trait ExprBool { fn evaluate(self) -> bool }`. Every algebra
+   operator implements one; combinators (`Filter<P, E>`,
+   `Join<L, R>`, etc.) carry concrete child types as generics with
+   `T: Algebra` / `E: ExprBool` bounds. Noir requires trait bounds
+   to call methods on generic parameters (see `/noir-lang/noir`
+   docs); without them, the composition does not type-check. A
+   third trait, `GraphAssertable`, is introduced in round-2 to let
+   `GraphCtx<P>` reach into a generic inner algebra's witness
+   arrays for the per-triple 4th-position pin (§3.9). It carries
+   one method (`assert_graph_position(self, expected) -> bool`) and
+   is implemented by every operator that owns or recursively
+   contains witness triples. The three traits together cover the
+   round-2 surface and stay minimal.
 6. **Self-contained operators.** Every operator struct owns the
    witness data it needs (its triples, its sentinels, its pre-baked
    pattern positions, its expression-value witnesses). There is no
@@ -137,7 +150,7 @@ impl<let N: u32> Algebra for Bgp<N> {
     ///     proven by its Merkle path; and
     /// (b) matches the corresponding pattern's subject/predicate/
     ///     object positions. The 4th (graph) position is not
-    ///     asserted here -- `GraphCtx<N>` (sec.3.9) attaches the
+    ///     asserted here -- `GraphCtx<P>` (sec.3.9) attaches the
     ///     per-triple `terms[3].hash == graph_iri.expected`
     ///     assertion for `GRAPH`-qualified patterns; default-graph
     ///     patterns inherit the monolithic-surface elision.
@@ -359,53 +372,113 @@ pub struct Slice<P>    { pub inner: P, pub offset: u32, pub limit: u32 }
 The transform threads these through unchanged; they emit no
 additional in-circuit constraints in round 1.
 
-### 3.9 `GraphCtx<N>` — Graph
+### 3.9 `GraphCtx<P>` — Graph
 
 **Reference:** W3C §18.2.5.5.
 
 ```rust
-pub struct GraphCtx<let N: u32> {
-    pub inner: Bgp<N>,
+pub struct GraphCtx<P> {
+    pub inner: P,
     pub graph_iri: PatternPos,   // either a fixed IRI or `?g`
 }
 
-impl<let N: u32> Algebra for GraphCtx<N> {
+impl<P> Algebra for GraphCtx<P>
+where P: Algebra + GraphAssertable {
     fn evaluate(self) -> bool {
-        // Inner BGP semantics (subject/predicate/object + Merkle
-        // inclusion) plus the per-triple graph-position pin.
-        let mut result = self.inner.evaluate();
-        for i in 0..N {
-            result = result &
-                (self.inner.triples[i].terms[3].hash
-                    == self.graph_iri.expected);
-        }
-        result
+        // Inner-algebra semantics + per-witness 4th-position pin
+        // via the `GraphAssertable` recursion. The trait conjoins
+        // the pin across every BGP / PathLink leaf reachable from
+        // `self.inner`; `GraphCtx` itself does not need to know the
+        // const-generic width of the inner witness arrays.
+        self.inner.assert_graph_position(self.graph_iri.expected)
+            & self.inner.evaluate()
     }
 }
 ```
 
-`GraphCtx<N>` owns the per-triple 4th-position assertion
-`triple.terms[3].hash == graph_iri.expected`. The inner `Bgp<N>`
-checks the first three positions and Merkle inclusion; the 4th
-position is `GraphCtx`'s responsibility. **Default-graph queries do
-not construct a `GraphCtx`** and therefore pay zero graph-position
-assertion cost -- matching the monolithic surface's elision exactly.
-This split is the round-2 follow-up fix for the `basic_bgp`
-backend-gate regression documented in
+`GraphCtx<P>` owns the per-witness 4th-position assertion
+`triple.terms[3].hash == graph_iri.expected`. The inner algebra `P`
+checks the first three positions, Merkle inclusion, and any nested
+operators; the 4th position is `GraphCtx`'s responsibility and is
+discharged through the `GraphAssertable` trait. **Default-graph
+queries do not construct a `GraphCtx`** and therefore pay zero
+graph-position assertion cost -- matching the monolithic surface's
+elision exactly. This split is the round-2 follow-up fix for the
+`basic_bgp` backend-gate regression documented in
 `bench/readable-vs-monolithic.md`.
 
-**Round-1 composition scope:** `GraphCtx<N>` wraps `Bgp<N>` directly
-(the corpus has `GRAPH <iri> { ?s p ?o }` and `GRAPH ?g { ?s p ?o }`
-forms). Higher composition (`GraphCtx<Join<...>>`,
-`GraphCtx<Union<...>>`) is deferred to round-2 alongside the
-multi-BGP graph plumbing. The wrapper's type signature trades the
-fully-generic `<P>` for a concrete `Bgp<N>` so that the per-triple
-assertion can reach the inner witness array; future round-2
-generalisations either add a `GraphAssertable` trait that BGP / Join
-/ Union implement, or expose the inner triples via an associated
-type. For round-1 this trade-off is the correct one: the corpus
-doesn't exercise the higher composition, and the concrete shape is
-what unlocks the elision win.
+**Composition (round-2 generic form):** `GraphCtx<P>` now wraps any
+inner algebra that implements both `Algebra` and `GraphAssertable`.
+The trait (defined in `algebra::traits`) provides one method:
+
+```rust
+pub trait GraphAssertable {
+    fn assert_graph_position(self, expected: Field) -> bool;
+}
+```
+
+Per-operator implementations (see §3.9.1):
+
+- **`Bgp<N>`** -- leaf-case iteration over `0..N`, asserting
+  `triples[i].terms[3].hash == expected` for every owned witness
+  triple.
+- **`Join<L, R>` / `Union<L, R>`** -- conjoin both children's pins.
+  For `Join` this is the obvious conjunction of two BGP / nested
+  subtrees. For `Union` the conjunction is over both **witness
+  arrays** even though `evaluate` is a boolean disjunction over the
+  branches' truth values: the witnesses for both branches live in
+  the dataset commitment, and the soundness anchor for the named
+  graph is the Merkle binding of the (s, p, o, g) tuple, not the
+  disjunction's truth value.
+- **`LeftJoin<L, A>`** -- pin only the mandatory side's witnesses.
+  The optional arm's `matched` predicate is an `ExprBool`; any
+  graph-position pinning the OPTIONAL needs is baked into its
+  `PatternPos.expected` values by the transform.
+- **`Filter<P, E>`, `Extend<P, B>`, `Project<P>`** and the four
+  post-process markers (`Distinct`, `Reduced`, `Order`, `Slice`),
+  plus **`PathInverse<P>`** and **`PathNps<M>`** -- delegate to the
+  inner algebra; the boolean expression / modifier layer has no
+  witness triples of its own.
+- **`PathLink`** -- single-triple leaf case (mirrors `Bgp<1>`).
+
+`GraphCtx<P>` itself does **not** implement `GraphAssertable`:
+nested `GRAPH` clauses are W3C-illegal (SPARQL 1.1 §18.2.5.5) and
+the transform rejects them at lowering time. The `evaluate` body
+already pins its inner's witnesses through the explicit
+`assert_graph_position(self.graph_iri.expected)` call.
+
+**Why the trait, not an associated type?** Two of the alternatives
+considered for round-2:
+
+1. An **associated type** `type Inner;` on every algebra struct,
+   exposing the witness `Triple` array. Rejected: the witness
+   arrays are size-polymorphic (`[Triple; N]` for a BGP, possibly
+   nested for `Join`s) and Noir's associated-type machinery can't
+   easily collapse arbitrary depth into a single iterable view.
+2. A **dyn-dispatch** trait. Rejected: Noir doesn't have dyn
+   dispatch and the monomorphic composition is the whole point.
+
+The chosen trait approach keeps every implementor monomorphic and
+performs the graph-position recursion entirely at type-check time;
+the codegen for each per-query `main.nr` is identical to a
+hand-written conjunction over the BGP leaves.
+
+#### 3.9.1 Cost / soundness anchor
+
+The trait recursion adds **zero ACIR opcodes** and **zero backend
+gates** beyond the per-witness `terms[3].hash == expected` checks
+that round-1 already shipped: the recursion is unrolled at
+type-check time. Bench corpus delta is exactly 0 across all ten
+rows (see `bench/readable-vs-monolithic.md`).
+
+Soundness anchor (per `GraphCtx<P>`): for every witness `Triple t`
+reachable from `self.inner` via the trait recursion, `t.terms[3].
+hash == self.graph_iri.expected`. The recursion is exhaustive
+(every algebra operator that owns witness triples implements
+`GraphAssertable`), and the conjunction is unconditional (the
+graph-position pin is independent of which boolean branch of a
+`Union` is satisfied). This matches the monolithic surface's
+`assert(bgp[i].terms[3].hash == graph_iri_hash)` line one-for-one.
 
 ### 3.10 `PathLink<P>`, `PathInverse<P>`, `PathNps<P>` — atomic paths
 
@@ -501,9 +574,10 @@ pub struct Not<E>    { pub inner: E }
 
 ```rust
 pub struct Bound      { pub field: Field, pub bound: bool }
-pub struct IsIri<E>   { pub inner: E, pub type_witness: u8 }
-pub struct IsLiteral<E> { pub inner: E, pub type_witness: u8 }
-pub struct IsBlank<E>   { pub inner: E, pub type_witness: u8 }
+pub struct IsIri        { pub type_witness: u8 }
+pub struct IsLiteral    { pub type_witness: u8 }
+pub struct IsBlank      { pub type_witness: u8 }
+pub struct IsIriField   { pub type_witness: Field }   // round-2 sibling
 pub struct IsNumeric  { pub type_witness: u8, pub datatype_hash: Field }
 ```
 
@@ -513,6 +587,22 @@ encoded type code) and assert the witness matches the encoded
 value. The full encoding relationship lives in
 `noir/lib/utils::verify_type_encoding` (referenced from
 `spec/algebra.md` §6.6).
+
+**Round-2 addition: `IsIriField`.** Callers reading the type witness
+straight from a `Field`-typed hidden-input slot (e.g. `hidden[0]`)
+should prefer `IsIriField` over `IsIri`. The `IsIri` shape requires
+a `Field -> u8` cast at the call site, which Noir lowers to an
+8-bit decomposition / range check. `IsIriField` compares against
+`Field 0` directly. The two variants are semantically identical;
+choose by the call site's witness type. Bench corpus impact
+(`filter_isiri`): -8 ACIR opcodes, -9 Expression Width, zero
+backend-gate change (the range check fits inside the existing
+lookup pool). See `bench/readable-vs-monolithic.md`.
+
+`IsLiteralField` / `IsBlankField` are deliberately not added in
+round-2: no bench row exercises those expression heads, and the
+same one-liner pattern lands the moment a future bench row shows
+the analogous regression.
 
 `IsNumeric` extends this with a second witness — `datatype_hash`,
 the Pedersen hash of the literal's datatype IRI sourced from a
@@ -692,16 +782,23 @@ surface does not introduce new public inputs in round 1.
 
 ## 7. Future work
 
-- **Round-1 includes the trait already.** As built, the library
-  declares `trait Algebra { fn evaluate(self) -> bool }` and
-  `trait ExprBool { fn evaluate(self) -> bool }` in
-  `noir/lib/algebra/src/algebra/traits.nr`. Every operator
-  implements one of them. The round-1 surface is monomorphic per
-  query (the transform writes out concrete instantiations) but the
-  trait bound is what makes `Filter<P, E>::evaluate` able to call
-  `inner.evaluate()` -- without it, Noir rejects the method call
-  on a generic type parameter (see `/noir-lang/noir` docs,
-  "Calling functions on generic parameters").
+- **Round-1 includes the trait already; round-2 adds the third
+  trait.** As built, the library declares
+  `trait Algebra { fn evaluate(self) -> bool }`,
+  `trait ExprBool { fn evaluate(self) -> bool }`, and (round-2)
+  `trait GraphAssertable { fn assert_graph_position(self, expected:
+  Field) -> bool }` in `noir/lib/algebra/src/algebra/traits.nr`.
+  Every algebra operator implements `Algebra`; every expression
+  head implements `ExprBool`; every algebra operator that owns or
+  recursively contains witness triples implements `GraphAssertable`
+  (so `GraphCtx<P>` can compose over arbitrary `P`). The surface is
+  monomorphic per query (the transform writes out concrete
+  instantiations) but the trait bounds are what makes
+  `Filter<P, E>::evaluate` able to call `inner.evaluate()` and
+  `GraphCtx<P>::evaluate` able to call
+  `self.inner.assert_graph_position(...)` -- without them, Noir
+  rejects the method call on a generic type parameter (see
+  `/noir-lang/noir` docs, "Calling functions on generic parameters").
 - **Power-set OPTIONAL collapse.** Round-4 prefix-tree commitments
   promise a single-circuit collapse; the readable surface will
   expose a single `LeftJoin` struct rather than `2^n` variants once
@@ -733,7 +830,7 @@ surface does not introduce new public inputs in round 1.
 | Extend (BIND, var/lit/iri RHS) | Y | Y | `Extend<P, B>` |
 | Project | Y | Y | no-op wrapper |
 | Distinct / Reduced / Order / Slice | Y (markers) | Post | no-op wrappers |
-| Graph | Y | Y | `GraphCtx<N>` (wraps `Bgp<N>` directly; round-2 generalises) |
+| Graph | Y | Y | `GraphCtx<P>` (round-2 generic form; wraps any `P: Algebra + GraphAssertable`) |
 | PathLink / Inverse / NPS | Y | Y | atomic structs |
 | Path sequence / `+` / `*` | Y (via Union/Join) | Y | unrolled at transform time |
 | Minus | N | N | deferred |
@@ -747,7 +844,7 @@ surface does not introduce new public inputs in round 1.
 | LtI64, LeI64, GtI64, GeI64 | Y | i64 numeric (hidden-input plumbing) |
 | And, Or, Not | Y | boolean combinators |
 | Bound | Y | via static-analysis bool |
-| isIRI / isLiteral / isBlank | Y | via `type_witness: u8` hidden input |
+| isIRI / isLiteral / isBlank | Y | via `type_witness: u8` hidden input; round-2 adds `IsIriField` (`type_witness: Field`) for callers reading directly from `hidden[i]`, saves the `Field -> u8` range check |
 | isNumeric | Y | `type_witness == 2` + `datatype_hash` ∈ {xsd:integer, decimal, float, double} |
 | IN / NOT IN | Y | `In<N>` / `NotIn<N>` over hash domain; folded equality |
 | IF / COALESCE | Y (boolean-context only) | `IfBool` / `CoalesceBool`; typed-value forms deferred to round 2 |
@@ -772,7 +869,7 @@ noir/lib/algebra/
     ├── lib.nr                  # re-exports
     ├── algebra.nr              # sub-module declarations
     ├── algebra/
-    │   ├── traits.nr           # trait Algebra, trait ExprBool
+    │   ├── traits.nr           # trait Algebra, trait ExprBool, trait GraphAssertable
     │   ├── bgp.nr              # Bgp<N>, TriplePattern, PatternPos
     │   ├── join.nr             # Join<L, R>
     │   ├── union.nr            # Union<L, R>
@@ -780,14 +877,14 @@ noir/lib/algebra/
     │   ├── filter.nr           # Filter<P, E>
     │   ├── extend.nr           # Extend<P, B>
     │   ├── project.nr          # Project<P>, Distinct/Reduced/Order/Slice
-    │   ├── graph.nr            # GraphCtx<N>
+    │   ├── graph.nr            # GraphCtx<P> (generic over `P: Algebra + GraphAssertable`)
     │   └── path.nr             # PathLink, PathInverse, PathNps<M>
     ├── expr.nr                 # sub-module declarations
     └── expr/
         ├── atoms.nr            # Var, Lit, VarI64
         ├── cmp.nr              # EqF, NeqF, SameTerm, LtI64/LeI64/GtI64/GeI64
         ├── logical.nr          # And<L,R>, Or<L,R>, Not<E>
-        ├── term_tests.nr       # Bound, IsIri, IsLiteral, IsBlank
+        ├── term_tests.nr       # Bound, IsIri, IsIriField, IsLiteral, IsBlank
         ├── in_set.nr           # In<N>, NotIn<N>
         ├── if_coalesce.nr      # IfBool<C,T,F>, CoalesceBool<L,R>
         └── is_numeric.nr       # IsNumeric (+ xsd_*_hash accessors)
