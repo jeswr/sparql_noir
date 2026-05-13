@@ -2,6 +2,20 @@
 
 ## Changelog
 
+- **Round-2 round-2 additions (2026-05-13):**
+  - `GraphAssertable` trait lets `GraphCtx<P>` compose over any inner
+    algebra (`Join`, `Union`, `LeftJoin`, `Filter`, `Extend`, ...)
+    rather than being specialised to `Bgp<N>`. The per-row corpus is
+    bit-identical to the round-1 baseline -- the trait is a pure
+    refactor with no codegen impact -- so every row stays at
+    Δ gates = 0.
+  - `IsIriField` variant closes the `filter_isiri` +8 ACIR / +10
+    Width delta. The bench corpus is now at **ACIR Δ = 0** across
+    all ten rows (was aggregate +8) and Expression Width Δ shrinks
+    to +5 total (was +14). `bb gates` Δ stays at 0 / 0.00 %
+    aggregate; backend gates were already exact before this change.
+  - See the per-row table below for the post-r2 numbers.
+
 - **Round-2 follow-up (2026-05-13): `basic_bgp` +125 % fix landed.**
   The default-graph per-pattern `terms[3].hash` assertion has moved
   out of `Bgp::evaluate` into `GraphCtx<N>::evaluate`. Default-graph
@@ -82,16 +96,20 @@ table below -- because they exercise round-2-only readable primitives.
 | `filter_comparison` | 97 | 97 | 0 | 10251 | 10251 | 0.00 % | 64680 | 64680 | 0.00 % |
 | `filter_and_or` (worked example) | 97 | 97 | 0 | 10285 | 10285 | 0.00 % | 64680 | 64680 | 0.00 % |
 | `filter_bound` | 89 | 89 | 0 | 10211 | 10212 | +0.01 % | 64680 | 64680 | 0.00 % |
-| `filter_isiri` | 89 | 97 | +8 | 10212 | 10222 | +0.10 % | 64680 | 64680 | 0.00 % |
+| `filter_isiri` | 89 | 89 | 0 | 10212 | 10213 | +0.01 % | 64680 | 64680 | 0.00 % |
 | `filter_lang` | 89 | 89 | 0 | 10263 | 10264 | +0.01 % | 64680 | 64680 | 0.00 % |
-| **Total** | 906 | 914 | **+8** | 102634 | 102648 | **+0.01 %** | **610808** | **610808** | **0.00 %** |
+| **Total** | 906 | 906 | **0** | 102634 | 102639 | **+0.00 %** | **610808** | **610808** | **0.00 %** |
 
-After the round-2 follow-up fix (default-graph elision moved into
-`GraphCtx<N>`), the aggregate `bb` delta is **exactly zero** and no
-single query regresses on backend gates. Expression Width is within
-+10 units of the monolithic baseline on every row (the one +10 row
-is `filter_isiri`'s `Field -> u8` range-check; see "Why is one
-`Δ ACIR = +8`?" below). Both perf gates pass with margin.
+After the round-2 additions (GraphAssertable refactor + IsIriField
+variant), the aggregate `bb` delta is **exactly zero** and no single
+query regresses on backend gates. The aggregate ACIR delta is now
+also **exactly zero** -- `filter_isiri`'s +8 ACIR (the only non-zero
+row in the round-1 baseline) closes with the `Field -> Field`
+type-witness comparison. Expression Width is within +1 unit of the
+monolithic baseline on every row; the residual +1s are the same
+ambient identity-assertion overhead from the tagged-ADT operator
+tree that the backend pool quantises away. Both perf gates pass with
+margin.
 
 ### Aggregate vs gates
 
@@ -100,6 +118,7 @@ is `filter_isiri`'s `Field -> u8` range-check; see "Why is one
 - Δ = 0 = **0.00 %** aggregate.
 - Single-query max Δ: **0.00 %**.
 - 10/10 query pairs have **Δ gates = 0 exactly**.
+- 10/10 query pairs have **Δ ACIR = 0 exactly** (post-r2 IsIriField).
 
 ### Gate-analysis: what changed for `basic_bgp`
 
@@ -121,9 +140,10 @@ predicate-IRI hash).
 
 **After the fix**: `Bgp::evaluate` constrains only the first three
 positions (subject, predicate, object). The 4th (graph) position is
-the responsibility of the `GraphCtx<N>` wrapper, which is only
-instantiated for `GRAPH`-qualified patterns. Default-graph queries
-do not construct a `GraphCtx` and therefore pay zero
+the responsibility of the `GraphCtx<P>` wrapper (round-2 generic
+form; round-1 was `GraphCtx<N>` specialised to `Bgp<N>`), which is
+only instantiated for `GRAPH`-qualified patterns. Default-graph
+queries do not construct a `GraphCtx` and therefore pay zero
 graph-position assertion cost, matching the monolithic surface's
 elision exactly. `basic_bgp` is back at **28 688 backend gates**
 (identical to monolith) and the full ten-query corpus is at
@@ -139,6 +159,12 @@ tuple via Merkle inclusion, and the projection onto the first three
 positions is what the monolithic `checkBinding` enforces. The
 readable surface now mirrors that policy exactly.
 
+Round-2's `GraphAssertable` trait keeps this elision while letting
+`GraphCtx<P>` compose over `Join`, `Union`, `LeftJoin`, `Filter`,
+etc. The leaf-case impl on `Bgp<N>` keeps the const-generic
+iteration; the composite recursions are walked at type-check time.
+Bench numbers for `graph_named` / `graph_var` are unchanged.
+
 ### Perf-gate status (round-2: PASS)
 
 The gating bar agreed on in the verification brief:
@@ -148,19 +174,30 @@ The gating bar agreed on in the verification brief:
 - "no individual query worse than +5 %" -- max single-query Δ is
   **0.00 %** -> **PASS**.
 
-### Why is one `Δ ACIR = +8`?
+### Why was one `Δ ACIR = +8`? (closed in r2)
 
-`filter_isiri` is +8 ACIR opcodes on the readable side. The
-monolithic surface emits `assert(hidden[0] == 0)` -- a direct field
-equality on a Field-typed witness. The readable surface invokes
-`IsIri { type_witness: hidden[0] as u8 }`. The `Field → u8` cast
-allocates a range-check (8-bit decomposition) which contributes the
-+8 ACIR opcodes. `bb` rounds this up to zero additional gates
-because the range-check fits inside the existing lookup pool. A
-follow-up round-2 nicety is to add a `IsIriField { type_witness:
-Field }` variant whose `evaluate` is `self.type_witness == 0` -- it
-would close the ACIR gap to zero with no semantic change. Filed
-informally; not gating.
+`filter_isiri` previously cost +8 ACIR opcodes on the readable side.
+The monolithic surface emits `assert(hidden[0] == 0)` -- a direct
+field equality on a Field-typed witness. The round-1 readable
+surface invoked `IsIri { type_witness: hidden[0] as u8 }`. The
+`Field -> u8` cast allocated a range check (8-bit decomposition)
+which contributed the +8 ACIR opcodes. `bb` rounded this up to zero
+additional gates because the range-check fit inside the existing
+lookup pool.
+
+The round-2 fix landed `IsIriField { type_witness: Field }`
+alongside `IsIri`, whose `evaluate` is `self.type_witness == 0` on a
+`Field`. The bench bin now uses `IsIriField { type_witness:
+hidden[0] }` directly -- no cast, no range check, byte-identical to
+the monolithic emit. Post-r2 `filter_isiri` is at **Δ ACIR = 0** and
+**Δ Width = +1** (the same ambient overhead the other filter rows
+already carry, not the range-check cost).
+
+`IsLiteralField` / `IsBlankField` are deliberately not added: the
+bench corpus has no row exercising those expression heads. The
+round-2 follow-up brief asks us not to speculatively add siblings;
+the pattern is the same one-liner and lands the moment a bench row
+shows the analogous regression.
 
 ## Deferred (round-2)
 
@@ -179,23 +216,17 @@ the regression bar by the verification brief:
 
 ## Why some Expression Width deltas are still positive but tiny
 
-After the round-2 follow-up fix, the per-row Expression Width delta
-is at most **+10 units** (`filter_isiri`, 0.10 %) and **+1 unit** on
-five other rows. Three rows are 0.00 % (`basic_bgp`, `literal_value`,
+After the round-2 additions (GraphAssertable + IsIriField), the
+per-row Expression Width delta is at most **+1 unit** on five rows
+(`graph_named`, `graph_var`, `filter_bound`, `filter_isiri`,
+`filter_lang`). Five rows are 0.00 % (`basic_bgp`, `literal_value`,
 `filter_inequality`, `filter_comparison`, `filter_and_or`). The
 remaining +1-unit deltas come from the readable surface bracketing
 the operator tree as a tagged ADT-style composition (one extra
 identity assertion per evaluated `evaluate()` chain), which
-`bb gates` quantises away at the backend.
-
-`filter_isiri`'s +10 width comes from the `IsIri { type_witness:
-hidden[0] as u8 }` `Field -> u8` cast, which allocates an 8-bit
-decomposition / range-check that the monolithic emit (which
-directly asserts `hidden[0] == 0` on the Field witness) does not
-need. A follow-up round-2 nicety is to add an `IsIriField` variant
-whose `evaluate` is `self.type_witness == 0` over a `Field` --
-closing the gap to 0 width at zero semantic cost. Filed informally;
-not gating.
+`bb gates` quantises away at the backend. The aggregate corpus
+delta is +5 width units total / +0.00 % -- the smallest the
+readable surface has ever been on this comparison.
 
 ## SPARQL 1.1 conformance verification
 
