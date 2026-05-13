@@ -1,0 +1,11 @@
+[package]
+name = "algebra"
+type = "lib"
+authors = [""]
+# Compatible toolchain: nargo 1.0.0-beta.17 (matches the rest of
+# `noir/lib/`).
+
+[dependencies]
+types = { path = "../types" }
+consts = { path = "../consts" }
+utils = { path = "../utils" }

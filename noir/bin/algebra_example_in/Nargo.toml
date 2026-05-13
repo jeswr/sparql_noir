@@ -1,0 +1,24 @@
+[package]
+name = "algebra_example_in"
+type = "bin"
+authors = [""]
+# Demonstrates the readable per-operator algebra surface from
+# `noir/lib/algebra` exercising the `IN` expression head. Companion
+# package to `algebra_example` -- same BGP shape, different filter.
+#
+# Query:
+#
+#   PREFIX ex: <http://example.org/>
+#   SELECT ?s ?o WHERE {
+#     ?s ex:age ?o .
+#     FILTER (?s IN (ex:alice, ex:bob, ex:carol))
+#   }
+#
+# Bench row lives in `bench/readable-vs-monolithic.md` under the
+# "easy follow-ups" section.
+
+[dependencies]
+types = { path = "../../lib/types" }
+consts = { path = "../../lib/consts" }
+utils = { path = "../../lib/utils" }
+algebra = { path = "../../lib/algebra" }
