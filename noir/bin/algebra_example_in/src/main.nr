@@ -19,15 +19,15 @@
 //! opcode count for the bench row in
 //! `bench/readable-vs-monolithic.md`.
 
+use dep::consts;
+use dep::consts::signature::PubKey;
 use dep::types::{Root, Triple};
 use dep::utils::verify_signature;
-use dep::consts::signature::PubKey;
-use dep::consts;
 
-use dep::algebra::algebra::traits::Algebra;
-use dep::algebra::algebra::bgp::{Bgp, TriplePattern, PatternPos};
+use dep::algebra::algebra::bgp::{Bgp, PatternPos, TriplePattern};
 use dep::algebra::algebra::filter::Filter;
 use dep::algebra::algebra::project::Project;
+use dep::algebra::algebra::traits::Algebra;
 use dep::algebra::expr::in_set::In;
 
 // Public-input layout mirrors `algebra_example::Variables`. Even
@@ -37,12 +37,6 @@ use dep::algebra::expr::in_set::In;
 pub struct Variables {
     pub s: Field,
     pub o: Field,
-}
-
-// Default-graph encoding: type-code 4, empty string. Same constant
-// as `algebra_example::default_graph_hash`.
-fn default_graph_hash() -> Field {
-    consts::hash2([4, consts::encode_string("")])
 }
 
 // Predicate IRI `<http://example.org/age>`.
@@ -63,34 +57,21 @@ fn ex_carol_hash() -> Field {
     consts::hash2([0, consts::encode_string("http://example.org/carol")])
 }
 
-fn main(
-    public_key: [PubKey; 1],
-    roots: [Root; 1],
-    bgp: [Triple; 1],
-    variables: pub Variables,
-) {
+fn main(public_key: [PubKey; 1], roots: [Root; 1], bgp: [Triple; 1], variables: pub Variables) {
     for i in 0..1 {
         verify_signature(public_key[0], roots[i]);
     }
 
     let pat = TriplePattern {
-        subject:   PatternPos { expected: variables.s },
+        subject: PatternPos { expected: variables.s },
         predicate: PatternPos { expected: ex_age_hash() },
-        object:    PatternPos { expected: variables.o },
-        graph:     PatternPos { expected: default_graph_hash() },
+        object: PatternPos { expected: variables.o },
     };
 
     let q: Project<Filter<Bgp<1>, In<3>>> = Project {
         inner: Filter {
-            inner: Bgp {
-                triples: bgp,
-                patterns: [pat],
-                root_value: roots[0].value,
-            },
-            expr: In {
-                var: variables.s,
-                set: [ex_alice_hash(), ex_bob_hash(), ex_carol_hash()],
-            },
+            inner: Bgp { triples: bgp, patterns: [pat], root_value: roots[0].value },
+            expr: In { var: variables.s, set: [ex_alice_hash(), ex_bob_hash(), ex_carol_hash()] },
         },
     };
 

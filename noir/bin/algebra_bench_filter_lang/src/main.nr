@@ -11,15 +11,15 @@
 //! the readable surface compares it to the precomputed
 //! `consts::encode_string("en")` constant.
 
+use dep::consts;
+use dep::consts::signature::PubKey;
 use dep::types::{Root, Triple};
 use dep::utils::verify_signature;
-use dep::consts::signature::PubKey;
-use dep::consts;
 
-use dep::algebra::algebra::traits::Algebra;
-use dep::algebra::algebra::bgp::{Bgp, TriplePattern, PatternPos};
+use dep::algebra::algebra::bgp::{Bgp, PatternPos, TriplePattern};
 use dep::algebra::algebra::filter::Filter;
 use dep::algebra::algebra::project::Project;
+use dep::algebra::algebra::traits::Algebra;
 use dep::algebra::expr::cmp::EqF;
 
 pub struct Variables {
@@ -27,10 +27,6 @@ pub struct Variables {
 }
 
 pub type Hidden = [Field; 1];
-
-fn default_graph_hash() -> Field {
-    consts::hash2([4, consts::encode_string("")])
-}
 
 fn ex_label_hash() -> Field {
     consts::hash2([0, consts::encode_string("http://example.org/label")])
@@ -53,19 +49,14 @@ fn main(
     }
 
     let pat = TriplePattern {
-        subject:   PatternPos { expected: variables.s },
+        subject: PatternPos { expected: variables.s },
         predicate: PatternPos { expected: ex_label_hash() },
-        object:    PatternPos { expected: object_var },
-        graph:     PatternPos { expected: default_graph_hash() },
+        object: PatternPos { expected: object_var },
     };
 
     let q: Project<Filter<Bgp<1>, EqF>> = Project {
         inner: Filter {
-            inner: Bgp {
-                triples: bgp,
-                patterns: [pat],
-                root_value: roots[0].value,
-            },
+            inner: Bgp { triples: bgp, patterns: [pat], root_value: roots[0].value },
             expr: EqF { left: hidden[0], right: en_string_hash() },
         },
     };

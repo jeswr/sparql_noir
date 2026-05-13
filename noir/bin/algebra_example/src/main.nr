@@ -21,15 +21,15 @@
 //! structs whose `evaluate()` methods are documented one per file
 //! in `dep::algebra::algebra::*` and `dep::algebra::expr::*`.
 
+use dep::consts;
+use dep::consts::signature::PubKey;
 use dep::types::{Root, Triple};
 use dep::utils::verify_signature;
-use dep::consts::signature::PubKey;
-use dep::consts;
 
-use dep::algebra::algebra::traits::Algebra;
-use dep::algebra::algebra::bgp::{Bgp, TriplePattern, PatternPos};
+use dep::algebra::algebra::bgp::{Bgp, PatternPos, TriplePattern};
 use dep::algebra::algebra::filter::Filter;
 use dep::algebra::algebra::project::Project;
+use dep::algebra::algebra::traits::Algebra;
 use dep::algebra::expr::atoms::VarI64;
 use dep::algebra::expr::cmp::{GtI64, LtI64};
 use dep::algebra::expr::logical::And;
@@ -47,13 +47,6 @@ pub struct Variables {
 // comparison; we mirror the layout exactly so a verifier built
 // against the monolithic snapshot can also drive this circuit.
 pub type Hidden = [Field; 4];
-
-// Default-graph encoding: type-code 4, empty string. Same constant
-// the monolithic surface uses for default-graph queries (see e.g.
-// `optional_basic.sparql.nr`).
-fn default_graph_hash() -> Field {
-    consts::hash2([4, consts::encode_string("")])
-}
 
 // Predicate IRI encoding for `<http://example.org/age>`. Type-code 0
 // for NamedNode + Pedersen-hashed lexical form.
@@ -86,26 +79,21 @@ fn main(
     // into a single string-templated `checkBinding`.
     // -----------------------------------------------------------
     let pat = TriplePattern {
-        subject:   PatternPos { expected: variables.s },
+        subject: PatternPos { expected: variables.s },
         predicate: PatternPos { expected: ex_age_hash() },
-        object:    PatternPos { expected: variables.o },
-        graph:     PatternPos { expected: default_graph_hash() },
+        object: PatternPos { expected: variables.o },
     };
 
     let q: Project<Filter<Bgp<1>, And<GtI64, LtI64>>> = Project {
         inner: Filter {
-            inner: Bgp {
-                triples: bgp,
-                patterns: [pat],
-                root_value: roots[0].value,
-            },
+            inner: Bgp { triples: bgp, patterns: [pat], root_value: roots[0].value },
             expr: And {
-                left:  GtI64 {
-                    left:  VarI64 { value: hidden[0] as i64 },
+                left: GtI64 {
+                    left: VarI64 { value: hidden[0] as i64 },
                     right: VarI64 { value: hidden[1] as i64 },
                 },
                 right: LtI64 {
-                    left:  VarI64 { value: hidden[2] as i64 },
+                    left: VarI64 { value: hidden[2] as i64 },
                     right: VarI64 { value: hidden[3] as i64 },
                 },
             },

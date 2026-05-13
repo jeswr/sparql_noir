@@ -9,15 +9,15 @@
 //! (`variables.g`) rather than a constant -- the same shape, the
 //! transform just plugs a binding-ref into `expected`.
 
+use dep::consts;
+use dep::consts::signature::PubKey;
 use dep::types::{Root, Triple};
 use dep::utils::verify_signature;
-use dep::consts::signature::PubKey;
-use dep::consts;
 
-use dep::algebra::algebra::traits::Algebra;
-use dep::algebra::algebra::bgp::{Bgp, TriplePattern, PatternPos};
+use dep::algebra::algebra::bgp::{Bgp, PatternPos, TriplePattern};
 use dep::algebra::algebra::graph::GraphCtx;
 use dep::algebra::algebra::project::Project;
+use dep::algebra::algebra::traits::Algebra;
 
 pub struct Variables {
     pub s: Field,
@@ -41,19 +41,14 @@ fn main(
 
     let graph_pos = PatternPos { expected: variables.g };
     let pat = TriplePattern {
-        subject:   PatternPos { expected: variables.s },
+        subject: PatternPos { expected: variables.s },
         predicate: PatternPos { expected: ex_p_hash() },
-        object:    PatternPos { expected: object_var },
-        graph:     graph_pos,
+        object: PatternPos { expected: object_var },
     };
 
-    let q: Project<GraphCtx<Bgp<1>>> = Project {
+    let q: Project<GraphCtx<1>> = Project {
         inner: GraphCtx {
-            inner: Bgp {
-                triples: bgp,
-                patterns: [pat],
-                root_value: roots[0].value,
-            },
+            inner: Bgp { triples: bgp, patterns: [pat], root_value: roots[0].value },
             graph_iri: graph_pos,
         },
     };

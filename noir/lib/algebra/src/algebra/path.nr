@@ -13,8 +13,8 @@
 //! `spec/algebra.md` sec.8 and the bounded-unroll behaviour in the
 //! monolithic surface).
 
-use crate::algebra::traits::Algebra;
 use crate::algebra::bgp::TriplePattern;
+use crate::algebra::traits::Algebra;
 use dep::types::Triple;
 use dep::utils::verify_inclusion;
 
@@ -37,16 +37,26 @@ impl Algebra for PathLink {
         let s_ok = self.triple.terms[0].hash == self.pattern.subject.expected;
         let p_ok = self.triple.terms[1].hash == self.pattern.predicate.expected;
         let o_ok = self.triple.terms[2].hash == self.pattern.object.expected;
-        let g_ok = self.triple.terms[3].hash == self.pattern.graph.expected;
-        s_ok & p_ok & o_ok & g_ok
+        // Graph position is `GraphCtx`'s responsibility -- see
+        // `algebra::graph` and `algebra::bgp` module docs. A path leg
+        // under `GRAPH` is wrapped in `GraphCtx` by the caller;
+        // default-graph paths inherit the monolithic-surface elision.
+        s_ok & p_ok & o_ok
     }
 }
 
 /// Inverse property path `^p`. Marker wrapper: the transform swaps
 /// subject/object in the inner `PathLink.pattern` at lowering time.
-pub struct PathInverse<P> { pub inner: P }
-impl<P> Algebra for PathInverse<P> where P: Algebra {
-    fn evaluate(self) -> bool { self.inner.evaluate() }
+pub struct PathInverse<P> {
+    pub inner: P,
+}
+impl<P> Algebra for PathInverse<P>
+where
+    P: Algebra,
+{
+    fn evaluate(self) -> bool {
+        self.inner.evaluate()
+    }
 }
 
 /// Negated property set `!p`. Holds the inner `PathLink` plus an

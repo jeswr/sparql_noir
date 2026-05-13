@@ -7,21 +7,21 @@
 //! }
 //! ```
 //!
-//! `GraphCtx` is a no-op wrapper: the transform substitutes the graph
-//! IRI into the inner `TriplePattern.graph` slot at build time (see
-//! `spec/algebra-structs.md` sec.3.9). The wrapper exists so the
-//! algebra tree faithfully records the `GRAPH` boundary for the Lean
-//! correspondence.
+//! `GraphCtx<N>` owns the per-triple graph-position assertion
+//! `triple.terms[3].hash == graph_iri.expected`. Default-graph
+//! patterns do not construct a `GraphCtx`, so they pay none of that
+//! cost (see `spec/algebra-structs.md` sec.3.9 and the `basic_bgp`
+//! bench analysis in `bench/readable-vs-monolithic.md`).
 
+use dep::consts;
+use dep::consts::signature::PubKey;
 use dep::types::{Root, Triple};
 use dep::utils::verify_signature;
-use dep::consts::signature::PubKey;
-use dep::consts;
 
-use dep::algebra::algebra::traits::Algebra;
-use dep::algebra::algebra::bgp::{Bgp, TriplePattern, PatternPos};
+use dep::algebra::algebra::bgp::{Bgp, PatternPos, TriplePattern};
 use dep::algebra::algebra::graph::GraphCtx;
 use dep::algebra::algebra::project::Project;
+use dep::algebra::algebra::traits::Algebra;
 
 pub struct Variables {
     pub s: Field,
@@ -48,19 +48,14 @@ fn main(
 
     let graph_pos = PatternPos { expected: ex_g1_hash() };
     let pat = TriplePattern {
-        subject:   PatternPos { expected: variables.s },
+        subject: PatternPos { expected: variables.s },
         predicate: PatternPos { expected: ex_p_hash() },
-        object:    PatternPos { expected: object_var },
-        graph:     graph_pos,
+        object: PatternPos { expected: object_var },
     };
 
-    let q: Project<GraphCtx<Bgp<1>>> = Project {
+    let q: Project<GraphCtx<1>> = Project {
         inner: GraphCtx {
-            inner: Bgp {
-                triples: bgp,
-                patterns: [pat],
-                root_value: roots[0].value,
-            },
+            inner: Bgp { triples: bgp, patterns: [pat], root_value: roots[0].value },
             graph_iri: graph_pos,
         },
     };
