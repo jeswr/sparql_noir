@@ -129,18 +129,23 @@ pub struct TriplePattern {
     pub subject: PatternPos,
     pub predicate: PatternPos,
     pub object: PatternPos,
-    pub graph: PatternPos,
 }
 
 impl<let N: u32> Algebra for Bgp<N> {
     /// Returns `true` iff every witness triple in `self.triples`:
     /// (a) is a member of the dataset committed in `self.root_value`,
     ///     proven by its Merkle path; and
-    /// (b) matches the corresponding pattern's position constraints.
+    /// (b) matches the corresponding pattern's subject/predicate/
+    ///     object positions. The 4th (graph) position is not
+    ///     asserted here -- `GraphCtx<N>` (sec.3.9) attaches the
+    ///     per-triple `terms[3].hash == graph_iri.expected`
+    ///     assertion for `GRAPH`-qualified patterns; default-graph
+    ///     patterns inherit the monolithic-surface elision.
     fn evaluate(self) -> bool {
         // For each i in 0..N: verify_inclusion(triples[i], root_value)
-        // and assert each terms[j].hash == patterns[i].<pos>.expected.
-        // Conjunction over all pattern equalities is returned.
+        // and assert terms[j].hash == patterns[i].<pos>.expected for
+        // j in {0,1,2}. Conjunction returned. The graph slot is
+        // GraphCtx's responsibility.
     }
 }
 ```
@@ -150,15 +155,21 @@ declares the witness triples, root, and the signature check on the
 root. The `Bgp` struct owns the triples + root after construction.
 
 **Constraint sketch (per pattern):** `verify_inclusion` (≈ Merkle
-depth `M` × `hash2` plus one `hash4`) plus 4 field equalities. The
-inclusion cost dominates by an order of magnitude (`M = 11` Merkle
-depth × Pedersen hashes).
+depth `M` × `hash2` plus one `hash4`) plus 3 field equalities (the
+4th is conditional on `GraphCtx` wrapping). The inclusion cost
+dominates by an order of magnitude (`M = 11` Merkle depth × Pedersen
+hashes).
 
 **Soundness anchor:** matches `assert(bgp[i].terms[j].hash ==
-expected)` and the `verify_inclusion(triple, root_value)` body in
-`main.nr` exactly. The only difference is that the readable surface
-groups them inside `Bgp::evaluate` instead of splitting them across
-`main` and `checkBinding`.
+expected)` for j in {0,1,2} and the `verify_inclusion(triple,
+root_value)` body in `main.nr` exactly. The graph slot follows the
+monolithic emit's convention: elided for default-graph queries
+(soundness via the dataset commitment's Merkle binding of the
+(s, p, o, g) tuple); asserted by `GraphCtx::evaluate` for
+`GRAPH`-qualified patterns. The round-2 follow-up split (move the
+graph assertion from `Bgp::evaluate` into `GraphCtx::evaluate`) is
+the fix landed for the `basic_bgp` regression noted in
+`bench/readable-vs-monolithic.md`.
 
 ### 3.2 `Join<L, R>` — Join
 
@@ -348,25 +359,53 @@ pub struct Slice<P>    { pub inner: P, pub offset: u32, pub limit: u32 }
 The transform threads these through unchanged; they emit no
 additional in-circuit constraints in round 1.
 
-### 3.9 `GraphCtx<P>` — Graph
+### 3.9 `GraphCtx<N>` — Graph
 
 **Reference:** W3C §18.2.5.5.
 
 ```rust
-pub struct GraphCtx<P> {
-    pub inner: P,
+pub struct GraphCtx<let N: u32> {
+    pub inner: Bgp<N>,
     pub graph_iri: PatternPos,   // either a fixed IRI or `?g`
+}
+
+impl<let N: u32> Algebra for GraphCtx<N> {
+    fn evaluate(self) -> bool {
+        // Inner BGP semantics (subject/predicate/object + Merkle
+        // inclusion) plus the per-triple graph-position pin.
+        let mut result = self.inner.evaluate();
+        for i in 0..N {
+            result = result &
+                (self.inner.triples[i].terms[3].hash
+                    == self.graph_iri.expected);
+        }
+        result
+    }
 }
 ```
 
-`Graph` is implemented by pinning the 4th term of every triple
-pattern inside `inner` to `graph_iri`. The readable struct stores the
-graph position; its `evaluate` runs `inner.evaluate(bgp)` *and*
-asserts `bgp[i].terms[3].hash == graph_iri.expected` for every `i` in
-the inner BGP. The transform substitutes the `graph` position into
-each inner `TriplePattern` at build time, so `GraphCtx::evaluate`
-ends up the same as `inner.evaluate`. The wrapper exists to make the
-algebra tree faithful.
+`GraphCtx<N>` owns the per-triple 4th-position assertion
+`triple.terms[3].hash == graph_iri.expected`. The inner `Bgp<N>`
+checks the first three positions and Merkle inclusion; the 4th
+position is `GraphCtx`'s responsibility. **Default-graph queries do
+not construct a `GraphCtx`** and therefore pay zero graph-position
+assertion cost -- matching the monolithic surface's elision exactly.
+This split is the round-2 follow-up fix for the `basic_bgp`
+backend-gate regression documented in
+`bench/readable-vs-monolithic.md`.
+
+**Round-1 composition scope:** `GraphCtx<N>` wraps `Bgp<N>` directly
+(the corpus has `GRAPH <iri> { ?s p ?o }` and `GRAPH ?g { ?s p ?o }`
+forms). Higher composition (`GraphCtx<Join<...>>`,
+`GraphCtx<Union<...>>`) is deferred to round-2 alongside the
+multi-BGP graph plumbing. The wrapper's type signature trades the
+fully-generic `<P>` for a concrete `Bgp<N>` so that the per-triple
+assertion can reach the inner witness array; future round-2
+generalisations either add a `GraphAssertable` trait that BGP / Join
+/ Union implement, or expose the inner triples via an associated
+type. For round-1 this trade-off is the correct one: the corpus
+doesn't exercise the higher composition, and the concrete shape is
+what unlocks the elision win.
 
 ### 3.10 `PathLink<P>`, `PathInverse<P>`, `PathNps<P>` — atomic paths
 
@@ -608,7 +647,6 @@ let q = Project {
                 subject:   PatternPos { expected: ctx.s },
                 predicate: PatternPos { expected: EX_AGE_HASH },
                 object:    PatternPos { expected: ctx.o },
-                graph:     PatternPos { expected: DEFAULT_GRAPH },
             }],
         },
         expr: And {
@@ -695,7 +733,7 @@ surface does not introduce new public inputs in round 1.
 | Extend (BIND, var/lit/iri RHS) | Y | Y | `Extend<P, B>` |
 | Project | Y | Y | no-op wrapper |
 | Distinct / Reduced / Order / Slice | Y (markers) | Post | no-op wrappers |
-| Graph | Y | Y | `GraphCtx<P>` |
+| Graph | Y | Y | `GraphCtx<N>` (wraps `Bgp<N>` directly; round-2 generalises) |
 | PathLink / Inverse / NPS | Y | Y | atomic structs |
 | Path sequence / `+` / `*` | Y (via Union/Join) | Y | unrolled at transform time |
 | Minus | N | N | deferred |
@@ -742,7 +780,7 @@ noir/lib/algebra/
     │   ├── filter.nr           # Filter<P, E>
     │   ├── extend.nr           # Extend<P, B>
     │   ├── project.nr          # Project<P>, Distinct/Reduced/Order/Slice
-    │   ├── graph.nr            # GraphCtx<P>
+    │   ├── graph.nr            # GraphCtx<N>
     │   └── path.nr             # PathLink, PathInverse, PathNps<M>
     ├── expr.nr                 # sub-module declarations
     └── expr/
