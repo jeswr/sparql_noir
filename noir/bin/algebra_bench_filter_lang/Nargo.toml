@@ -1,0 +1,15 @@
+[package]
+name = "algebra_bench_filter_lang"
+type = "bin"
+authors = [""]
+# Readable-surface counterpart of `bench/monolithic_filter_lang/`.
+# Bench-row in `bench/readable-vs-monolithic.md`.
+#
+# Query:
+#   SELECT ?s WHERE { ?s <ex:label> ?o . FILTER (LANG(?o) = "en") }
+
+[dependencies]
+types = { path = "../../lib/types" }
+consts = { path = "../../lib/consts" }
+utils = { path = "../../lib/utils" }
+algebra = { path = "../../lib/algebra" }

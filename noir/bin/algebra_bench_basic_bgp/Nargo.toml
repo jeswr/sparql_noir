@@ -1,0 +1,16 @@
+[package]
+name = "algebra_bench_basic_bgp"
+type = "bin"
+authors = [""]
+# Readable-surface counterpart of
+# `bench/monolithic_basic_bgp/`. Bench-row in
+# `bench/readable-vs-monolithic.md`.
+#
+# Query:
+#   SELECT ?s ?p ?o WHERE { ?s ?p ?o }
+
+[dependencies]
+types = { path = "../../lib/types" }
+consts = { path = "../../lib/consts" }
+utils = { path = "../../lib/utils" }
+algebra = { path = "../../lib/algebra" }
