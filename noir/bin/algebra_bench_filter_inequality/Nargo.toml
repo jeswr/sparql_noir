@@ -1,0 +1,16 @@
+[package]
+name = "algebra_bench_filter_inequality"
+type = "bin"
+authors = [""]
+# Readable-surface counterpart of
+# `bench/monolithic_filter_inequality/`. Bench-row in
+# `bench/readable-vs-monolithic.md`.
+#
+# Query:
+#   SELECT ?s ?o WHERE { ?s <ex:knows> ?o . FILTER (?s != ?o) }
+
+[dependencies]
+types = { path = "../../lib/types" }
+consts = { path = "../../lib/consts" }
+utils = { path = "../../lib/utils" }
+algebra = { path = "../../lib/algebra" }
