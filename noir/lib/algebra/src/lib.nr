@@ -14,24 +14,24 @@
 
 // Re-export the core traits + helper types at the crate root for
 // ergonomic `use dep::algebra::{Algebra, ExprBool, ...}`.
-pub use algebra::traits::{Algebra, ExprBool};
-pub use algebra::bgp::{Bgp, TriplePattern, PatternPos};
-pub use algebra::join::Join;
-pub use algebra::union::Union;
-pub use algebra::leftjoin::{LeftJoin, OptionalArm};
-pub use algebra::filter::Filter;
+pub use algebra::bgp::{Bgp, PatternPos, TriplePattern};
 pub use algebra::extend::Extend;
-pub use algebra::project::{Project, Distinct, Reduced, Order, Slice};
+pub use algebra::filter::Filter;
 pub use algebra::graph::GraphCtx;
-pub use algebra::path::{PathLink, PathInverse, PathNps};
+pub use algebra::join::Join;
+pub use algebra::leftjoin::{LeftJoin, OptionalArm};
+pub use algebra::path::{PathInverse, PathLink, PathNps};
+pub use algebra::project::{Distinct, Order, Project, Reduced, Slice};
+pub use algebra::traits::{Algebra, ExprBool, GraphAssertable};
+pub use algebra::union::Union;
 
-pub use expr::atoms::{Var, Lit, VarI64};
-pub use expr::cmp::{EqF, NeqF, SameTerm, LtI64, LeI64, GtI64, GeI64};
-pub use expr::logical::{And, Or, Not};
-pub use expr::term_tests::{Bound, IsIri, IsLiteral, IsBlank};
+pub use expr::atoms::{Lit, Var, VarI64};
+pub use expr::cmp::{EqF, GeI64, GtI64, LeI64, LtI64, NeqF, SameTerm};
+pub use expr::if_coalesce::{CoalesceBool, IfBool};
 pub use expr::in_set::{In, NotIn};
-pub use expr::if_coalesce::{IfBool, CoalesceBool};
 pub use expr::is_numeric::IsNumeric;
+pub use expr::logical::{And, Not, Or};
+pub use expr::term_tests::{Bound, IsBlank, IsIri, IsIriField, IsLiteral};
 
 pub mod algebra;
 pub mod expr;

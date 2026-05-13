@@ -14,7 +14,7 @@
 //! monolithic surface).
 
 use crate::algebra::bgp::TriplePattern;
-use crate::algebra::traits::Algebra;
+use crate::algebra::traits::{Algebra, GraphAssertable};
 use dep::types::Triple;
 use dep::utils::verify_inclusion;
 
@@ -45,6 +45,13 @@ impl Algebra for PathLink {
     }
 }
 
+impl GraphAssertable for PathLink {
+    /// Single-triple leaf case (mirrors `Bgp<1>`).
+    fn assert_graph_position(self, expected: Field) -> bool {
+        self.triple.terms[3].hash == expected
+    }
+}
+
 /// Inverse property path `^p`. Marker wrapper: the transform swaps
 /// subject/object in the inner `PathLink.pattern` at lowering time.
 pub struct PathInverse<P> {
@@ -56,6 +63,15 @@ where
 {
     fn evaluate(self) -> bool {
         self.inner.evaluate()
+    }
+}
+
+impl<P> GraphAssertable for PathInverse<P>
+where
+    P: GraphAssertable,
+{
+    fn assert_graph_position(self, expected: Field) -> bool {
+        self.inner.assert_graph_position(expected)
     }
 }
 
@@ -75,5 +91,11 @@ impl<let M: u32> Algebra for PathNps<M> {
             result = result & (predicate_hash != self.excluded[k]);
         }
         result
+    }
+}
+
+impl<let M: u32> GraphAssertable for PathNps<M> {
+    fn assert_graph_position(self, expected: Field) -> bool {
+        self.inner.assert_graph_position(expected)
     }
 }
