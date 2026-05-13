@@ -25,7 +25,7 @@
 //! rather than burying it inside `LeftJoin` because Lean will mirror
 //! it (it is a top-level proof obligation in the algebra tree).
 
-use crate::algebra::traits::{Algebra, ExprBool};
+use crate::algebra::traits::{Algebra, ExprBool, GraphAssertable};
 
 /// The "matched" + "unmatched" disjunction inside an OPTIONAL.
 ///
@@ -44,7 +44,11 @@ pub struct OptionalArm<M, U> {
     pub unmatched: U,
 }
 
-impl<M, U> ExprBool for OptionalArm<M, U> where M: ExprBool, U: ExprBool {
+impl<M, U> ExprBool for OptionalArm<M, U>
+where
+    M: ExprBool,
+    U: ExprBool,
+{
     fn evaluate(self) -> bool {
         self.matched.evaluate() | self.unmatched.evaluate()
     }
@@ -55,8 +59,29 @@ pub struct LeftJoin<L, A> {
     pub optional_arm: A,
 }
 
-impl<L, A> Algebra for LeftJoin<L, A> where L: Algebra, A: ExprBool {
+impl<L, A> Algebra for LeftJoin<L, A>
+where
+    L: Algebra,
+    A: ExprBool,
+{
     fn evaluate(self) -> bool {
         self.mandatory.evaluate() & self.optional_arm.evaluate()
+    }
+}
+
+impl<L, A> GraphAssertable for LeftJoin<L, A>
+where
+    L: GraphAssertable,
+{
+    /// Pin the mandatory side's witnesses to the `GRAPH` IRI. The
+    /// optional arm is an `ExprBool` (the matched/unmatched
+    /// disjunction is a boolean predicate, not an algebra subtree
+    /// with its own visible witness array); any graph-position
+    /// pinning the OPTIONAL needs is baked into the `matched`
+    /// expression's `PatternPos.expected` values by the transform.
+    /// See `algebra::leftjoin` module docs and `spec/algebra-structs.md`
+    /// sec.3.4 for the round-1 collapsed-OPTIONAL contract.
+    fn assert_graph_position(self, expected: Field) -> bool {
+        self.mandatory.assert_graph_position(expected)
     }
 }

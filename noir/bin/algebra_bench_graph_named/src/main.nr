@@ -7,11 +7,14 @@
 //! }
 //! ```
 //!
-//! `GraphCtx<N>` owns the per-triple graph-position assertion
-//! `triple.terms[3].hash == graph_iri.expected`. Default-graph
+//! `GraphCtx<P>` owns the per-triple graph-position assertion
+//! `triple.terms[3].hash == graph_iri.expected`, delegated to the
+//! inner algebra `P` through the `GraphAssertable` trait. Here
+//! `P = Bgp<1>`; round-2 also lets `P` be `Join`, `Union`, `Filter`,
+//! etc. (see `spec/algebra-structs.md` sec.3.9). Default-graph
 //! patterns do not construct a `GraphCtx`, so they pay none of that
-//! cost (see `spec/algebra-structs.md` sec.3.9 and the `basic_bgp`
-//! bench analysis in `bench/readable-vs-monolithic.md`).
+//! cost (see the `basic_bgp` bench analysis in
+//! `bench/readable-vs-monolithic.md`).
 
 use dep::consts;
 use dep::consts::signature::PubKey;
@@ -53,7 +56,7 @@ fn main(
         object: PatternPos { expected: object_var },
     };
 
-    let q: Project<GraphCtx<1>> = Project {
+    let q: Project<GraphCtx<Bgp<1>>> = Project {
         inner: GraphCtx {
             inner: Bgp { triples: bgp, patterns: [pat], root_value: roots[0].value },
             graph_iri: graph_pos,

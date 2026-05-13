@@ -46,7 +46,7 @@ fn main(
         object: PatternPos { expected: object_var },
     };
 
-    let q: Project<GraphCtx<1>> = Project {
+    let q: Project<GraphCtx<Bgp<1>>> = Project {
         inner: GraphCtx {
             inner: Bgp { triples: bgp, patterns: [pat], root_value: roots[0].value },
             graph_iri: graph_pos,

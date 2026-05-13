@@ -21,7 +21,7 @@
 //! lookup-pool regression documented in
 //! `bench/readable-vs-monolithic.md` (round-2 follow-up).
 
-use crate::algebra::traits::Algebra;
+use crate::algebra::traits::{Algebra, GraphAssertable};
 use dep::types::Triple;
 use dep::utils::verify_inclusion;
 
@@ -82,6 +82,21 @@ impl<let N: u32> Algebra for Bgp<N> {
             let p_ok = self.triples[i].terms[1].hash == self.patterns[i].predicate.expected;
             let o_ok = self.triples[i].terms[2].hash == self.patterns[i].object.expected;
             result = result & s_ok & p_ok & o_ok;
+        }
+        result
+    }
+}
+
+impl<let N: u32> GraphAssertable for Bgp<N> {
+    /// Leaf-case graph-position pin: every witness triple owned by
+    /// this BGP must have `terms[3].hash == expected`. Lets
+    /// `GraphCtx<Bgp<N>>` (and, through delegation, every composite
+    /// algebra that reaches a BGP leaf) reach into the witness array
+    /// without `GraphCtx` knowing the BGP width statically.
+    fn assert_graph_position(self, expected: Field) -> bool {
+        let mut result = true;
+        for i in 0..N {
+            result = result & (self.triples[i].terms[3].hash == expected);
         }
         result
     }
