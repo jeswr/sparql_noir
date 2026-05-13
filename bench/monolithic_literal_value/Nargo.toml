@@ -1,0 +1,10 @@
+[package]
+name = "monolithic_literal_value"
+type = "bin"
+authors = [""]
+# Verbatim re-host of `transform/tests/snapshots/literal_value.*`.
+
+[dependencies]
+consts = { path = "../../noir/lib/consts" }
+types = { path = "../../noir/lib/types" }
+utils = { path = "../../noir/lib/utils" }
