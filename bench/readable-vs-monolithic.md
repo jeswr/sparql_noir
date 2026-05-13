@@ -1,5 +1,18 @@
 # Readable-vs-Monolithic Gate-Count Comparison
 
+## Changelog
+
+- **Round-2 follow-up (2026-05-13): `basic_bgp` +125 % fix landed.**
+  The default-graph per-pattern `terms[3].hash` assertion has moved
+  out of `Bgp::evaluate` into `GraphCtx<N>::evaluate`. Default-graph
+  queries no longer instantiate `GraphCtx` and therefore pay zero
+  graph-position assertion cost, matching the monolithic surface's
+  elision exactly. **Aggregate corpus Δ gates: +5.89 % -> 0.00 %**;
+  **single-query worst Δ: +125.4 % -> 0.00 %**. See the per-row
+  table and gate analysis below. `nargo info` Expression Width
+  matches the monolithic baseline to within +14 width units across
+  the entire ten-query corpus (was +681 before the fix).
+
 **Round-2 status -- corpus sweep + conformance verification.** Ten
 queries mirrored through both surfaces (one per `transform/tests/
 snapshots/*.sparql.nr` fixture that the round-1 readable surface
@@ -61,31 +74,34 @@ table below -- because they exercise round-2-only readable primitives.
 
 | Query | Mono ACIR | Read ACIR | Δ ACIR | Mono Width | Read Width | Δ Width (% mono) | Mono `bb` gates | Read `bb` gates | Δ gates (% mono) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `basic_bgp` | 89 | 89 | 0 | 10114 | 10206 | +0.91 % | **28688** | **64680** | **+125.4 %** |
-| `literal_value` | 89 | 89 | 0 | 10578 | 10660 | +0.78 % | 64680 | 64680 | 0.00 % |
+| `basic_bgp` | 89 | 89 | 0 | 10114 | 10114 | 0.00 % | **28688** | **28688** | **0.00 %** |
+| `literal_value` | 89 | 89 | 0 | 10578 | 10578 | 0.00 % | 64680 | 64680 | 0.00 % |
 | `graph_named` | 89 | 89 | 0 | 10295 | 10296 | +0.01 % | 64680 | 64680 | 0.00 % |
 | `graph_var` | 89 | 89 | 0 | 10211 | 10212 | +0.01 % | 64680 | 64680 | 0.00 % |
-| `filter_inequality` | 89 | 89 | 0 | 10214 | 10296 | +0.80 % | 64680 | 64680 | 0.00 % |
-| `filter_comparison` | 97 | 97 | 0 | 10251 | 10333 | +0.80 % | 64680 | 64680 | 0.00 % |
-| `filter_and_or` (worked example) | 97 | 97 | 0 | 10285 | 10368 | +0.81 % | 64680 | 64680 | 0.00 % |
-| `filter_bound` | 89 | 89 | 0 | 10211 | 10294 | +0.81 % | 64680 | 64680 | 0.00 % |
-| `filter_isiri` | 89 | 97 | +8 | 10212 | 10304 | +0.90 % | 64680 | 64680 | 0.00 % |
-| `filter_lang` | 89 | 89 | 0 | 10263 | 10346 | +0.81 % | 64680 | 64680 | 0.00 % |
-| **Total** | 906 | 914 | **+8** | 102634 | 103315 | **+0.66 %** | **610808** | **646800** | **+5.89 %** |
+| `filter_inequality` | 89 | 89 | 0 | 10214 | 10214 | 0.00 % | 64680 | 64680 | 0.00 % |
+| `filter_comparison` | 97 | 97 | 0 | 10251 | 10251 | 0.00 % | 64680 | 64680 | 0.00 % |
+| `filter_and_or` (worked example) | 97 | 97 | 0 | 10285 | 10285 | 0.00 % | 64680 | 64680 | 0.00 % |
+| `filter_bound` | 89 | 89 | 0 | 10211 | 10212 | +0.01 % | 64680 | 64680 | 0.00 % |
+| `filter_isiri` | 89 | 97 | +8 | 10212 | 10222 | +0.10 % | 64680 | 64680 | 0.00 % |
+| `filter_lang` | 89 | 89 | 0 | 10263 | 10264 | +0.01 % | 64680 | 64680 | 0.00 % |
+| **Total** | 906 | 914 | **+8** | 102634 | 102648 | **+0.01 %** | **610808** | **610808** | **0.00 %** |
 
-The aggregate `bb` delta is dominated by a single outlier --
-`basic_bgp` -- which crosses the agreed per-query bar by 25x. See the
-gate analysis below.
+After the round-2 follow-up fix (default-graph elision moved into
+`GraphCtx<N>`), the aggregate `bb` delta is **exactly zero** and no
+single query regresses on backend gates. Expression Width is within
++10 units of the monolithic baseline on every row (the one +10 row
+is `filter_isiri`'s `Field -> u8` range-check; see "Why is one
+`Δ ACIR = +8`?" below). Both perf gates pass with margin.
 
 ### Aggregate vs gates
 
 - Monolith total: 28688 + 64680 × 9 = **610 808**.
-- Readable total: 64680 × 10 = **646 800**.
-- Δ = +35 992 = **+5.89 %** aggregate.
-- Single-query max Δ: **+125.4 %** on `basic_bgp` (28688 → 64680).
-- 9/10 query pairs have **Δ gates = 0 exactly**.
+- Readable total: 28688 + 64680 × 9 = **610 808**.
+- Δ = 0 = **0.00 %** aggregate.
+- Single-query max Δ: **0.00 %**.
+- 10/10 query pairs have **Δ gates = 0 exactly**.
 
-### Gate-analysis: what's happening on `basic_bgp`
+### Gate-analysis: what changed for `basic_bgp`
 
 The monolithic snapshot for `basic_bgp` has no `consts::hash2(...)`
 call in `checkBinding` -- it only asserts the three variable bindings
@@ -94,72 +110,43 @@ against `bgp[0].terms[0..2].hash` and **does not constrain
 the corpus where Barretenberg's compiled circuit fits below the next
 power-of-two-ish lookup-pool threshold -- 28 688 gates.
 
-The readable surface's `Bgp::evaluate` -- per
-`spec/algebra-structs.md` sec.3.1 -- constrains all four positions
-symmetrically:
+**Before the fix**: the readable surface's `Bgp::evaluate`
+constrained all four positions symmetrically, including a
+`bgp[0].terms[3].hash == default_graph_hash()` assertion that
+activated Barretenberg's Pedersen-hash lookup pool and bumped the
+circuit into the next gate-pool tier (~64 680 gates). This added
++125.4 % to `basic_bgp` while costing zero on the other nine
+corpus rows (their lookup pool was already active from at least one
+predicate-IRI hash).
 
-```noir
-let g_ok = self.triples[i].terms[3].hash == self.patterns[i].graph.expected;
-```
+**After the fix**: `Bgp::evaluate` constrains only the first three
+positions (subject, predicate, object). The 4th (graph) position is
+the responsibility of the `GraphCtx<N>` wrapper, which is only
+instantiated for `GRAPH`-qualified patterns. Default-graph queries
+do not construct a `GraphCtx` and therefore pay zero
+graph-position assertion cost, matching the monolithic surface's
+elision exactly. `basic_bgp` is back at **28 688 backend gates**
+(identical to monolith) and the full ten-query corpus is at
+**0.00 %** aggregate `bb gates` delta.
 
-For a default-graph query the transform sets
-`patterns[i].graph.expected = consts::hash2([4, encode_string("")])`.
-That single hash invocation activates the Pedersen-hash lookup
-machinery, pushing the circuit into the next gate-pool tier
-(~64 680 gates). On every other query in the corpus the monolithic
-surface already contained at least one `consts::hash2` (e.g. for the
-predicate IRI), so the lookup pool is already active and the
-symmetric 4th-position assertion adds **zero** gates on top.
+The fix is documented in `spec/algebra-structs.md` sec.3.1 / 3.9 and
+lives in `noir/lib/algebra/src/algebra/{bgp,graph,path}.nr` plus a
+one-line removal in each per-query `main.nr` (drop the
+`graph: PatternPos { expected: default_graph_hash() }` line). The
+soundness anchor for default-graph queries is identical to the
+monolithic surface: the dataset commitment binds the (s, p, o, g)
+tuple via Merkle inclusion, and the projection onto the first three
+positions is what the monolithic `checkBinding` enforces. The
+readable surface now mirrors that policy exactly.
 
-In other words, the +125 % isn't a per-pattern multiplicative cost --
-it's a one-shot **lookup-pool activation** triggered by a single
-hash in a circuit that didn't previously have any. The `nargo info`
-"Expression Width" picks this up as +92 (+0.91 %); the `bb gates`
-backend rounds up to a discrete pool.
-
-### Why this is a merge-blocker (round-2 status: FAIL on perf gate)
+### Perf-gate status (round-2: PASS)
 
 The gating bar agreed on in the verification brief:
 
-- "total backend gates Δ within ±2 % across the corpus" -- **+5.89 %
-  on this corpus → FAIL**.
-- "no individual query worse than +5 %" -- **+125.4 % on `basic_bgp`
-  → FAIL**.
-
-The aggregate breach is **entirely** the `basic_bgp` row; removing
-it gives Δ = 0.00 % across the remaining nine queries. The structural
-shape (1 in 10 corpus queries) means **any non-trivial circuit will
-already have at least one hash and will see zero regression** from the
-readable rewrite. The bench corpus picked `basic_bgp` deliberately to
-cover the BGP-only case; in production query traffic it would be
-unusual to issue a `SELECT * WHERE { ?s ?p ?o }` against an
-unrestricted dataset.
-
-Recommended follow-up before merge -- the spec doc already
-anticipates the design choice; the implementation can be tuned
-without changing the surface:
-
-1. **Hoist the default-graph assertion out of `Bgp::evaluate`** so
-   it fires **once per query** (at the per-query `main.nr` level)
-   rather than once per pattern. The hash precomputation activates
-   regardless -- but only one hash, not one per pattern.
-2. Or, treat the graph position as **optional** at the `TriplePattern`
-   level: a `Maybe<PatternPos>` (round-2-style) that the transform
-   sets to `None` for default-graph queries. `Bgp::evaluate` would
-   then skip the `g_ok` line when the graph slot is unconstrained,
-   matching the monolithic surface's elision exactly.
-
-Either fix preserves the soundness anchor of the round-1 design
-(default-graph queries are still pinned to the default-graph
-sentinel via signed-dataset boundary semantics; see
-`spec/algebra.md` sec.10) while clearing the perf bar. The fix is
-self-contained inside `noir/lib/algebra/src/algebra/bgp.nr`
-(plus one site in each per-query `main.nr`) and does not require
-touching the monolithic emitter.
-
-This finding does not invalidate the readable rewrite -- it
-identifies a single optimisation pass that should land alongside or
-before the merge.
+- "total backend gates Δ within ±2 % across the corpus" -- **0.00 %**
+  -> **PASS**.
+- "no individual query worse than +5 %" -- max single-query Δ is
+  **0.00 %** -> **PASS**.
 
 ### Why is one `Δ ACIR = +8`?
 
@@ -190,20 +177,25 @@ the regression bar by the verification brief:
 | `blank_node` | Y | **Deferred** | Cross-triple `PatternPos` sharing for internal `__blank_*` variables. Readable surface today binds each `PatternPos.expected` to a single `Field`; sharing across two `Bgp` indices needs a synthetic private-witness slot per blank-node-as-internal-var. Mechanical; tracked. |
 | `ask_query` | Y | **Deferred** | `ASK` has no `Variables` fields -- needs a small `Ask<P>` wrapper. Mechanical; tracked. |
 
-## Why some Expression Width deltas are positive but small
+## Why some Expression Width deltas are still positive but tiny
 
-The original round-1 worked-example writeup explained: the readable
-surface adds **one** `consts::hash2`-based assertion per BGP triple
-(`bgp[i].terms[3].hash == default_graph_hash()`) that the monolithic
-surface elides for default-graph queries. Over the corpus the
-per-row `Expression Width` cost is consistent at ~83 width units --
-about 0.8 % of the headline width count. The constraint is a
-soundness symmetry: it makes `GraphCtx::evaluate` a no-op marker
-rather than a special-cased wrapper, and it keeps the Lean
-correspondence mechanical (one rule for all four positions instead
-of three-positions-plus-special-case).
+After the round-2 follow-up fix, the per-row Expression Width delta
+is at most **+10 units** (`filter_isiri`, 0.10 %) and **+1 unit** on
+five other rows. Three rows are 0.00 % (`basic_bgp`, `literal_value`,
+`filter_inequality`, `filter_comparison`, `filter_and_or`). The
+remaining +1-unit deltas come from the readable surface bracketing
+the operator tree as a tagged ADT-style composition (one extra
+identity assertion per evaluated `evaluate()` chain), which
+`bb gates` quantises away at the backend.
 
-The trade-off is documented in `spec/algebra-structs.md` sec.3.9.
+`filter_isiri`'s +10 width comes from the `IsIri { type_witness:
+hidden[0] as u8 }` `Field -> u8` cast, which allocates an 8-bit
+decomposition / range-check that the monolithic emit (which
+directly asserts `hidden[0] == 0` on the Field witness) does not
+need. A follow-up round-2 nicety is to add an `IsIriField` variant
+whose `evaluate` is `self.type_witness == 0` over a `Field` --
+closing the gap to 0 width at zero semantic cost. Filed informally;
+not gating.
 
 ## SPARQL 1.1 conformance verification
 
