@@ -1,0 +1,15 @@
+// Verbatim re-host of `transform/tests/snapshots/filter_lang.sparql.nr`.
+use dep::consts;
+use dep::types::Triple;
+
+pub(crate) type BGP = [Triple; 1];
+pub(crate) struct Variables {
+  pub(crate) s: Field,
+}
+
+pub(crate) type Hidden = [Field; 1];
+pub(crate) fn checkBinding(bgp: BGP, variables: Variables, hidden: Hidden) {
+  assert(variables.s == bgp[0].terms[0].hash);
+  assert(consts::hash2([0, consts::encode_string("http://example.org/label")]) == bgp[0].terms[1].hash);
+  assert(hidden[0] == consts::encode_string("en"));
+}

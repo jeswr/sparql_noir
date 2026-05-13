@@ -1,0 +1,10 @@
+[package]
+name = "monolithic_filter_comparison"
+type = "bin"
+authors = [""]
+# Verbatim re-host of `transform/tests/snapshots/filter_comparison.*`.
+
+[dependencies]
+consts = { path = "../../noir/lib/consts" }
+types = { path = "../../noir/lib/types" }
+utils = { path = "../../noir/lib/utils" }

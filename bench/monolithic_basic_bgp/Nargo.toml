@@ -1,0 +1,13 @@
+[package]
+name = "monolithic_basic_bgp"
+type = "bin"
+authors = [""]
+# Verbatim re-host of `transform/tests/snapshots/basic_bgp.*` for
+# side-by-side gate-count comparison against the readable rewrite at
+# `noir/bin/algebra_bench_basic_bgp/`. Pair-row in
+# `bench/readable-vs-monolithic.md`.
+
+[dependencies]
+consts = { path = "../../noir/lib/consts" }
+types = { path = "../../noir/lib/types" }
+utils = { path = "../../noir/lib/utils" }
