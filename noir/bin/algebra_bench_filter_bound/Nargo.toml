@@ -1,0 +1,15 @@
+[package]
+name = "algebra_bench_filter_bound"
+type = "bin"
+authors = [""]
+# Readable-surface counterpart of `bench/monolithic_filter_bound/`.
+# Bench-row in `bench/readable-vs-monolithic.md`.
+#
+# Query:
+#   SELECT ?s WHERE { ?s <ex:knows> ?o . FILTER (BOUND(?s)) }
+
+[dependencies]
+types = { path = "../../lib/types" }
+consts = { path = "../../lib/consts" }
+utils = { path = "../../lib/utils" }
+algebra = { path = "../../lib/algebra" }

@@ -1,0 +1,10 @@
+[package]
+name = "monolithic_filter_bound"
+type = "bin"
+authors = [""]
+# Verbatim re-host of `transform/tests/snapshots/filter_bound.*`.
+
+[dependencies]
+consts = { path = "../../noir/lib/consts" }
+types = { path = "../../noir/lib/types" }
+utils = { path = "../../noir/lib/utils" }
