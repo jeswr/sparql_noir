@@ -1,0 +1,10 @@
+[package]
+name = "monolithic_graph_var"
+type = "bin"
+authors = [""]
+# Verbatim re-host of `transform/tests/snapshots/graph_var.*`.
+
+[dependencies]
+consts = { path = "../../noir/lib/consts" }
+types = { path = "../../noir/lib/types" }
+utils = { path = "../../noir/lib/utils" }

@@ -1,0 +1,23 @@
+[package]
+name = "algebra_example"
+type = "bin"
+authors = [""]
+# Demonstrates the readable per-operator algebra surface from
+# `noir/lib/algebra`. Matches the monolithic snapshot
+# `transform/tests/snapshots/filter_and_or.*` for the query:
+#
+#   PREFIX ex: <http://example.org/>
+#   PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+#   SELECT ?s ?o WHERE {
+#     ?s ex:age ?o .
+#     FILTER ((?o > "18"^^xsd:integer) && (?o < "30"^^xsd:integer))
+#   }
+#
+# Side-by-side gate-count comparison lives in
+# `bench/readable-vs-monolithic.md`.
+
+[dependencies]
+types = { path = "../../lib/types" }
+consts = { path = "../../lib/consts" }
+utils = { path = "../../lib/utils" }
+algebra = { path = "../../lib/algebra" }
